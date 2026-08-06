@@ -44,40 +44,48 @@ export default function LoginPage() {
         return;
       }
 
-      // Step 2: Check if super admin
+      // Step 2: Check platform_admins
+      // Use maybeSingle() instead of single()
+      // to avoid errors when no record found
       const { data: platformAdmin } = await supabase
         .from('platform_admins')
         .select('id, role, full_name, is_active')
-        .eq('email', email.trim())
+        .eq('email', data.user.email ?? '')
         .eq('is_active', true)
-        .single();
+        .maybeSingle();
 
       if (platformAdmin) {
-        // Super admin - go to super admin dashboard
         router.push('/dashboard');
         return;
       }
 
-      // Step 3: Check if school admin or teacher
+      // Step 3: Check school_users
       const { data: schoolUser } = await supabase
         .from('school_users')
-        .select(`
-          id,
-          school_id,
-          status,
-          roles ( name )
-        `)
+        .select('id, school_id, status')
         .eq('user_id', data.user.id)
         .eq('status', 'active')
-        .single();
+        .maybeSingle();
 
       if (schoolUser) {
-        // School staff - go to school dashboard
         router.push('/school/dashboard');
         return;
       }
 
-      // No matching account found
+      // Step 4: Check profiles table as fallback
+      // Maybe they are in profiles but not school_users
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('id, full_name, school_id')
+        .eq('id', data.user.id)
+        .maybeSingle();
+
+      if (profile) {
+        router.push('/school/dashboard');
+        return;
+      }
+
+      // No matching account
       setError(
         'Your account does not have dashboard access. ' +
         'Contact your administrator.'
@@ -89,6 +97,27 @@ export default function LoginPage() {
       setError('Something went wrong. Please try again.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleForgotPassword() {
+    if (!email) {
+      setError('Please enter your email address first');
+      return;
+    }
+
+    const { error } = await supabase.auth.resetPasswordForEmail(
+      email.trim(),
+      {
+        redirectTo: `${window.location.origin}/reset-password`,
+      }
+    );
+
+    if (error) {
+      setError('Could not send reset email. Please try again.');
+    } else {
+      setError('');
+      alert(`Password reset email sent to ${email}`);
     }
   }
 
@@ -171,7 +200,9 @@ export default function LoginPage() {
                     >
                       <circle
                         className="opacity-25"
-                        cx="12" cy="12" r="10"
+                        cx="12"
+                        cy="12"
+                        r="10"
                         stroke="currentColor"
                         strokeWidth="4"
                       />
@@ -189,47 +220,23 @@ export default function LoginPage() {
               </Button>
             </form>
 
-            {/* Help text */}
-            <div className="mt-6 text-center">
-              <p className="text-sm text-gray-500">
-                Forgot your password?{' '}
-                <button
-                  type="button"
-                  onClick={handleForgotPassword}
-                  className="text-blue-600 hover:underline"
-                >
-                  Reset it here
-                </button>
-              </p>
+            {/* Forgot password */}
+            <div className="mt-4 text-center">
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                className="text-sm text-blue-600 hover:underline"
+              >
+                Forgot your password?
+              </button>
             </div>
           </CardContent>
         </Card>
 
         <p className="text-center text-xs text-gray-400 mt-6">
-          © 2025 XtopEdu. All rights reserved.
+          © 2026 XtopEdu. All rights reserved.
         </p>
       </div>
     </div>
   );
-
-  async function handleForgotPassword() {
-    if (!email) {
-      setError('Please enter your email address first');
-      return;
-    }
-
-    const { error } = await supabase.auth.resetPasswordForEmail(
-      email.trim(),
-      {
-        redirectTo: `${window.location.origin}/reset-password`,
-      }
-    );
-
-    if (error) {
-      setError('Could not send reset email. Please try again.');
-    } else {
-      setError('');
-      alert(`Password reset email sent to ${email}`);
-    }
-  }
 }
