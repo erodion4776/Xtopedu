@@ -9,12 +9,14 @@ import { ParentService } from '../services/parent.service.ts';
 import { AdminService } from '../services/admin.service.ts';
 import { getSupabase } from '../supabase.ts';
 
-// ── Parent flows ─────────────────────────────────────────────────────────
+// ── Parent flows ──────────────────────────────────────────────
 import {
   showMainMenu,
   showNewUserOptions,
   showInviteCodePrompt,
   showProfile,
+  showAlertPlans,
+  handlePlanSelect,
 } from './menu.ts';
 
 import {
@@ -37,7 +39,7 @@ import {
   handleStudentSelect as pickupStudentSelect,
 } from './pickup.ts';
 
-// ── Admin flows ───────────────────────────────────────────────────────────
+// ── Admin flows ───────────────────────────────────────────────
 import {
   showAdminMenu,
   showAdminHelp,
@@ -102,7 +104,7 @@ import {
   handleSendReceipt,
 } from './admin/admin.receipts.ts';
 
-// ── Onboarding ────────────────────────────────────────────────────────────
+// ── Onboarding ────────────────────────────────────────────────
 import {
   getOnboardingSession,
   handleOnboardingInput,
@@ -112,13 +114,13 @@ import {
 
 import type { IncomingMessage, BotSession } from '../types.ts';
 
-// ─── Services ──────────────────────────────────────────────────────────────
+// ─── Services ──────────────────────────────────────────────────
 const sessions = new SessionService();
 const parentSvc = new ParentService();
 const adminSvc = new AdminService();
 const db = getSupabase();
 
-// ─── Reset keywords ────────────────────────────────────────────────────────
+// ─── Reset keywords ────────────────────────────────────────────
 const RESET_KEYWORDS = new Set([
   'hi', 'hello', 'hey', 'start',
   'menu', 'home', 'restart', '00',
@@ -126,24 +128,21 @@ const RESET_KEYWORDS = new Set([
 
 // ============================================================
 // MAIN ENTRY POINT
-// Called from whatsapp-webhook/index.ts
 // ============================================================
 
 export async function handleMessage(
   message: IncomingMessage
 ): Promise<void> {
   const phone = message.from;
-
-  // Extract what the user sent
   const rawText = extractRawText(message);
   const input = extractInput(message);
 
   console.log(
-    `[Bot] ${phone} | type=${message.type} | input="${input.substring(0, 50)}"`
+    `[Bot] ${phone} | type=${message.type} | ` +
+    `input="${input.substring(0, 50)}"`
   );
 
-  // ── Check for staff invitation token first ─────────────────────────────
-  // 8-character alphanumeric code (e.g. ABC12345)
+  // ── Check for staff invitation token ──────────────────────
   if (
     message.type === 'text' &&
     /^[A-Z0-9]{8}$/i.test(rawText.trim())
@@ -157,21 +156,17 @@ export async function handleMessage(
     return;
   }
 
-  // ── Check active onboarding session ────────────────────────────────────
+  // ── Check active onboarding session ───────────────────────
   const obSession = getOnboardingSession(phone);
   if (obSession) {
     const obWa = new WhatsApp();
     const handled = await handleOnboardingInput(
-      phone,
-      input,
-      rawText,
-      obWa,
-      obSession.source
+      phone, input, rawText, obWa, obSession.source
     );
     if (handled) return;
   }
 
-  // ── Handle document uploads (CSV files) ────────────────────────────────
+  // ── Handle document uploads (CSV files) ───────────────────
   if (message.type === 'document') {
     const session = await sessions.get(phone);
     if (session && session.role !== 'parent') {
@@ -181,14 +176,15 @@ export async function handleMessage(
       const wa = new WhatsApp();
       await wa.text(
         phone,
-        `I can only handle text messages and menu selections.\n\n` +
+        `I can only handle text messages,\n` +
+        `menu selections and CSV files.\n\n` +
         `Type *menu* to get started.`
       );
     }
     return;
   }
 
-  // ── Handle start onboarding button ────────────────────────────────────
+  // ── Handle start onboarding button ────────────────────────
   if (input === 'start_school_onboarding') {
     const wa = new WhatsApp();
     startOnboardingSession(phone, 'main');
@@ -201,20 +197,20 @@ export async function handleMessage(
     return;
   }
 
-  // ── Handle invite code prompt ─────────────────────────────────────────
+  // ── Handle invite code prompt ──────────────────────────────
   if (input === 'enter_invite_code') {
     const wa = new WhatsApp();
     await showInviteCodePrompt(phone, wa);
     return;
   }
 
-  // ── Reset keywords ────────────────────────────────────────────────────
+  // ── Reset keywords ─────────────────────────────────────────
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(phone, message);
     return;
   }
 
-  // ── Get existing session ──────────────────────────────────────────────
+  // ── Get existing session ───────────────────────────────────
   const session = await sessions.get(phone);
 
   if (!session) {
@@ -228,7 +224,7 @@ export async function handleMessage(
   // Get WhatsApp client
   const wa = new WhatsApp(session.waAccount);
 
-  // ── Global shortcuts ──────────────────────────────────────────────────
+  // ── Global shortcuts ───────────────────────────────────────
   if (input === '0' || input === 'back') {
     if (session.role === 'parent') {
       await showMainMenu(phone, session, wa);
@@ -247,7 +243,7 @@ export async function handleMessage(
     return;
   }
 
-  // ── Route by role ─────────────────────────────────────────────────────
+  // ── Route by role ──────────────────────────────────────────
   if (session.role === 'parent') {
     await routeParent(phone, session, input, rawText, wa);
   } else {
@@ -268,12 +264,12 @@ async function routeParent(
 ): Promise<void> {
   switch (session.state) {
 
-    // ── Main menu ──────────────────────────────────────────────────────
+    // ── Main menu ────────────────────────────────────────────
     case 'MAIN_MENU':
       await handleParentMainMenu(phone, session, input, wa);
       break;
 
-    // ── Attendance ─────────────────────────────────────────────────────
+    // ── Attendance ───────────────────────────────────────────
     case 'ATTENDANCE_SELECT_STUDENT':
       await attStudentSelect(phone, session, input, wa);
       break;
@@ -282,7 +278,7 @@ async function routeParent(
       await handleAttendanceOption(phone, session, input, wa);
       break;
 
-    // ── Fees ───────────────────────────────────────────────────────────
+    // ── Fees ─────────────────────────────────────────────────
     case 'FEES_SELECT_STUDENT':
       await feesStudentSelect(phone, session, input, wa);
       break;
@@ -303,26 +299,32 @@ async function routeParent(
       await handlePaymentPending(phone, session, wa);
       break;
 
-    // ── Pickup ─────────────────────────────────────────────────────────
+    // ── Pickup ───────────────────────────────────────────────
     case 'PICKUP_SELECT_STUDENT':
       await pickupStudentSelect(phone, session, input, wa);
       break;
 
     case 'PICKUP_VIEW':
-      if (input === 'main_menu') {
-        await showMainMenu(phone, session, wa);
+      await showMainMenu(phone, session, wa);
+      break;
+
+    // ── Alert Plans ──────────────────────────────────────────
+    // NEW: Handle plan selection state
+    case 'ALERT_PLAN_SELECT':
+      if (input.startsWith('plan_')) {
+        await handlePlanSelect(phone, session, input, wa);
       } else {
-        await showMainMenu(phone, session, wa);
+        await showAlertPlans(phone, session, wa);
       }
       break;
 
-    // ── Default ────────────────────────────────────────────────────────
+    // ── Default ──────────────────────────────────────────────
     default:
       await showMainMenu(phone, session, wa);
   }
 }
 
-// ─── Handle parent main menu selections ───────────────────────────────────
+// ─── Handle parent main menu selections ───────────────────────
 async function handleParentMainMenu(
   phone: string,
   session: BotSession,
@@ -346,6 +348,13 @@ async function handleParentMainMenu(
       await showProfile(phone, session, wa);
       break;
 
+    // ── NEW: Alert plan management ───────────────────────────
+    case 'menu_alerts':
+      await showAlertPlans(phone, session, wa);
+      // Update state so plan selection works
+      await sessions.setState(phone, 'ALERT_PLAN_SELECT');
+      break;
+
     case 'menu_help':
       await wa.text(
         phone,
@@ -358,13 +367,19 @@ async function handleParentMainMenu(
         `📊 View term attendance summary\n` +
         `💰 View & pay school fees\n` +
         `🧾 Receive payment receipts\n` +
-        `🚗 View pickup contacts\n\n` +
+        `🚗 View pickup contacts\n` +
+        `🔔 Manage your alert plan\n\n` +
+        `📌 *Alert Plans:*\n` +
+        `📦 Basic (FREE) - Check yourself\n` +
+        `🔔 Standard (₦200) - Absent alerts\n` +
+        `🚀 Premium (₦400) - Full alerts\n` +
+        `👨‍👩‍👧 Family (₦600) - 2+ children\n\n` +
         `📞 *Need help?*\n` +
-        `Contact your school admin office.`
+        `Contact your school admin.`
       );
       break;
 
-    // Handle keyword shortcuts
+    // ── Keyword shortcuts ────────────────────────────────────
     case 'fees':
     case 'fee':
       await startFees(phone, session, wa);
@@ -373,6 +388,13 @@ async function handleParentMainMenu(
     case 'attendance':
     case 'att':
       await startAttendance(phone, session, wa);
+      break;
+
+    case 'alerts':
+    case 'plan':
+    case 'upgrade':
+      await showAlertPlans(phone, session, wa);
+      await sessions.setState(phone, 'ALERT_PLAN_SELECT');
       break;
 
     default:
@@ -393,12 +415,12 @@ async function routeAdmin(
 ): Promise<void> {
   switch (session.state) {
 
-    // ── Admin main menu ────────────────────────────────────────────────
+    // ── Admin main menu ──────────────────────────────────────
     case 'ADMIN_MAIN_MENU':
       await handleAdminMainMenu(phone, session, input, wa);
       break;
 
-    // ── Attendance ─────────────────────────────────────────────────────
+    // ── Attendance ───────────────────────────────────────────
     case 'ADMIN_ATTENDANCE_MENU':
       await handleAdminAttMenu(phone, session, input, wa);
       break;
@@ -411,13 +433,12 @@ async function routeAdmin(
       await handleMarking(phone, session, input, wa);
       break;
 
-    // ── Fees ───────────────────────────────────────────────────────────
+    // ── Fees ─────────────────────────────────────────────────
     case 'ADMIN_FEES_MENU':
       await handleAdminFeesMenu(phone, session, input, wa);
       break;
 
     case 'ADMIN_STUDENTS_SEARCH':
-      // Text input for student search
       await handleStudentSearch(phone, session, rawText, wa);
       break;
 
@@ -451,7 +472,7 @@ async function routeAdmin(
       }
       break;
 
-    // ── Staff ──────────────────────────────────────────────────────────
+    // ── Staff ────────────────────────────────────────────────
     case 'ADMIN_STAFF_MENU':
       await handleStaffMenu(phone, session, input, wa);
       break;
@@ -468,7 +489,7 @@ async function routeAdmin(
       await handleAddStaffRole(phone, session, input, wa);
       break;
 
-    // ── Broadcast ──────────────────────────────────────────────────────
+    // ── Broadcast ────────────────────────────────────────────
     case 'ADMIN_BROADCAST_MENU':
       if (input.startsWith('bcast_class_')) {
         await handleBroadcastTarget(phone, session, input, wa);
@@ -478,7 +499,6 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_BROADCAST_COMPOSE':
-      // Raw text input for the message
       await handleBroadcastCompose(phone, session, rawText, wa);
       break;
 
@@ -486,19 +506,16 @@ async function routeAdmin(
       await handleBroadcastConfirm(phone, session, input, wa);
       break;
 
-    // ── Upload ─────────────────────────────────────────────────────────
+    // ── Upload ───────────────────────────────────────────────
     case 'ADMIN_UPLOAD_MENU':
       await handleUploadMenu(phone, session, input, wa);
       break;
 
     case 'ADMIN_AWAITING_CSV':
-      // Waiting for CSV document
-      // Document handled at top of handleMessage
-      // If they send text here, remind them
       await wa.text(
         phone,
-        `📤 Please send a *CSV file* as\n` +
-        `an attachment.\n\n` +
+        `📤 Please send a *CSV file*\n` +
+        `as an attachment.\n\n` +
         `Type *0* to go back.`
       );
       break;
@@ -507,7 +524,7 @@ async function routeAdmin(
       await handleConfirmUpload(phone, session, input, wa);
       break;
 
-    // ── Reports ────────────────────────────────────────────────────────
+    // ── Reports ──────────────────────────────────────────────
     case 'ADMIN_REPORTS_MENU':
       if (input.startsWith('report_term_')) {
         await handleReportTermSelect(phone, session, input, wa);
@@ -522,25 +539,24 @@ async function routeAdmin(
 
     case 'ADMIN_REPORT_SEARCH_STUDENT':
       if (input.startsWith('student_report_')) {
-        await handleStudentReportSelect(phone, session, input, wa);
+        await handleStudentReportSelect(
+          phone, session, input, wa
+        );
       } else {
-        // Text input for student search
         await handleStudentReportSearch(
-          phone,
-          session,
-          rawText,
-          wa
+          phone, session, rawText, wa
         );
       }
       break;
 
-    // ── Receipts ───────────────────────────────────────────────────────
+    // ── Receipts ─────────────────────────────────────────────
     case 'ADMIN_RECEIPT_MENU':
-      await handleReceiptMenu(phone, session, input, rawText, wa);
+      await handleReceiptMenu(
+        phone, session, input, rawText, wa
+      );
       break;
 
     case 'ADMIN_RECEIPT_SEARCH':
-      // Text input for receipt search
       await handleReceiptSearch(phone, session, rawText, wa);
       break;
 
@@ -554,13 +570,13 @@ async function routeAdmin(
       }
       break;
 
-    // ── Default ────────────────────────────────────────────────────────
+    // ── Default ──────────────────────────────────────────────
     default:
       await showAdminMenu(phone, session, wa);
   }
 }
 
-// ─── Handle admin main menu selections ────────────────────────────────────
+// ─── Handle admin main menu selections ────────────────────────
 async function handleAdminMainMenu(
   phone: string,
   session: BotSession,
@@ -581,8 +597,7 @@ async function handleAdminMainMenu(
         phone,
         `🔍 *Search Students*\n\n` +
         `Type a student name or\n` +
-        `admission number:\n\n` +
-        `_Example: John or ADM/001_`
+        `admission number:`
       );
       await sessions.setState(phone, 'ADMIN_STUDENTS_SEARCH');
       break;
@@ -626,7 +641,6 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // RESET HANDLER
-// Identifies who the user is and creates/resets their session
 // ============================================================
 
 async function handleReset(
@@ -636,28 +650,25 @@ async function handleReset(
   const wa = new WhatsApp();
   const formatted = new ParentService().formatPhone(phone);
 
-  // ── 1. Check if platform super admin ─────────────────────────────────
+  // ── 1. Check platform super admin ─────────────────────────
   const { data: platformAdmin } = await db
     .from('platform_admins')
-    .select('id, full_name, phone, whatsapp_number, is_active, role')
-    .or(
-      `phone.eq.${formatted},whatsapp_number.eq.${formatted}`
+    .select(
+      'id, full_name, phone, whatsapp_number, is_active, role'
     )
+    .or(`phone.eq.${formatted},whatsapp_number.eq.${formatted}`)
     .eq('is_active', true)
     .single();
 
   if (platformAdmin) {
-    // Update last login
     await db
       .from('platform_admins')
       .update({ last_login: new Date().toISOString() })
       .eq('id', platformAdmin.id);
 
-    // Route to super admin handler
     const { handleSuperAdminMessage } = await import(
       './superadmin/super.handler.ts'
     );
-
     await handleSuperAdminMessage(message, {
       id: platformAdmin.id,
       full_name: platformAdmin.full_name,
@@ -665,7 +676,7 @@ async function handleReset(
     return;
   }
 
-  // ── 2. Check if registered parent ────────────────────────────────────
+  // ── 2. Check registered parent ────────────────────────────
   const parent = await parentSvc.findByPhone(phone);
 
   if (parent) {
@@ -674,30 +685,28 @@ async function handleReset(
       parentSvc.getWaAccount(parent.school_id),
     ]);
 
-    // Ensure contact and conversation records
-    const contactId = await parentSvc.ensureContact(parent, phone);
+    const contactId = await parentSvc.ensureContact(
+      parent, phone
+    );
     if (contactId) {
       await parentSvc.ensureConversation(
-        contactId,
-        parent.school_id
+        contactId, parent.school_id
       );
     }
 
-    // Create parent session
+    // Ensure parent has a subscription record
+    await ensureParentSubscription(parent.id, parent.school_id);
+
     const session = await sessions.createParentSession(
-      phone,
-      parent,
-      students,
-      waAccount
+      phone, parent, students, waAccount
     );
 
-    // Use school WhatsApp account
     const schoolWa = new WhatsApp(waAccount);
     await showMainMenu(phone, session, schoolWa);
     return;
   }
 
-  // ── 3. Check if registered staff/admin ───────────────────────────────
+  // ── 3. Check registered staff/admin ───────────────────────
   const schoolUser = await adminSvc.findStaffByPhone(phone);
 
   if (schoolUser) {
@@ -720,12 +729,8 @@ async function handleReset(
 
     const role = isAdmin ? 'admin' : 'teacher';
 
-    // Create admin session
     const session = await sessions.createAdminSession(
-      phone,
-      schoolUser,
-      waAccount,
-      role
+      phone, schoolUser, waAccount, role
     );
 
     const schoolWa = new WhatsApp(waAccount);
@@ -733,20 +738,56 @@ async function handleReset(
     return;
   }
 
-  // ── 4. Unknown user - show options ───────────────────────────────────
+  // ── 4. Unknown user ───────────────────────────────────────
   await showNewUserOptions(phone, wa);
 }
 
+// ─── Ensure parent has subscription record ─────────────────────
+async function ensureParentSubscription(
+  parentId: string,
+  schoolId: string
+): Promise<void> {
+  try {
+    const { data: existing } = await db
+      .from('parent_subscriptions')
+      .select('id')
+      .eq('parent_id', parentId)
+      .eq('school_id', schoolId)
+      .single();
+
+    if (existing) return;
+
+    // Create default Basic subscription
+    const { data: basicPlan } = await db
+      .from('alert_plans')
+      .select('id')
+      .eq('slug', 'basic')
+      .single();
+
+    await db.from('parent_subscriptions').insert({
+      parent_id: parentId,
+      school_id: schoolId,
+      plan_id: basicPlan?.id ?? null,
+      plan_slug: 'basic',
+      billing_type: 'monthly',
+      amount_paid: 0,
+      status: 'active',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  } catch {
+    // Non critical - don't throw
+  }
+}
+
 // ============================================================
-// INPUT EXTRACTION HELPERS
+// INPUT HELPERS
 // ============================================================
 
-// Extract button/list ID or text from message
 export function extractInput(message: IncomingMessage): string {
   if (message.type === 'text') {
     return message.text?.body?.trim().toLowerCase() ?? '';
   }
-
   if (message.type === 'interactive') {
     return (
       message.interactive?.button_reply?.id?.toLowerCase() ??
@@ -754,12 +795,12 @@ export function extractInput(message: IncomingMessage): string {
       ''
     );
   }
-
   return '';
 }
 
-// Extract raw text (preserves case, for name/message inputs)
-export function extractRawText(message: IncomingMessage): string {
+export function extractRawText(
+  message: IncomingMessage
+): string {
   if (message.type === 'text') {
     return message.text?.body?.trim() ?? '';
   }
