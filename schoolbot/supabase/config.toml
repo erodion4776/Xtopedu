@@ -1,0 +1,52 @@
+# Supabase Config
+project_id = "your-project-ref-here"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+jwt_expiry = 3600
+enable_signup = true
+
+[functions]
+verify_jwt = false
+
+[functions.whatsapp-webhook]
+verify_jwt = false
+
+[functions.marketing-webhook]
+verify_jwt = false
+
+[functions.payment-callback]
+verify_jwt = false
+
+[functions.attendance-notify]
+verify_jwt = false
+
+[functions.fee-reminder-cron]
+verify_jwt = false
+
+[functions.super-admin-api]
+verify_jwt = false
