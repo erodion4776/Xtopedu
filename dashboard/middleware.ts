@@ -24,15 +24,16 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Check for Supabase session cookie
-  // Supabase stores auth in cookies
-  const hasSession =
-    request.cookies.has('sb-access-token') ||
-    request.cookies.has('sb-refresh-token') ||
-    // Supabase v2 cookie format
-    Array.from(request.cookies.keys()).some((key) =>
-      key.startsWith('sb-') && key.endsWith('-auth-token')
-    );
+  // Check for Supabase session cookies
+  const allCookies = request.cookies.getAll();
+
+  const hasSession = allCookies.some(
+    (cookie) =>
+      cookie.name === 'sb-access-token' ||
+      cookie.name === 'sb-refresh-token' ||
+      (cookie.name.startsWith('sb-') &&
+        cookie.name.endsWith('-auth-token'))
+  );
 
   // No session - redirect to login
   if (!hasSession) {
