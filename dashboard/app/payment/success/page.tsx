@@ -1,8 +1,10 @@
+'use client';
+
 import { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { CheckCircle } from 'lucide-react';
 
 function SuccessContent() {
-  const { useSearchParams } = require('next/navigation');
   const params = useSearchParams();
   const ref = params.get('ref');
 
@@ -34,7 +36,7 @@ export default function PaymentSuccessPage() {
         fallback={
           <div className="text-center">
             <CheckCircle className="h-20 w-20 text-green-500 mx-auto mb-4" />
-            <p>Payment Successful!</p>
+            <p className="text-gray-600">Loading...</p>
           </div>
         }
       >
