@@ -1,0 +1,666 @@
+// ============================================================
+// SCHOOLBOT - ADMIN BULK UPLOAD FLOW
+// supabase/functions/_shared/bot/admin/admin.uploads.ts
+// ============================================================
+
+import { WhatsApp } from '../../whatsapp.ts';
+import { SessionService } from '../../session.ts';
+import { CSVService } from '../../csv.service.ts';
+import { showAdminMenu } from './admin.menu.ts';
+import { getSupabase } from '../../supabase.ts';
+import type { BotSession, IncomingMessage } from '../../types.ts';
+
+const sessions = new SessionService();
+const csvSvc = new CSVService();
+const db = getSupabase();
+
+// ─── Start bulk upload flow ────────────────────────────────────────────────
+export async function startBulkUpload(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  await wa.list(
+    phone,
+    `📤 Bulk Student Upload`,
+    `Upload multiple students at once\n` +
+    `using a CSV spreadsheet file.\n\n` +
+    `*How it works:*\n` +
+    `1️⃣ Download the CSV template\n` +
+    `2️⃣ Fill in student details\n` +
+    `3️⃣ Send the CSV file here\n` +
+    `4️⃣ Students imported automatically!\n\n` +
+    `*Supports:*\n` +
+    `✅ New students\n` +
+    `✅ Update existing students\n` +
+    `✅ Auto-link parents`,
+    `Classes must exist before uploading`,
+    `📤 Upload Options`,
+    [
+      {
+        title: 'Get Started',
+        rows: [
+          {
+            id: 'download_template',
+            title: '📥 Get CSV Template',
+            description: 'Download the template format',
+          },
+          {
+            id: 'upload_instructions',
+            title: '📖 How to Fill Template',
+            description: 'Step by step guide',
+          },
+          {
+            id: 'view_classes',
+            title: '📚 View My Classes',
+            description: 'See available class names to use',
+          },
+        ],
+      },
+      {
+        title: 'History',
+        rows: [
+          {
+            id: 'upload_history',
+            title: '📋 Upload History',
+            description: 'View previous uploads',
+          },
+        ],
+      },
+    ]
+  );
+
+  await sessions.setState(phone, 'ADMIN_UPLOAD_MENU');
+}
+
+// ─── Handle upload menu selections ────────────────────────────────────────
+export async function handleUploadMenu(
+  phone: string,
+  session: BotSession,
+  input: string,
+  wa: WhatsApp
+): Promise<void> {
+  switch (input) {
+    case 'download_template':
+      await sendCSVTemplate(phone, session, wa);
+      break;
+
+    case 'upload_instructions':
+      await showUploadInstructions(phone, session, wa);
+      break;
+
+    case 'view_classes':
+      await showAvailableClasses(phone, session, wa);
+      break;
+
+    case 'upload_history':
+      await showUploadHistory(phone, session, wa);
+      break;
+
+    // Retry after seeing instructions
+    case 'ready_to_upload':
+      await promptForCSV(phone, session, wa);
+      break;
+
+    default:
+      await startBulkUpload(phone, session, wa);
+  }
+}
+
+// ─── Send CSV template as downloadable link ────────────────────────────────
+async function sendCSVTemplate(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  // Generate template content
+  const template = csvSvc.generateTemplate();
+
+  try {
+    // Upload template to Supabase Storage
+    const fileName = `templates/student_template_${session.school_id}.csv`;
+
+    await db.storage
+      .from('school-files')
+      .upload(
+        fileName,
+        new TextEncoder().encode(template),
+        {
+          contentType: 'text/csv',
+          upsert: true,
+        }
+      );
+
+    // Get public URL
+    const { data: urlData } = db.storage
+      .from('school-files')
+      .getPublicUrl(fileName);
+
+    await wa.text(
+      phone,
+      `📥 *CSV Template Ready!*\n\n` +
+      `Download your template here:\n` +
+      `${urlData.publicUrl}\n\n` +
+      `*Required Columns:*\n` +
+      `• first_name *(required)*\n` +
+      `• last_name *(required)*\n` +
+      `• admission_number *(required)*\n` +
+      `• class_name *(required)*\n\n` +
+      `*Optional Columns:*\n` +
+      `• class_arm (A, B, C)\n` +
+      `• gender (Male/Female)\n` +
+      `• date_of_birth (DD/MM/YYYY)\n` +
+      `• parent_name\n` +
+      `• parent_phone (08012345678)\n` +
+      `• parent_email\n` +
+      `• blood_group (A+, O-, etc)\n` +
+      `• medical_notes\n\n` +
+      `After filling, *send the CSV file\n` +
+      `to this chat* and I will import\n` +
+      `your students! 📤`
+    );
+
+    await wa.buttons(
+      phone,
+      `Need help filling the template?`,
+      [
+        { id: 'upload_instructions', title: '📖 Instructions' },
+        { id: 'view_classes', title: '📚 View Classes' },
+      ]
+    );
+
+    // Set state to awaiting CSV
+    await sessions.setState(phone, 'ADMIN_AWAITING_CSV');
+  } catch (err) {
+    console.error('[Upload] template error:', err);
+
+    // Fallback - show template as text
+    await wa.text(
+      phone,
+      `📥 *CSV Template*\n\n` +
+      `Copy this header row into Excel\n` +
+      `or Google Sheets:\n\n` +
+      `\`first_name,last_name,admission_number,class_name,class_arm,gender,date_of_birth,parent_name,parent_phone,parent_email,blood_group,medical_notes\`\n\n` +
+      `Fill in student data below the\n` +
+      `header row, save as CSV and\n` +
+      `send the file here.`
+    );
+
+    await sessions.setState(phone, 'ADMIN_AWAITING_CSV');
+  }
+}
+
+// ─── Show upload instructions ──────────────────────────────────────────────
+async function showUploadInstructions(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  await wa.text(
+    phone,
+    `📖 *How to Upload Students*\n\n` +
+    `*Step 1:* Download the CSV template\n\n` +
+    `*Step 2:* Open in Excel or\n` +
+    `Google Sheets\n\n` +
+    `*Step 3:* Fill in student details\n` +
+    `one row per student\n\n` +
+    `*Step 4:* Save/Export as CSV\n` +
+    `(File → Save As → CSV format)\n\n` +
+    `*Step 5:* Come back here and\n` +
+    `send the CSV file as attachment\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `⚠️ *Important Rules:*\n\n` +
+    `• Do NOT change column headers\n` +
+    `• One student per row\n` +
+    `• Class names must match exactly\n` +
+    `  (e.g., JSS 1 not JSS1)\n` +
+    `• Date format: DD/MM/YYYY\n` +
+    `• Phone: 08012345678 format\n` +
+    `━━━━━━━━━━━━━━━━`
+  );
+
+  await wa.buttons(
+    phone,
+    `Ready to upload?`,
+    [
+      { id: 'download_template', title: '📥 Get Template' },
+      { id: 'view_classes', title: '📚 View Classes' },
+      { id: 'MAIN_MENU', title: '🏠 Menu' },
+    ]
+  );
+}
+
+// ─── Show available class names ────────────────────────────────────────────
+async function showAvailableClasses(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  const { data: classes } = await db
+    .from('classes')
+    .select('name, level, class_arms( name )')
+    .eq('school_id', session.school_id)
+    .order('level', { ascending: true });
+
+  if (!classes?.length) {
+    await wa.buttons(
+      phone,
+      `📚 *No Classes Found!*\n\n` +
+      `You need to add classes before\n` +
+      `uploading students.\n\n` +
+      `Go to Admin Menu → Settings\n` +
+      `to add your classes first.`,
+      [{ id: 'MAIN_MENU', title: '🏠 Menu' }]
+    );
+    return;
+  }
+
+  // Build class list
+  const classList = classes
+    .map((cls) => {
+      const arms = (
+        cls.class_arms as Array<{ name: string }> | null
+      )
+        ?.map((a) => a.name)
+        .join(', ');
+      return (
+        `📚 *${cls.name}*` +
+        (arms ? ` — Arms: ${arms}` : '')
+      );
+    })
+    .join('\n');
+
+  await wa.buttons(
+    phone,
+    `📚 *Your Classes*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `Use these *exact names* in your\n` +
+    `CSV class_name column:\n\n` +
+    `${classList}\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `_Copy the class name exactly\n` +
+    `as shown above_`,
+    [
+      { id: 'download_template', title: '📥 Get Template' },
+      { id: 'MAIN_MENU', title: '🏠 Menu' },
+    ]
+  );
+}
+
+// ─── Prompt admin to send CSV file ────────────────────────────────────────
+async function promptForCSV(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  await wa.text(
+    phone,
+    `📤 *Ready to Upload!*\n\n` +
+    `Send your CSV file as an\n` +
+    `attachment to this chat.\n\n` +
+    `Make sure the file:\n` +
+    `• Has .csv extension\n` +
+    `• Uses the correct template\n` +
+    `• Has correct class names\n\n` +
+    `_Waiting for your CSV file..._`
+  );
+
+  await sessions.setState(phone, 'ADMIN_AWAITING_CSV');
+}
+
+// ─── Handle incoming CSV document ─────────────────────────────────────────
+// Called from main handler when message type is 'document'
+export async function handleCSVDocument(
+  phone: string,
+  session: BotSession,
+  message: IncomingMessage,
+  wa: WhatsApp
+): Promise<void> {
+  // Check we are in the right state
+  if (session.state !== 'ADMIN_AWAITING_CSV') {
+    await wa.text(
+      phone,
+      `📤 To upload students, go to:\n\n` +
+      `*Admin Menu → Upload Students*\n\n` +
+      `Then send your CSV file.`
+    );
+    return;
+  }
+
+  const doc = message.document;
+
+  if (!doc) {
+    await wa.text(phone, `❌ No document found. Please send a CSV file.`);
+    return;
+  }
+
+  // Validate file type
+  const filename = doc.filename ?? '';
+  const mimeType = doc.mime_type ?? '';
+  const isCSV =
+    filename.toLowerCase().endsWith('.csv') ||
+    mimeType.includes('csv') ||
+    mimeType.includes('text/plain');
+
+  if (!isCSV) {
+    await wa.buttons(
+      phone,
+      `❌ *Wrong File Type!*\n\n` +
+      `Please send a *.csv* file.\n\n` +
+      `Steps:\n` +
+      `1. Open your spreadsheet\n` +
+      `2. File → Save As\n` +
+      `3. Choose CSV format\n` +
+      `4. Send the CSV file here`,
+      [
+        { id: 'download_template', title: '📥 Get Template' },
+        { id: 'upload_instructions', title: '📖 Help' },
+      ]
+    );
+    return;
+  }
+
+  await wa.text(
+    phone,
+    `⏳ *Processing your CSV file...*\n\n` +
+    `Please wait a moment.`
+  );
+
+  try {
+    // Download the CSV file from WhatsApp
+    const csvText = await wa.downloadMedia(doc.id);
+
+    if (!csvText) {
+      await wa.text(
+        phone,
+        `❌ Could not read the file.\n\n` +
+        `Please try sending it again.`
+      );
+      return;
+    }
+
+    // Parse CSV
+    const { rows, errors: parseErrors } = csvSvc.parseCSV(csvText);
+
+    // CSV format errors
+    if (parseErrors.length > 0) {
+      await wa.buttons(
+        phone,
+        `❌ *CSV Format Error*\n\n` +
+        `${parseErrors.join('\n')}\n\n` +
+        `Please fix and try again.`,
+        [
+          { id: 'download_template', title: '📥 Get Template' },
+          { id: 'upload_instructions', title: '📖 Help' },
+        ]
+      );
+      return;
+    }
+
+    // No data rows
+    if (!rows.length) {
+      await wa.text(
+        phone,
+        `❌ *Empty file!*\n\n` +
+        `The CSV file has no student data.\n\n` +
+        `Please add student rows below\n` +
+        `the header row.`
+      );
+      return;
+    }
+
+    // Too many rows at once - warn but continue
+    if (rows.length > 500) {
+      await wa.text(
+        phone,
+        `⚠️ *Large File Detected*\n\n` +
+        `Your file has ${rows.length} students.\n\n` +
+        `This may take a few minutes.\n` +
+        `Please be patient.`
+      );
+    }
+
+    // Show preview of first 3 rows
+    const preview = rows.slice(0, 3).map((r, i) => {
+      const className = r.class_name?.trim() ?? 'Unknown';
+      const arm = r.class_arm?.trim() ?? 'A';
+      return (
+        `${i + 1}. *${r.first_name} ${r.last_name}*\n` +
+        `   📋 ${r.admission_number ?? 'No ADM'}\n` +
+        `   🏫 ${className} ${arm}`
+      );
+    }).join('\n\n');
+
+    const moreText =
+      rows.length > 3
+        ? `\n\n_...and ${rows.length - 3} more students_`
+        : '';
+
+    await wa.buttons(
+      phone,
+      `📊 *File Preview*\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `📁 File: ${filename}\n` +
+      `👥 Students found: *${rows.length}*\n\n` +
+      `*First 3 students:*\n\n` +
+      `${preview}${moreText}\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `Proceed with import?`,
+      [
+        {
+          id: `CONFIRM_UPLOAD_${rows.length}`,
+          title: `✅ Import ${rows.length} Students`,
+        },
+        { id: 'CANCEL_UPLOAD', title: '❌ Cancel' },
+      ]
+    );
+
+    // Save rows to session data temporarily
+    await sessions.setState(
+      phone,
+      'ADMIN_CONFIRM_UPLOAD',
+      null,
+      {
+        data: {
+          pendingRows: rows,
+          pendingCount: rows.length,
+          pendingFileName: filename,
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[Upload] CSV processing error:', err);
+    await wa.text(
+      phone,
+      `❌ *Error processing file*\n\n` +
+      `Something went wrong.\n` +
+      `Please check the file and try again.\n\n` +
+      `Error: ${err}`
+    );
+  }
+}
+
+// ─── Handle upload confirmation ────────────────────────────────────────────
+export async function handleConfirmUpload(
+  phone: string,
+  session: BotSession,
+  input: string,
+  wa: WhatsApp
+): Promise<void> {
+  // Cancel
+  if (input === 'cancel_upload') {
+    await wa.text(phone, `❌ Upload cancelled.`);
+    await startBulkUpload(phone, session, wa);
+    return;
+  }
+
+  // Must be confirm upload
+  if (!input.startsWith('confirm_upload_')) return;
+
+  const rows = session.data?.pendingRows as
+    | Array<Record<string, string>>
+    | null;
+
+  const fileName =
+    (session.data?.pendingFileName as string) ?? 'upload.csv';
+
+  if (!rows?.length) {
+    await wa.text(
+      phone,
+      `❌ No data to import.\n\nPlease start over.`
+    );
+    await startBulkUpload(phone, session, wa);
+    return;
+  }
+
+  await wa.text(
+    phone,
+    `⏳ *Importing ${rows.length} students...*\n\n` +
+    `This may take a few minutes.\n` +
+    `Please do not close this chat.`
+  );
+
+  // Create upload job record
+  const { data: job, error: jobError } = await db
+    .from('bulk_upload_jobs')
+    .insert({
+      school_id: session.school_id,
+      upload_type: 'students',
+      file_name: fileName,
+      total_rows: rows.length,
+      status: 'processing',
+      started_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (jobError || !job) {
+    await wa.text(
+      phone,
+      `❌ Failed to start upload.\n\nPlease try again.`
+    );
+    return;
+  }
+
+  // Process the CSV import
+  const result = await csvSvc.importStudents(
+    session.school_id,
+    rows,
+    job.id
+  );
+
+  // Build result message
+  const statusIcon =
+    result.failed === 0
+      ? '🎉'
+      : result.created + result.updated === 0
+      ? '❌'
+      : '⚠️';
+
+  let resultMsg =
+    `${statusIcon} *Upload Complete!*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `📁 File: ${fileName}\n\n` +
+    `📊 *Results:*\n` +
+    `📋 Total Rows:  *${result.total}*\n` +
+    `✅ Created:     *${result.created}*\n` +
+    `🔄 Updated:     *${result.updated}*\n`;
+
+  if (result.failed > 0) {
+    resultMsg += `❌ Failed:      *${result.failed}*\n`;
+  }
+
+  resultMsg += `━━━━━━━━━━━━━━━━\n`;
+
+  // Show first 5 errors if any
+  if (result.errors.length > 0) {
+    resultMsg += `\n⚠️ *Errors (first 5):*\n`;
+    result.errors.slice(0, 5).forEach((err) => {
+      resultMsg +=
+        `• Row ${err.row}: ${err.message}\n`;
+    });
+
+    if (result.errors.length > 5) {
+      resultMsg += `_...and ${result.errors.length - 5} more errors_\n`;
+    }
+  }
+
+  await wa.buttons(
+    phone,
+    resultMsg,
+    [
+      { id: 'download_template', title: '📤 Upload More' },
+      { id: 'MAIN_MENU', title: '🏠 Menu' },
+    ]
+  );
+
+  await sessions.setState(phone, 'ADMIN_UPLOAD_MENU');
+}
+
+// ─── Show upload history ───────────────────────────────────────────────────
+async function showUploadHistory(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  const { data: jobs } = await db
+    .from('bulk_upload_jobs')
+    .select(
+      'file_name, total_rows, success_rows, failed_rows, status, created_at'
+    )
+    .eq('school_id', session.school_id)
+    .eq('upload_type', 'students')
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  if (!jobs?.length) {
+    await wa.buttons(
+      phone,
+      `📋 *Upload History*\n\n` +
+      `No uploads yet.\n\n` +
+      `Upload your first batch of students!`,
+      [
+        { id: 'download_template', title: '📥 Get Template' },
+        { id: 'MAIN_MENU', title: '🏠 Menu' },
+      ]
+    );
+    return;
+  }
+
+  // Status icons
+  const statusIcons: Record<string, string> = {
+    completed:              '✅',
+    processing:             '⏳',
+    failed:                 '❌',
+    completed_with_errors:  '⚠️',
+    pending:                '🔄',
+  };
+
+  const lines = jobs
+    .map((j) => {
+      const date = new Date(j.created_at).toLocaleDateString(
+        'en-NG',
+        { day: 'numeric', month: 'short', year: 'numeric' }
+      );
+      const icon = statusIcons[j.status] ?? '•';
+
+      return (
+        `${icon} *${j.file_name ?? 'Upload'}*\n` +
+        `   ✅ ${j.success_rows}/${j.total_rows} imported\n` +
+        `   📅 ${date}`
+      );
+    })
+    .join('\n\n');
+
+  await wa.buttons(
+    phone,
+    `📋 *Upload History*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `${lines}`,
+    [
+      { id: 'download_template', title: '📤 New Upload' },
+      { id: 'MAIN_MENU', title: '🏠 Menu' },
+    ]
+  );
+}
