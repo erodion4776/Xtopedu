@@ -1,8 +1,10 @@
+'use client';
+
 import { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { XCircle } from 'lucide-react';
 
 function FailedContent() {
-  const { useSearchParams } = require('next/navigation');
   const params = useSearchParams();
   const reason = params.get('reason');
 
@@ -25,7 +27,7 @@ function FailedContent() {
       )}
       <button
         onClick={() => window.history.back()}
-        className="px-4 py-2 bg-blue-600 text-white rounded-md"
+        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
       >
         Try Again
       </button>
@@ -40,7 +42,7 @@ export default function PaymentFailedPage() {
         fallback={
           <div className="text-center">
             <XCircle className="h-20 w-20 text-red-500 mx-auto mb-4" />
-            <p>Payment Failed</p>
+            <p className="text-gray-600">Loading...</p>
           </div>
         }
       >
