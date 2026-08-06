@@ -12,170 +12,362 @@ const paystack = new PaystackService();
 const db = getSupabase();
 const receiptSvc = new ReceiptService();
 
+const APP_URL = Deno.env.get('APP_URL') ?? '';
+const SUPER_ADMIN_PHONE = Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+
+// ─── Helpers ──────────────────────────────────────────────────
+
+function redirect(path: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: { Location: `${APP_URL}${path}` },
+  });
+}
+
+function fmt(n: number): string {
+  return new Intl.NumberFormat('en-NG', {
+    style: 'currency',
+    currency: 'NGN',
+  }).format(n);
+}
+
+function safeString(val: unknown): string | null {
+  return typeof val === 'string' && val.trim() !== '' ? val.trim() : null;
+}
+
+function safeBillingType(val: unknown): 'monthly' | 'termly' {
+  return val === 'termly' ? 'termly' : 'monthly';
+}
+
+/** Constant-time string comparison to prevent timing attacks */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  const encoder = new TextEncoder();
+  const aBuf = encoder.encode(a);
+  const bBuf = encoder.encode(b);
+  let result = 0;
+  for (let i = 0; i < aBuf.length; i++) {
+    result |= aBuf[i] ^ bBuf[i];
+  }
+  return result === 0;
+}
+
+/** Verify Paystack HMAC-SHA512 webhook signature */
+async function verifySignature(
+  body: string,
+  signature: string | null,
+): Promise<boolean> {
+  if (!signature) return false;
+
+  try {
+    const secretKey = Deno.env.get('PAYSTACK_SECRET_KEY') ?? '';
+
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secretKey),
+      { name: 'HMAC', hash: 'SHA-512' },
+      false,
+      ['sign'],
+    );
+
+    const sigBytes = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(body),
+    );
+
+    const computed = Array.from(new Uint8Array(sigBytes))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    return timingSafeEqual(computed, signature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Idempotency guard — returns true if this reference was already
+ * fully processed, preventing double-sends on webhook retries or
+ * simultaneous GET + POST hits.
+ */
+async function isAlreadyProcessed(
+  reference: string,
+  type: string,
+): Promise<boolean> {
+  const { data } = await db
+    .from('processed_payment_events')
+    .select('id')
+    .eq('gateway_ref', reference)
+    .eq('event_type', type)
+    .maybeSingle();
+
+  return data !== null;
+}
+
+/**
+ * Mark a reference as processed.  Uses an insert with
+ * onConflict: ignore so concurrent calls are safe.
+ */
+async function markProcessed(
+  reference: string,
+  type: string,
+): Promise<void> {
+  await db.from('processed_payment_events').insert(
+    {
+      gateway_ref: reference,
+      event_type: type,
+      processed_at: new Date().toISOString(),
+    },
+    // @ts-ignore – Supabase JS v2 accepts this option
+    { onConflict: 'gateway_ref,event_type', ignoreDuplicates: true },
+  );
+}
+
+/** Resolve WhatsApp account for a school, returns null if none */
+async function getWaAccount(
+  schoolId: string | null,
+): Promise<Record<string, unknown> | null> {
+  if (!schoolId) return null;
+
+  const { data } = await db
+    .from('whatsapp_accounts')
+    .select('phone_number_id, access_token, status')
+    .eq('school_id', schoolId)
+    .eq('status', 'active')
+    .maybeSingle();
+
+  return data ?? null;
+}
+
+// ─── Main handler ──────────────────────────────────────────────
+
 Deno.serve(async (req: Request): Promise<Response> => {
   const url = new URL(req.url);
 
-  // ── GET: Paystack redirect after payment ─────────────────────
+  // ── GET: Paystack browser redirect after payment ─────────────
   if (req.method === 'GET') {
-    const ref =
-      url.searchParams.get('ref') ??
-      url.searchParams.get('reference') ??
-      url.searchParams.get('trxref');
-
-    const paymentType =
-      url.searchParams.get('type') ?? 'school_fee';
-
-    const appUrl = Deno.env.get('APP_URL') ?? '';
-
-    if (!ref) {
-      return Response.redirect(
-        `${appUrl}/payment/failed?reason=no_reference`
-      );
-    }
-
-    // ── Setup fee payment ──────────────────────────────────────
-    if (paymentType === 'setup_fee') {
-      const result = await paystack.verifySetupFee(ref);
-      if (result.ok) {
-        await sendSetupConfirmation(result);
-        return Response.redirect(
-          `${appUrl}/onboarding/success?ref=${ref}`
-        );
-      }
-      return Response.redirect(
-        `${appUrl}/onboarding/failed?ref=${ref}`
-      );
-    }
-
-    // ── Parent subscription payment ────────────────────────────
-    if (paymentType === 'subscription') {
-      const { data: subPayment } = await db
-        .from('subscription_payments')
-        .select('*')
-        .eq('gateway_ref', ref)
-        .single();
-
-      if (subPayment) {
-        await handleSubscriptionPayment(
-          {
-            parent_id: subPayment.parent_id,
-            school_id: subPayment.school_id,
-            plan_slug: subPayment.plan_slug,
-            billing_type: subPayment.billing_type,
-            parent_phone: null,
-          },
-          ref,
-          subPayment.amount
-        );
-      }
-      return Response.redirect(
-        `${appUrl}/payment/success?ref=${ref}`
-      );
-    }
-
-    // ── School fee payment ─────────────────────────────────────
-    const result = await paystack.verifySchoolFee(ref);
-    if (result.ok) {
-      await sendFeeConfirmation(result);
-      return Response.redirect(
-        `${appUrl}/payment/success?ref=${ref}&amount=${result.totalPaid}`
-      );
-    }
-    return Response.redirect(
-      `${appUrl}/payment/failed?ref=${ref}`
-    );
+    return handleGetRedirect(url);
   }
 
   // ── POST: Paystack server-to-server webhook ──────────────────
   if (req.method === 'POST') {
-    const signature = req.headers.get('x-paystack-signature');
-    const rawBody = await req.text();
-
-    const isValid = await verifySignature(rawBody, signature);
-    if (!isValid) {
-      console.warn('[Payment] Invalid Paystack signature');
-      return new Response('Unauthorized', { status: 401 });
-    }
-
-    // Respond 200 immediately
-    const response = new Response('OK', { status: 200 });
-
-    // Process in background
-    const event = JSON.parse(rawBody);
-    console.log(`[Payment] Paystack event: ${event.event}`);
-
-    processPaystackEvent(event).catch((err) => {
-      console.error('[Payment] Event processing error:', err);
-    });
-
-    return response;
+    return handleWebhook(req);
   }
 
   return new Response('Not Found', { status: 404 });
 });
 
-// ─── Process Paystack event ────────────────────────────────────
+// ─── GET redirect handler ──────────────────────────────────────
+
+async function handleGetRedirect(url: URL): Promise<Response> {
+  const ref =
+    url.searchParams.get('ref') ??
+    url.searchParams.get('reference') ??
+    url.searchParams.get('trxref');
+
+  if (!ref) {
+    return redirect('/payment/failed?reason=no_reference');
+  }
+
+  /*
+   * SECURITY: Do NOT trust ?type from the URL — always resolve
+   * payment type from the verified Paystack transaction metadata.
+   */
+  let verification: Record<string, unknown>;
+  try {
+    verification = await paystack.verifyTransaction(ref);
+  } catch (err) {
+    console.error('[Payment] GET verification failed:', err);
+    return redirect(`/payment/failed?ref=${ref}`);
+  }
+
+  if (!verification.ok) {
+    return redirect(`/payment/failed?ref=${ref}`);
+  }
+
+  const meta =
+    (verification.metadata as Record<string, unknown>) ?? {};
+  const paymentType = safeString(meta.payment_type) ?? 'school_fee';
+
+  try {
+    if (paymentType === 'setup_fee') {
+      const result = await paystack.verifySetupFee(ref);
+      if (!result.ok) return redirect(`/onboarding/failed?ref=${ref}`);
+      await sendSetupConfirmation(result);
+      return redirect(`/onboarding/success?ref=${ref}`);
+    }
+
+    if (paymentType === 'subscription') {
+      const { data: subPayment, error } = await db
+        .from('subscription_payments')
+        .select('*')
+        .eq('gateway_ref', ref)
+        .maybeSingle();
+
+      if (error || !subPayment) {
+        console.error('[Payment] subscription record not found for ref:', ref);
+        return redirect(`/payment/failed?ref=${ref}&reason=not_found`);
+      }
+
+      await handleSubscriptionPayment(
+        {
+          parent_id: subPayment.parent_id,
+          school_id: subPayment.school_id,
+          plan_slug: subPayment.plan_slug,
+          billing_type: subPayment.billing_type,
+          parent_phone: null,
+        },
+        ref,
+        subPayment.amount,
+      );
+
+      return redirect(`/payment/success?ref=${ref}`);
+    }
+
+    // ── Default: school fee ──────────────────────────────────
+    const result = await paystack.verifySchoolFee(ref);
+    if (!result.ok) return redirect(`/payment/failed?ref=${ref}`);
+    await sendFeeConfirmation(result);
+    return redirect(
+      `/payment/success?ref=${ref}&amount=${result.totalPaid}`,
+    );
+  } catch (err) {
+    console.error('[Payment] GET handler error:', err);
+    return redirect(`/payment/failed?ref=${ref}`);
+  }
+}
+
+// ─── POST webhook handler ──────────────────────────────────────
+
+async function handleWebhook(req: Request): Promise<Response> {
+  const signature = req.headers.get('x-paystack-signature');
+  const rawBody = await req.text();
+
+  const isValid = await verifySignature(rawBody, signature);
+  if (!isValid) {
+    console.warn('[Payment] Invalid Paystack signature');
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  let event: Record<string, unknown>;
+  try {
+    event = JSON.parse(rawBody);
+  } catch {
+    console.error('[Payment] Malformed JSON body');
+    return new Response('Bad Request', { status: 400 });
+  }
+
+  console.log(`[Payment] Paystack event: ${event.event}`);
+
+  /*
+   * Process synchronously before responding so the Edge Function
+   * runtime does not terminate the isolate mid-flight.
+   * Paystack expects a 200 within 30 s — we stay well within that.
+   */
+  try {
+    await processPaystackEvent(event);
+  } catch (err) {
+    // Log but still return 200 so Paystack does not keep retrying
+    // for transient errors.  Idempotency guards prevent double-sends
+    // on legitimate retries.
+    console.error('[Payment] Event processing error:', err);
+  }
+
+  return new Response('OK', { status: 200 });
+}
+
+// ─── Process Paystack webhook event ───────────────────────────
+
 async function processPaystackEvent(
-  event: Record<string, unknown>
+  event: Record<string, unknown>,
 ): Promise<void> {
   if (event.event !== 'charge.success') return;
 
   const data = event.data as Record<string, unknown>;
   const meta = (data.metadata as Record<string, unknown>) ?? {};
-  const ref = data.reference as string;
-  const paymentType =
-    (meta.payment_type as string) ?? 'school_fee';
+  const ref = safeString(data.reference);
 
+  if (!ref) {
+    console.error('[Payment] Event missing reference');
+    return;
+  }
+
+  const paymentType = safeString(meta.payment_type) ?? 'school_fee';
   console.log(`[Payment] Processing: ${paymentType} - ${ref}`);
 
   if (paymentType === 'setup_fee') {
-    // ── Setup fee ────────────────────────────────────────────
+    if (await isAlreadyProcessed(ref, 'setup_fee')) {
+      console.log(`[Payment] setup_fee ${ref} already processed`);
+      return;
+    }
     const result = await paystack.verifySetupFee(ref);
-    if (result.ok) await sendSetupConfirmation(result);
+    if (result.ok) {
+      await sendSetupConfirmation(result);
+      await markProcessed(ref, 'setup_fee');
+    }
+    return;
+  }
 
-  } else if (paymentType === 'subscription') {
-    // ── Parent alert subscription ────────────────────────────
+  if (paymentType === 'subscription') {
+    if (await isAlreadyProcessed(ref, 'subscription')) {
+      console.log(`[Payment] subscription ${ref} already processed`);
+      return;
+    }
     const amount = (data.amount as number) / 100;
     await handleSubscriptionPayment(meta, ref, amount);
+    await markProcessed(ref, 'subscription');
+    return;
+  }
 
-  } else {
-    // ── School fee payment ───────────────────────────────────
-    const result = await paystack.verifySchoolFee(ref);
-    if (result.ok) await sendFeeConfirmation(result);
+  // ── Default: school fee ──────────────────────────────────────
+  if (await isAlreadyProcessed(ref, 'school_fee')) {
+    console.log(`[Payment] school_fee ${ref} already processed`);
+    return;
+  }
+  const result = await paystack.verifySchoolFee(ref);
+  if (result.ok) {
+    await sendFeeConfirmation(result);
+    await markProcessed(ref, 'school_fee');
   }
 }
 
 // ─── Handle parent subscription payment ───────────────────────
+
 async function handleSubscriptionPayment(
   meta: Record<string, unknown>,
   reference: string,
-  amount: number
+  amount: number,
 ): Promise<void> {
   try {
-    const parentId   = meta.parent_id   as string;
-    const schoolId   = meta.school_id   as string;
-    const planSlug   = meta.plan_slug   as string;
-    const billingType = meta.billing_type as 'monthly' | 'termly';
-    let parentPhone  = meta.parent_phone as string | null;
+    const parentId = safeString(meta.parent_id);
+    const schoolId = safeString(meta.school_id);
+    const planSlug = safeString(meta.plan_slug);
+    const billingType = safeBillingType(meta.billing_type);
+    let parentPhone = safeString(meta.parent_phone);
 
     if (!parentId || !schoolId || !planSlug) {
-      console.error('[Subscription] Missing meta fields');
+      console.error('[Subscription] Missing required meta fields', {
+        parentId,
+        schoolId,
+        planSlug,
+      });
       return;
     }
 
-    // Get parent phone if not in meta
+    // Resolve parent phone if not supplied in meta
     if (!parentPhone) {
       const { data: parent } = await db
         .from('parents')
         .select('phone, whatsapp_number')
         .eq('id', parentId)
-        .single();
+        .maybeSingle();
 
-      parentPhone =
-        parent?.whatsapp_number ?? parent?.phone ?? null;
+      parentPhone = safeString(parent?.whatsapp_number) ??
+        safeString(parent?.phone);
     }
 
-    // Update subscription payment to Success
+    // Mark subscription payment as successful
     await db
       .from('subscription_payments')
       .update({
@@ -184,26 +376,21 @@ async function handleSubscriptionPayment(
       })
       .eq('gateway_ref', reference);
 
-    // Calculate expiry date
+    // Calculate expiry
     const now = new Date();
-    let expiresAt: Date;
+    const expiresAt = new Date(now);
+    expiresAt.setMonth(
+      expiresAt.getMonth() + (billingType === 'termly' ? 3 : 1),
+    );
 
-    if (billingType === 'termly') {
-      expiresAt = new Date(now);
-      expiresAt.setMonth(expiresAt.getMonth() + 3);
-    } else {
-      expiresAt = new Date(now);
-      expiresAt.setMonth(expiresAt.getMonth() + 1);
-    }
-
-    // Get plan ID
+    // Resolve plan
     const { data: plan } = await db
       .from('alert_plans')
       .select('id, name, features')
       .eq('slug', planSlug)
-      .single();
+      .maybeSingle();
 
-    // Activate/update subscription
+    // Activate / renew subscription — idempotent upsert
     await db
       .from('parent_subscriptions')
       .upsert(
@@ -222,66 +409,66 @@ async function handleSubscriptionPayment(
           auto_renew: true,
           updated_at: now.toISOString(),
         },
-        { onConflict: 'parent_id,school_id' }
+        { onConflict: 'parent_id,school_id' },
       );
 
     console.log(
-      `[Subscription] ✅ Activated ${planSlug} for parent ${parentId}`
+      `[Subscription] ✅ Activated ${planSlug} for parent ${parentId}`,
     );
 
-    // Send WhatsApp confirmation to parent
-    if (parentPhone) {
-      const { data: waAccount } = await db
-        .from('whatsapp_accounts')
-        .select('phone_number_id, access_token, status')
-        .eq('school_id', schoolId)
-        .eq('status', 'active')
-        .single();
+    if (!parentPhone) {
+      console.warn(
+        '[Subscription] No parent phone — skipping WhatsApp confirmation',
+      );
+      return;
+    }
 
-      const wa = new WhatsApp(waAccount);
+    const waAccount = await getWaAccount(schoolId);
+    if (!waAccount) {
+      console.warn(
+        `[Subscription] No active WA account for school ${schoolId}`,
+      );
+      return;
+    }
 
-      const planBadges: Record<string, string> = {
-        basic:    '📦 Basic',
-        standard: '🔔 Standard',
-        premium:  '🚀 Premium',
-        family:   '👨‍👩‍👧 Family',
-      };
+    const wa = new WhatsApp(waAccount);
 
-      const planFeatures: Record<string, string> = {
-        standard:
-          `❌ Instant absent alerts\n` +
-          `⏰ Late arrival alerts\n` +
-          `💰 Fee reminders\n` +
-          `🧾 Payment receipts`,
-        premium:
-          `✅ Present & absent alerts\n` +
-          `🚗 Pickup security alerts\n` +
-          `💰 Fee reminders\n` +
-          `🧾 Payment receipts\n` +
-          `📊 Weekly report`,
-        family:
-          `✅ Everything in Premium\n` +
-          `👨‍👩‍👧 All your children covered`,
-      };
+    const planBadges: Record<string, string> = {
+      basic: '📦 Basic',
+      standard: '🔔 Standard',
+      premium: '🚀 Premium',
+      family: '👨‍👩‍👧 Family',
+    };
 
-      const billingLabel =
-        billingType === 'termly' ? '3 months (1 term)' : '1 month';
+    const planFeatures: Record<string, string> = {
+      standard:
+        `❌ Instant absent alerts\n` +
+        `⏰ Late arrival alerts\n` +
+        `💰 Fee reminders\n` +
+        `🧾 Payment receipts`,
+      premium:
+        `✅ Present & absent alerts\n` +
+        `🚗 Pickup security alerts\n` +
+        `💰 Fee reminders\n` +
+        `🧾 Payment receipts\n` +
+        `📊 Weekly report`,
+      family:
+        `✅ Everything in Premium\n` +
+        `👨‍👩‍👧 All your children covered`,
+    };
 
-      const expiryStr = expiresAt.toLocaleDateString('en-NG', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      });
+    const billingLabel =
+      billingType === 'termly' ? '3 months (1 term)' : '1 month';
 
-      const fmt = (n: number) =>
-        new Intl.NumberFormat('en-NG', {
-          style: 'currency',
-          currency: 'NGN',
-        }).format(n);
+    const expiryStr = expiresAt.toLocaleDateString('en-NG', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
 
-      await wa.text(
-        parentPhone,
-        `🎉 *Alert Plan Activated!*\n` +
+    await wa.text(
+      parentPhone,
+      `🎉 *Alert Plan Activated!*\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `✅ *${planBadges[planSlug] ?? planSlug} Plan*\n` +
         `   is now ACTIVE!\n\n` +
@@ -295,254 +482,212 @@ async function handleSubscriptionPayment(
         `━━━━━━━━━━━━━━━━\n` +
         `Thank you! Your children are\n` +
         `now fully monitored. 🙏\n\n` +
-        `_Type *menu* to return_`
-      );
+        `_Type *menu* to return_`,
+    );
 
-      // Log notification
-      await db.from('notifications').insert({
-        school_id: schoolId,
-        channel: 'whatsapp',
-        type: 'subscription_activated',
-        recipient: parentPhone,
-        title: `${planSlug} plan activated`,
-        message: `Alert plan activated for ${billingLabel}`,
-        status: 'sent',
-        sent_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      });
-    }
+    await db.from('notifications').insert({
+      school_id: schoolId,
+      channel: 'whatsapp',
+      type: 'subscription_activated',
+      recipient: parentPhone,
+      title: `${planSlug} plan activated`,
+      message: `Alert plan activated for ${billingLabel}`,
+      status: 'sent',
+      sent_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
   } catch (err) {
     console.error('[Subscription] activation error:', err);
+    throw err; // re-throw so caller can decide on retry
   }
 }
 
 // ─── Send setup fee confirmation ───────────────────────────────
+
 async function sendSetupConfirmation(
-  result: Record<string, unknown>
+  result: Record<string, unknown>,
 ): Promise<void> {
   try {
-    const {
-      schoolId,
-      adminPhone,
-      amount,
-      studentCount,
-      tierName,
-    } = result;
+    const adminPhone = safeString(result.adminPhone);
+    const schoolId = safeString(result.schoolId);
+    const amount = result.amount as number;
+    const studentCount = result.studentCount;
+    const tierName = result.tierName;
 
-    if (!adminPhone) return;
+    if (!adminPhone) {
+      console.warn('[Payment] sendSetupConfirmation: no adminPhone');
+      return;
+    }
 
-    const fmt = (n: number) =>
-      new Intl.NumberFormat('en-NG', {
-        style: 'currency',
-        currency: 'NGN',
-      }).format(n);
-
-    const { data: waAccount } = schoolId
-      ? await db
-          .from('whatsapp_accounts')
-          .select('phone_number_id, access_token, status')
-          .eq('school_id', schoolId as string)
-          .eq('status', 'active')
-          .single()
-      : { data: null };
+    const waAccount = await getWaAccount(schoolId);
+    if (!waAccount) {
+      console.warn(
+        `[Payment] No active WA account for school ${schoolId} — cannot send setup confirmation`,
+      );
+      return;
+    }
 
     const wa = new WhatsApp(waAccount);
 
     await wa.text(
-      adminPhone as string,
+      adminPhone,
       `🎉 *Setup Fee Confirmed!*\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `✅ Your SchoolBot account\n` +
-      `is now active!\n\n` +
-      `💵 *Amount Paid:* ${fmt(amount as number)}\n` +
-      `👥 *Students:* ${studentCount}\n` +
-      `📦 *Tier:* ${tierName}\n` +
-      `📅 *Date:* ${new Date().toLocaleDateString('en-NG', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      })}\n` +
-      `━━━━━━━━━━━━━━━━\n\n` +
-      `*What happens next:*\n` +
-      `1️⃣ Add your bank account\n` +
-      `2️⃣ Set up your classes\n` +
-      `3️⃣ Invite your staff\n` +
-      `4️⃣ Go LIVE! 🚀\n\n` +
-      `Type *menu* to continue setup.`
+        `━━━━━━━━━━━━━━━━\n` +
+        `✅ Your SchoolBot account\n` +
+        `is now active!\n\n` +
+        `💵 *Amount Paid:* ${fmt(amount)}\n` +
+        `👥 *Students:* ${studentCount}\n` +
+        `📦 *Tier:* ${tierName}\n` +
+        `📅 *Date:* ${new Date().toLocaleDateString('en-NG', {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+        })}\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `*What happens next:*\n` +
+        `1️⃣ Add your bank account\n` +
+        `2️⃣ Set up your classes\n` +
+        `3️⃣ Invite your staff\n` +
+        `4️⃣ Go LIVE! 🚀\n\n` +
+        `Type *menu* to continue setup.`,
     );
 
-    // Notify super admin (you)
-    const superPhone = Deno.env.get('SUPER_ADMIN_PHONE');
-    if (superPhone && schoolId) {
+    // Notify super-admin
+    if (SUPER_ADMIN_PHONE && schoolId) {
       const { data: school } = await db
         .from('schools')
         .select('name')
-        .eq('id', schoolId as string)
-        .single();
+        .eq('id', schoolId)
+        .maybeSingle();
 
-      const notifyWa = new WhatsApp();
-      await notifyWa.text(
-        superPhone,
+      // Super-admin WA uses the same school account or a platform
+      // default — pass null to fall back to platform credentials.
+      const superWa = new WhatsApp(waAccount);
+
+      await superWa.text(
+        SUPER_ADMIN_PHONE,
         `💰 *Setup Fee Received!*\n` +
-        `━━━━━━━━━━━━━━━━\n` +
-        `🏫 *School:* ${school?.name ?? 'Unknown'}\n` +
-        `💵 *Amount:* ${fmt(amount as number)}\n` +
-        `👥 *Students:* ${studentCount}\n` +
-        `📦 *Tier:* ${tierName}\n` +
-        `📱 *Admin:* ${adminPhone}\n` +
-        `━━━━━━━━━━━━━━━━\n` +
-        `⏰ ${new Date().toLocaleString('en-NG')}`
+          `━━━━━━━━━━━━━━━━\n` +
+          `🏫 *School:* ${school?.name ?? 'Unknown'}\n` +
+          `💵 *Amount:* ${fmt(amount)}\n` +
+          `👥 *Students:* ${studentCount}\n` +
+          `📦 *Tier:* ${tierName}\n` +
+          `📱 *Admin:* ${adminPhone}\n` +
+          `━━━━━━━━━━━━━━━━\n` +
+          `⏰ ${new Date().toLocaleString('en-NG')}`,
       );
     }
   } catch (err) {
     console.error('[Payment] setup confirmation error:', err);
+    throw err;
   }
 }
 
 // ─── Send school fee confirmation ──────────────────────────────
+
 async function sendFeeConfirmation(
-  result: Record<string, unknown>
+  result: Record<string, unknown>,
 ): Promise<void> {
   try {
-    const {
-      parentPhone,
-      studentId,
-      schoolId,
-      schoolFeeAmount,
-      platformCommission,
-      paystackCharge,
-      totalPaid,
-      channel,
-      reference,
-    } = result;
+    const parentPhone = safeString(result.parentPhone);
+    const studentId = safeString(result.studentId);
+    const schoolId = safeString(result.schoolId);
+    const schoolFeeAmount = result.schoolFeeAmount as number;
+    const platformCommission = result.platformCommission as number;
+    const paystackCharge = result.paystackCharge as number;
+    const totalPaid = result.totalPaid as number;
+    const channel = safeString(result.channel) ?? 'Online';
+    const reference = safeString(result.reference);
 
-    if (!parentPhone || !studentId) return;
+    if (!parentPhone || !studentId || !reference) {
+      console.warn('[Payment] sendFeeConfirmation: missing required fields', {
+        parentPhone,
+        studentId,
+        reference,
+      });
+      return;
+    }
 
-    const fmt = (n: number) =>
-      new Intl.NumberFormat('en-NG', {
-        style: 'currency',
-        currency: 'NGN',
-      }).format(n);
-
-    // Get student details
     const { data: student } = await db
       .from('students')
       .select('first_name, last_name')
-      .eq('id', studentId as string)
-      .single();
+      .eq('id', studentId)
+      .maybeSingle();
 
-    // Get school WA account
-    const { data: waAccount } = schoolId
-      ? await db
-          .from('whatsapp_accounts')
-          .select('phone_number_id, access_token, status')
-          .eq('school_id', schoolId as string)
-          .eq('status', 'active')
-          .single()
-      : { data: null };
+    const waAccount = await getWaAccount(schoolId);
+    if (!waAccount) {
+      console.warn(
+        `[Payment] No active WA account for school ${schoolId}`,
+      );
+      return;
+    }
 
     const wa = new WhatsApp(waAccount);
 
-    // Send payment confirmation to parent
     await wa.text(
-      parentPhone as string,
+      parentPhone,
       `🎉 *Payment Successful!*\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `✅ Payment confirmed!\n\n` +
-      `👤 *Student:*\n` +
-      `${student?.first_name} ${student?.last_name}\n\n` +
-      `💵 School Fee:\n` +
-      `   *${fmt(schoolFeeAmount as number)}*\n` +
-      `🏷️ Platform Fee:\n` +
-      `   *${fmt(platformCommission as number)}*\n` +
-      `🏦 Processing Fee:\n` +
-      `   *${fmt(paystackCharge as number)}*\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `💳 *Total Paid:*\n` +
-      `   *${fmt(totalPaid as number)}*\n\n` +
-      `🏫 School received full\n` +
-      `*${fmt(schoolFeeAmount as number)}* ✅\n\n` +
-      `💳 *Method:* ${channel ?? 'Online'}\n` +
-      `🔖 *Ref:* ${reference}\n` +
-      `📅 ${new Date().toLocaleDateString('en-NG', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      })}\n` +
-      `━━━━━━━━━━━━━━━━\n\n` +
-      `Thank you! 🙏\n` +
-      `_Type *menu* to return_`
+        `━━━━━━━━━━━━━━━━\n` +
+        `✅ Payment confirmed!\n\n` +
+        `👤 *Student:*\n` +
+        `${student?.first_name ?? ''} ${student?.last_name ?? ''}\n\n` +
+        `💵 School Fee:\n` +
+        `   *${fmt(schoolFeeAmount)}*\n` +
+        `🏷️ Platform Fee:\n` +
+        `   *${fmt(platformCommission)}*\n` +
+        `🏦 Processing Fee:\n` +
+        `   *${fmt(paystackCharge)}*\n` +
+        `━━━━━━━━━━━━━━━━\n` +
+        `💳 *Total Paid:*\n` +
+        `   *${fmt(totalPaid)}*\n\n` +
+        `🏫 School received full\n` +
+        `*${fmt(schoolFeeAmount)}* ✅\n\n` +
+        `💳 *Method:* ${channel}\n` +
+        `🔖 *Ref:* ${reference}\n` +
+        `📅 ${new Date().toLocaleDateString('en-NG', {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+        })}\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `Thank you! 🙏\n` +
+        `_Type *menu* to return_`,
     );
 
-    // Log notification
     await db.from('notifications').insert({
       school_id: schoolId,
       channel: 'whatsapp',
       type: 'payment_confirmation',
       recipient: parentPhone,
       title: 'Payment Confirmed',
-      message: `Payment of ${fmt(totalPaid as number)} confirmed`,
+      message: `Payment of ${fmt(totalPaid)} confirmed`,
       status: 'sent',
       sent_at: new Date().toISOString(),
       created_at: new Date().toISOString(),
     });
 
-    // Auto generate and send receipt
+    // Auto-generate and send receipt
     try {
       const { data: payment } = await db
         .from('payments')
         .select('id')
-        .eq('gateway_reference', reference as string)
-        .single();
+        .eq('gateway_reference', reference)
+        .maybeSingle();
 
       if (payment?.id) {
         const receipt = await receiptSvc.generateReceipt(payment.id);
         await receiptSvc.sendReceiptToParent(
           receipt.receiptId,
-          parentPhone as string,
-          waAccount
+          parentPhone,
+          waAccount,
         );
       }
     } catch (receiptErr) {
-      console.warn('[Payment] receipt error:', receiptErr);
+      // Non-fatal — log and continue
+      console.warn('[Payment] receipt generation error:', receiptErr);
     }
-
   } catch (err) {
     console.error('[Payment] fee confirmation error:', err);
-  }
-}
-
-// ─── Verify Paystack HMAC-SHA512 signature ─────────────────────
-async function verifySignature(
-  body: string,
-  signature: string | null
-): Promise<boolean> {
-  if (!signature) return false;
-
-  try {
-    const secretKey =
-      Deno.env.get('PAYSTACK_SECRET_KEY') ?? '';
-
-    const key = await crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(secretKey),
-      { name: 'HMAC', hash: 'SHA-512' },
-      false,
-      ['sign']
-    );
-
-    const sigBytes = await crypto.subtle.sign(
-      'HMAC',
-      key,
-      new TextEncoder().encode(body)
-    );
-
-    const computed = Array.from(new Uint8Array(sigBytes))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-
-    return computed === signature;
-  } catch {
-    return false;
+    throw err;
   }
 }
