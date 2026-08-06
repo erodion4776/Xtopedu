@@ -1,5 +1,3 @@
-// app/(super-admin)/layout.tsx
-
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -16,11 +14,8 @@ import {
   LogOut,
   Menu,
   X,
-  Bell,
-  MessageSquare,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -45,11 +40,6 @@ const navItems = [
     icon: Users,
   },
   {
-    href: '/sessions',
-    label: 'Active Sessions',
-    icon: MessageSquare,
-  },
-  {
     href: '/logs',
     label: 'System Logs',
     icon: BarChart3,
@@ -70,35 +60,63 @@ export default function SuperAdminLayout({
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [adminName, setAdminName] = useState('Admin');
+  const [checking, setChecking] = useState(true);
 
   useEffect(() => {
     checkAuth();
   }, []);
 
   async function checkAuth() {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
+    try {
+      // Get current session
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session) {
+        router.push('/login');
+        return;
+      }
+
+      // Check if super admin
+      const { data: admin } = await supabase
+        .from('platform_admins')
+        .select('full_name, role, is_active')
+        .eq('email', session.user.email ?? '')
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (!admin) {
+        await supabase.auth.signOut();
+        router.push('/login');
+        return;
+      }
+
+      setAdminName(
+        admin.full_name?.split(' ')[0] ?? 'Admin'
+      );
+      setChecking(false);
+    } catch (err) {
+      console.error('Auth check failed:', err);
       router.push('/login');
-      return;
     }
-
-    const { data: admin } = await supabase
-      .from('platform_admins')
-      .select('full_name')
-      .eq('email', user.email)
-      .single();
-
-    if (!admin) {
-      router.push('/login');
-      return;
-    }
-
-    setAdminName(admin.full_name.split(' ')[0]);
   }
 
   async function handleLogout() {
     await supabase.auth.signOut();
     router.push('/login');
+  }
+
+  // Show loading while checking auth
+  if (checking) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-r-transparent mb-4" />
+          <p className="text-gray-500 text-sm">Loading...</p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -110,7 +128,9 @@ export default function SuperAdminLayout({
           'fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg',
           'transform transition-transform duration-200',
           'lg:translate-x-0 lg:static lg:inset-auto',
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          sidebarOpen
+            ? 'translate-x-0'
+            : '-translate-x-full'
         )}
       >
         {/* Logo */}
@@ -119,7 +139,9 @@ export default function SuperAdminLayout({
             <h1 className="text-xl font-bold text-blue-600">
               XtopEdu
             </h1>
-            <p className="text-xs text-gray-500">Super Admin</p>
+            <p className="text-xs text-gray-500">
+              Super Admin
+            </p>
           </div>
           <Button
             variant="ghost"
@@ -157,23 +179,27 @@ export default function SuperAdminLayout({
           })}
         </nav>
 
-        {/* Bottom */}
+        {/* Bottom - User info */}
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t">
           <div className="flex items-center gap-3 mb-3">
-            <Avatar className="h-8 w-8">
-              <AvatarFallback className="bg-blue-100 text-blue-600 text-xs">
+            <div className="h-8 w-8 rounded-full bg-blue-100 flex items-center justify-center">
+              <span className="text-blue-600 text-sm font-medium">
                 {adminName[0]}
-              </AvatarFallback>
-            </Avatar>
+              </span>
+            </div>
             <div>
-              <p className="text-sm font-medium">{adminName}</p>
-              <p className="text-xs text-gray-500">Super Admin</p>
+              <p className="text-sm font-medium">
+                {adminName}
+              </p>
+              <p className="text-xs text-gray-500">
+                Super Admin
+              </p>
             </div>
           </div>
           <Button
             variant="ghost"
             size="sm"
-            className="w-full justify-start text-red-500"
+            className="w-full justify-start text-red-500 hover:text-red-600 hover:bg-red-50"
             onClick={handleLogout}
           >
             <LogOut className="h-4 w-4 mr-2" />
@@ -182,7 +208,7 @@ export default function SuperAdminLayout({
         </div>
       </aside>
 
-      {/* Overlay for mobile */}
+      {/* Mobile overlay */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/50 lg:hidden"
@@ -191,9 +217,9 @@ export default function SuperAdminLayout({
       )}
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top bar */}
-        <header className="bg-white shadow-sm px-4 py-3 flex items-center justify-between">
+        <header className="bg-white shadow-sm px-4 py-3 flex items-center justify-between shrink-0">
           <Button
             variant="ghost"
             size="sm"
@@ -203,10 +229,10 @@ export default function SuperAdminLayout({
             <Menu className="h-5 w-5" />
           </Button>
 
-          <div className="ml-auto flex items-center gap-2">
-            <Button variant="ghost" size="sm">
-              <Bell className="h-4 w-4" />
-            </Button>
+          <div className="ml-auto">
+            <span className="text-sm text-gray-500">
+              Welcome back, {adminName}!
+            </span>
           </div>
         </header>
 
