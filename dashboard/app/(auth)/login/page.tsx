@@ -27,97 +27,58 @@ export default function LoginPage() {
     setError('');
 
     try {
-      // Step 1: Sign in with Supabase Auth
+      // Sign in
       const { data, error: authError } =
         await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
 
-      if (authError) {
+      if (authError || !data.user) {
         setError('Invalid email or password');
+        setLoading(false);
         return;
       }
 
-      if (!data.user) {
-        setError('Login failed. Please try again.');
-        return;
-      }
-
-      // Step 2: Check platform_admins
-      // Use maybeSingle() instead of single()
-      // to avoid errors when no record found
+      // Check if super admin
       const { data: platformAdmin } = await supabase
         .from('platform_admins')
-        .select('id, role, full_name, is_active')
+        .select('id, role, is_active')
         .eq('email', data.user.email ?? '')
         .eq('is_active', true)
         .maybeSingle();
 
       if (platformAdmin) {
-        router.push('/dashboard');
+        // Use window.location for hard redirect
+        // This ensures cookies are properly set
+        window.location.href = '/dashboard';
         return;
       }
 
-      // Step 3: Check school_users
+      // Check if school staff
       const { data: schoolUser } = await supabase
         .from('school_users')
-        .select('id, school_id, status')
+        .select('id, school_id')
         .eq('user_id', data.user.id)
         .eq('status', 'active')
         .maybeSingle();
 
       if (schoolUser) {
-        router.push('/school/dashboard');
+        window.location.href = '/school/dashboard';
         return;
       }
 
-      // Step 4: Check profiles table as fallback
-      // Maybe they are in profiles but not school_users
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('id, full_name, school_id')
-        .eq('id', data.user.id)
-        .maybeSingle();
-
-      if (profile) {
-        router.push('/school/dashboard');
-        return;
-      }
-
-      // No matching account
+      // No access
       setError(
-        'Your account does not have dashboard access. ' +
-        'Contact your administrator.'
+        'Your account does not have dashboard access.'
       );
       await supabase.auth.signOut();
+      setLoading(false);
 
     } catch (err) {
       console.error('Login error:', err);
       setError('Something went wrong. Please try again.');
-    } finally {
       setLoading(false);
-    }
-  }
-
-  async function handleForgotPassword() {
-    if (!email) {
-      setError('Please enter your email address first');
-      return;
-    }
-
-    const { error } = await supabase.auth.resetPasswordForEmail(
-      email.trim(),
-      {
-        redirectTo: `${window.location.origin}/reset-password`,
-      }
-    );
-
-    if (error) {
-      setError('Could not send reset email. Please try again.');
-    } else {
-      setError('');
-      alert(`Password reset email sent to ${email}`);
     }
   }
 
@@ -128,7 +89,9 @@ export default function LoginPage() {
         {/* Logo */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl mb-4">
-            <span className="text-white text-2xl font-bold">X</span>
+            <span className="text-white text-2xl font-bold">
+              X
+            </span>
           </div>
           <h1 className="text-3xl font-bold text-gray-900">
             XtopEdu
@@ -139,31 +102,29 @@ export default function LoginPage() {
         </div>
 
         <Card className="shadow-lg">
-          <CardHeader className="space-y-1">
+          <CardHeader>
             <CardTitle className="text-2xl text-center">
               Sign In
             </CardTitle>
             <CardDescription className="text-center">
-              Enter your credentials to access the dashboard
+              Enter your credentials to continue
             </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleLogin} className="space-y-4">
 
-              {/* Error message */}
               {error && (
                 <div className="bg-red-50 border border-red-200 text-red-700 text-sm p-3 rounded-lg">
                   ❌ {error}
                 </div>
               )}
 
-              {/* Email */}
               <div className="space-y-2">
                 <Label htmlFor="email">Email Address</Label>
                 <Input
                   id="email"
                   type="email"
-                  placeholder="admin@yourschool.com"
+                  placeholder="your@email.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
@@ -171,7 +132,6 @@ export default function LoginPage() {
                 />
               </div>
 
-              {/* Password */}
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
                 <Input
@@ -185,10 +145,9 @@ export default function LoginPage() {
                 />
               </div>
 
-              {/* Submit */}
               <Button
                 type="submit"
-                className="w-full h-11 text-base"
+                className="w-full h-11"
                 disabled={loading}
               >
                 {loading ? (
@@ -200,9 +159,7 @@ export default function LoginPage() {
                     >
                       <circle
                         className="opacity-25"
-                        cx="12"
-                        cy="12"
-                        r="10"
+                        cx="12" cy="12" r="10"
                         stroke="currentColor"
                         strokeWidth="4"
                       />
@@ -219,22 +176,11 @@ export default function LoginPage() {
                 )}
               </Button>
             </form>
-
-            {/* Forgot password */}
-            <div className="mt-4 text-center">
-              <button
-                type="button"
-                onClick={handleForgotPassword}
-                className="text-sm text-blue-600 hover:underline"
-              >
-                Forgot your password?
-              </button>
-            </div>
           </CardContent>
         </Card>
 
         <p className="text-center text-xs text-gray-400 mt-6">
-          © 2026 XtopEdu. All rights reserved.
+          © 2025 XtopEdu. All rights reserved.
         </p>
       </div>
     </div>
