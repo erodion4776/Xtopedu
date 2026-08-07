@@ -16,7 +16,7 @@ jobs:
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: 2.3.4
+          version: 1.200.3
 
       - name: Set Supabase Secrets
         run: |
