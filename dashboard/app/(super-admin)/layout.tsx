@@ -9,11 +9,10 @@ import {
   School,
   DollarSign,
   Users,
-  BarChart3,
-  Settings,
-  LogOut,
+  FileText,
   Menu,
   X,
+  LogOut,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -42,12 +41,7 @@ const navItems = [
   {
     href: '/logs',
     label: 'System Logs',
-    icon: BarChart3,
-  },
-  {
-    href: '/settings',
-    label: 'Settings',
-    icon: Settings,
+    icon: FileText,
   },
 ];
 
@@ -68,25 +62,21 @@ export default function SuperAdminLayout({
 
   async function checkAuth() {
     try {
-      // Get current session
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      const { data: { session } } =
+        await supabase.auth.getSession();
 
       if (!session) {
         router.push('/login');
         return;
       }
 
-      // Check if super admin
       const { data: admin } = await supabase
         .from('platform_admins')
-        .select('full_name, role, is_active')
+        .select('full_name, is_active')
         .eq('email', session.user.email ?? '')
-        .eq('is_active', true)
-        .maybeSingle();
+        .single();
 
-      if (!admin) {
+      if (!admin || !admin.is_active) {
         await supabase.auth.signOut();
         router.push('/login');
         return;
@@ -97,7 +87,7 @@ export default function SuperAdminLayout({
       );
       setChecking(false);
     } catch (err) {
-      console.error('Auth check failed:', err);
+      console.error('Auth check error:', err);
       router.push('/login');
     }
   }
@@ -107,7 +97,6 @@ export default function SuperAdminLayout({
     router.push('/login');
   }
 
-  // Show loading while checking auth
   if (checking) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -128,9 +117,7 @@ export default function SuperAdminLayout({
           'fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg',
           'transform transition-transform duration-200',
           'lg:translate-x-0 lg:static lg:inset-auto',
-          sidebarOpen
-            ? 'translate-x-0'
-            : '-translate-x-full'
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
         {/* Logo */}
@@ -139,9 +126,7 @@ export default function SuperAdminLayout({
             <h1 className="text-xl font-bold text-blue-600">
               XtopEdu
             </h1>
-            <p className="text-xs text-gray-500">
-              Super Admin
-            </p>
+            <p className="text-xs text-gray-500">Super Admin</p>
           </div>
           <Button
             variant="ghost"
@@ -153,12 +138,11 @@ export default function SuperAdminLayout({
           </Button>
         </div>
 
-        {/* Navigation */}
+        {/* Nav */}
         <nav className="p-4 space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = pathname === item.href;
-
             return (
               <Link
                 key={item.href}
@@ -179,7 +163,7 @@ export default function SuperAdminLayout({
           })}
         </nav>
 
-        {/* Bottom - User info */}
+        {/* Bottom */}
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t">
           <div className="flex items-center gap-3 mb-3">
             <div className="h-8 w-8 rounded-full bg-blue-100 flex items-center justify-center">
@@ -188,18 +172,14 @@ export default function SuperAdminLayout({
               </span>
             </div>
             <div>
-              <p className="text-sm font-medium">
-                {adminName}
-              </p>
-              <p className="text-xs text-gray-500">
-                Super Admin
-              </p>
+              <p className="text-sm font-medium">{adminName}</p>
+              <p className="text-xs text-gray-500">Super Admin</p>
             </div>
           </div>
           <Button
             variant="ghost"
             size="sm"
-            className="w-full justify-start text-red-500 hover:text-red-600 hover:bg-red-50"
+            className="w-full justify-start text-red-500"
             onClick={handleLogout}
           >
             <LogOut className="h-4 w-4 mr-2" />
@@ -216,9 +196,9 @@ export default function SuperAdminLayout({
         />
       )}
 
-      {/* Main content */}
+      {/* Main */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Top bar */}
+        {/* Topbar */}
         <header className="bg-white shadow-sm px-4 py-3 flex items-center justify-between shrink-0">
           <Button
             variant="ghost"
@@ -228,15 +208,14 @@ export default function SuperAdminLayout({
           >
             <Menu className="h-5 w-5" />
           </Button>
-
           <div className="ml-auto">
             <span className="text-sm text-gray-500">
-              Welcome back, {adminName}!
+              Welcome, {adminName}!
             </span>
           </div>
         </header>
 
-        {/* Page content */}
+        {/* Content */}
         <main className="flex-1 overflow-auto p-4 lg:p-6">
           {children}
         </main>
