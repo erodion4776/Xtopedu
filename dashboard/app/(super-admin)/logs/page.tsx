@@ -17,7 +17,7 @@ interface Log {
   message: string;
   details: Record<string, unknown> | null;
   created_at: string;
-  schools?: { name: string } | null;
+  schools?: { name: string }[] | null;
 }
 
 const levelColors: Record<string, string> = {
@@ -44,7 +44,7 @@ export default function LogsPage() {
 
   useEffect(() => {
     loadLogs();
-  }, []);
+  }, [filter]);
 
   async function loadLogs() {
     setLoading(true);
@@ -68,7 +68,9 @@ export default function LogsPage() {
       const { data, error: dbError } = await query;
 
       if (dbError) throw dbError;
-      setLogs(data as Log[] ?? []);
+
+      // Cast as unknown first to avoid TypeScript conflict
+      setLogs((data as unknown as Log[]) ?? []);
     } catch (err) {
       console.error('Logs error:', err);
       setError('Failed to load logs.');
@@ -77,10 +79,6 @@ export default function LogsPage() {
     }
   }
 
-  useEffect(() => {
-    loadLogs();
-  }, [filter]);
-
   const counts = {
     all: logs.length,
     error: logs.filter((l) => l.level === 'error').length,
@@ -88,6 +86,15 @@ export default function LogsPage() {
     info: logs.filter((l) => l.level === 'info').length,
     debug: logs.filter((l) => l.level === 'debug').length,
   };
+
+  // Get school name from array safely
+  function getSchoolName(log: Log): string | null {
+    if (!log.schools) return null;
+    if (Array.isArray(log.schools)) {
+      return log.schools[0]?.name ?? null;
+    }
+    return (log.schools as { name: string }).name ?? null;
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -134,7 +141,10 @@ export default function LogsPage() {
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 text-sm p-3 rounded-lg">
             {error}
-            <button onClick={loadLogs} className="ml-2 underline">
+            <button
+              onClick={loadLogs}
+              className="ml-2 underline"
+            >
               Retry
             </button>
           </div>
@@ -155,80 +165,87 @@ export default function LogsPage() {
           </Card>
         ) : (
           <div className="space-y-2">
-            {logs.map((log) => (
-              <Card
-                key={log.id}
-                className={`cursor-pointer ${
-                  log.level === 'error'
-                    ? 'border-red-200'
-                    : log.level === 'warning'
-                    ? 'border-yellow-200'
-                    : ''
-                }`}
-                onClick={() =>
-                  setExpanded(
-                    expanded === log.id ? null : log.id
-                  )
-                }
-              >
-                <CardContent className="py-2 px-3">
-                  <div className="flex items-start gap-2">
-                    <span className="text-sm mt-0.5">
-                      {levelIcons[log.level] ?? '•'}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Badge
-                          className={`text-xs ${
-                            levelColors[log.level] ??
-                            'bg-gray-100'
-                          }`}
-                        >
-                          {log.level}
-                        </Badge>
-                        {log.category && (
-                          <span className="text-xs text-gray-500">
-                            {log.category}
-                          </span>
-                        )}
-                        {log.schools && (
-                          <span className="text-xs text-blue-600">
-                            🏫 {log.schools.name}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-sm text-gray-800 mt-0.5 break-words">
-                        {log.message}
-                      </p>
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        {new Date(log.created_at).toLocaleString(
-                          'en-NG',
-                          {
-                            day: 'numeric',
-                            month: 'short',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          }
-                        )}
-                      </p>
-
-                      {/* Expanded details */}
-                      {expanded === log.id && log.details && (
-                        <div className="mt-2 p-2 bg-gray-50 rounded text-xs font-mono text-gray-600 overflow-x-auto">
-                          <pre>
-                            {JSON.stringify(log.details, null, 2)}
-                          </pre>
+            {logs.map((log) => {
+              const schoolName = getSchoolName(log);
+              return (
+                <Card
+                  key={log.id}
+                  className={`cursor-pointer ${
+                    log.level === 'error'
+                      ? 'border-red-200'
+                      : log.level === 'warning'
+                      ? 'border-yellow-200'
+                      : ''
+                  }`}
+                  onClick={() =>
+                    setExpanded(
+                      expanded === log.id ? null : log.id
+                    )
+                  }
+                >
+                  <CardContent className="py-2 px-3">
+                    <div className="flex items-start gap-2">
+                      <span className="text-sm mt-0.5">
+                        {levelIcons[log.level] ?? '•'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Badge
+                            className={`text-xs ${
+                              levelColors[log.level] ??
+                              'bg-gray-100'
+                            }`}
+                          >
+                            {log.level}
+                          </Badge>
+                          {log.category && (
+                            <span className="text-xs text-gray-500">
+                              {log.category}
+                            </span>
+                          )}
+                          {schoolName && (
+                            <span className="text-xs text-blue-600">
+                              🏫 {schoolName}
+                            </span>
+                          )}
                         </div>
-                      )}
+                        <p className="text-sm text-gray-800 mt-0.5 break-words">
+                          {log.message}
+                        </p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {new Date(log.created_at).toLocaleString(
+                            'en-NG',
+                            {
+                              day: 'numeric',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            }
+                          )}
+                        </p>
+
+                        {/* Expanded details */}
+                        {expanded === log.id &&
+                          log.details && (
+                            <div className="mt-2 p-2 bg-gray-50 rounded text-xs font-mono text-gray-600 overflow-x-auto">
+                              <pre>
+                                {JSON.stringify(
+                                  log.details,
+                                  null,
+                                  2
+                                )}
+                              </pre>
+                            </div>
+                          )}
+                      </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         )}
 
-        {/* Load more hint */}
         {logs.length >= 100 && (
           <p className="text-center text-xs text-gray-400">
             Showing latest 100 logs
