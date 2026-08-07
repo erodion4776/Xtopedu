@@ -1,0 +1,35 @@
+[api]
+enabled = true
+port = 54321
+
+[db]
+port = 54322
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+
+[functions]
+verify_jwt = false
+
+[functions.whatsapp-webhook]
+verify_jwt = false
+
+[functions.marketing-webhook]
+verify_jwt = false
+
+[functions.payment-callback]
+verify_jwt = false
+
+[functions.attendance-notify]
+verify_jwt = false
+
+[functions.fee-reminder-cron]
+verify_jwt = false
+
+[functions.super-admin-api]
+verify_jwt = false
