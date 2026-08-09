@@ -3,6 +3,9 @@
 // supabase/functions/whatsapp-webhook/index.ts
 // ============================================================
 
+import { getSupabase } from '../_shared/supabase.ts';
+import { calculateTotalCharge } from '../_shared/paystack.service.ts';
+
 Deno.serve(async (req: Request): Promise<Response> => {
   // ── GET: Webhook verification ──────────────────────────────
   if (req.method === 'GET') {
@@ -285,21 +288,30 @@ async function handleDemoFlow(
 
   // ── Parent attendance demo ─────────────────────────────────
   if (input === 'parent_att') {
+    const student = await getDemoStudent(phone);
+    const totalDays =
+      (student?.present_days ?? 0) +
+      (student?.absent_days ?? 0) +
+      (student?.late_days ?? 0);
+    const rate = totalDays
+      ? Math.round((student.present_days / totalDays) * 100)
+      : 0;
+
     await sendText(
       phone,
       `✅ *Parent Attendance Experience*\n\n` +
         `This is what a parent sees on WhatsApp:\n\n` +
         `━━━━━━━━━━━━\n` +
         `📅 *Today's Attendance*\n` +
-        `👤 Chidi Okonkwo\n` +
-        `🏫 JSS 3A\n` +
+        `👤 ${student?.name ?? 'Chidi Okonkwo'}\n` +
+        `🏫 ${student?.class ?? 'JSS 3A'}\n` +
         `📌 Status: ✅ Present\n` +
-        `⏰ Arrival: 07:45 AM\n\n` +
+        `⏰ Arrival: ${student?.last_arrival_time ?? '07:45 AM'}\n\n` +
         `📊 *Term Summary*\n` +
-        `Rate: 94%\n` +
-        `✅ Present: 47 days\n` +
-        `❌ Absent: 2 days\n` +
-        `⏰ Late: 1 day\n` +
+        `Rate: ${rate}%\n` +
+        `✅ Present: ${student?.present_days ?? 47} days\n` +
+        `❌ Absent: ${student?.absent_days ?? 2} days\n` +
+        `⏰ Late: ${student?.late_days ?? 1} day\n` +
         `━━━━━━━━━━━━\n\n` +
         `This is the real experience for parents.`
     );
@@ -320,36 +332,72 @@ async function handleDemoFlow(
 
   // ── Parent fee demo ────────────────────────────────────────
   if (input === 'parent_fees') {
-    await sendText(
-      phone,
-      `💰 *Parent Fee Experience*\n\n` +
-        `This is what a parent sees:\n\n` +
-        `━━━━━━━━━━━━\n` +
-        `💰 *Outstanding Fees*\n` +
-        `👤 Chidi Okonkwo - JSS 3A\n\n` +
-        `1. First Term School Fees\n` +
-        `   💵 ₦75,000 remaining\n` +
-        `   📅 Due: 31 Dec 2026\n\n` +
-        `2. PTA Levy\n` +
-        `   💵 ₦15,000\n\n` +
-        `━━━━━━━━━━━━\n` +
-        `💵 *Total: ₦90,000*\n` +
-        `━━━━━━━━━━━━\n\n` +
-        `Then parent taps *Pay Now*.`
-    );
+    const student = await getDemoStudent(phone);
+    const invoices = student?.invoices ?? [];
+    const outstanding = invoices
+      .map((inv: any) => ({
+        ...inv,
+        balance: Number(inv.total_amount) - Number(inv.amount_paid),
+      }))
+      .filter((inv: any) => inv.balance > 0);
 
-    await delay(1000);
+    if (outstanding.length === 0) {
+      await sendText(
+        phone,
+        `💰 *Parent Fee Experience*\n\n` +
+          `This is what a parent sees:\n\n` +
+          `━━━━━━━━━━━━\n` +
+          `💰 *Fees Status*\n` +
+          `👤 ${student?.name ?? 'Chidi Okonkwo'} - ${student?.class ?? 'JSS 3A'}\n\n` +
+          `✅ All fees fully paid for this term.\n` +
+          `No outstanding balance.\n` +
+          `━━━━━━━━━━━━\n\n` +
+          `Parents always know exactly where they stand.`
+      );
+    } else {
+      const total = outstanding.reduce(
+        (sum: number, inv: any) => sum + inv.balance,
+        0
+      );
+      const lines = outstanding
+        .map(
+          (inv: any, i: number) =>
+            `${i + 1}. ${inv.fee_name}\n` +
+            `   💵 ${formatNaira(inv.balance)} remaining\n` +
+            `   📅 Due: ${new Date(inv.due_date).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })}`
+        )
+        .join('\n\n');
 
-    await sendText(
-      phone,
-      `💳 *Payment Breakdown*\n\n` +
-        `School Fee:     ₦50,000\n` +
-        `1.5% Fee:       ₦750\n` +
-        `Processing Fee: ₦125\n` +
-        `━━━━━━━━━━━━\n` +
-        `Parent Pays:    ₦50,875\n\n` +
-        `🏫 The school still receives the full ₦50,000.`
-    );
+      await sendText(
+        phone,
+        `💰 *Parent Fee Experience*\n\n` +
+          `This is what a parent sees:\n\n` +
+          `━━━━━━━━━━━━\n` +
+          `💰 *Outstanding Fees*\n` +
+          `👤 ${student?.name ?? 'Chidi Okonkwo'} - ${student?.class ?? 'JSS 3A'}\n\n` +
+          `${lines}\n\n` +
+          `━━━━━━━━━━━━\n` +
+          `💵 *Total: ${formatNaira(total)}*\n` +
+          `━━━━━━━━━━━━\n\n` +
+          `Then parent taps *Pay Now*.`
+      );
+
+      await delay(1000);
+
+      const firstDue = outstanding[0];
+      const charges = calculateTotalCharge(firstDue.balance);
+
+      await sendText(
+        phone,
+        `💳 *Payment Breakdown*\n\n` +
+          `School Fee:     ${formatNaira(charges.schoolAmount)}\n` +
+          `1.5% Fee:       ${formatNaira(charges.platformCommission)}\n` +
+          `Processing Fee: ${formatNaira(charges.paystackCharge)}\n` +
+          `━━━━━━━━━━━━\n` +
+          `Parent Pays:    ${formatNaira(charges.totalParentPays)}\n\n` +
+          `🏫 The school still receives the full ${formatNaira(charges.schoolAmount)}.`
+      );
+    }
 
     await delay(1000);
 
@@ -367,6 +415,9 @@ async function handleDemoFlow(
 
   // ── Parent pickup demo ─────────────────────────────────────
   if (input === 'parent_pickup') {
+    const student = await getDemoStudent(phone);
+    const pickup = student?.pickup;
+
     await sendText(
       phone,
       `🚗 *Parent Pickup Experience*\n\n` +
@@ -374,10 +425,10 @@ async function handleDemoFlow(
         `this is what the parent sees:\n\n` +
         `━━━━━━━━━━━━\n` +
         `🚗 *Pickup Notification*\n` +
-        `✅ Amara Adeleke has been picked up!\n` +
-        `👤 Picked up by: Mrs. Funmi Adeleke\n` +
-        `👥 Relationship: Mother\n` +
-        `⏰ Time: 2:30 PM\n` +
+        `✅ ${student?.name ?? 'Amara Adeleke'} has been picked up!\n` +
+        `👤 Picked up by: ${pickup?.picked_up_by ?? 'Mrs. Funmi Adeleke'}\n` +
+        `👥 Relationship: ${pickup?.relationship ?? 'Mother'}\n` +
+        `⏰ Time: ${pickup?.pickup_time ?? '2:30 PM'}\n` +
         `━━━━━━━━━━━━\n\n` +
         `If unauthorized, the parent knows instantly.`
     );
@@ -398,18 +449,28 @@ async function handleDemoFlow(
 
   // ── Parent receipt demo ────────────────────────────────────
   if (input === 'parent_receipt') {
+    const student = await getDemoStudent(phone);
+    const invoices = student?.invoices ?? [];
+    // Prefer an invoice that already has a payment on it; fall back to the first.
+    const paidInvoice =
+      invoices.find((inv: any) => Number(inv.amount_paid) > 0) ??
+      invoices[0];
+    const amountPaid = paidInvoice
+      ? Number(paidInvoice.amount_paid) || Number(paidInvoice.total_amount)
+      : 50000;
+
     await sendText(
       phone,
       `🧾 *Parent Receipt Experience*\n\n` +
         `After payment, parent receives:\n\n` +
         `━━━━━━━━━━━━\n` +
         `🧾 *PAYMENT RECEIPT*\n` +
-        `Receipt No: GFA-RCP-2608-1001\n` +
-        `Student: Chidi Okonkwo\n` +
-        `Fee: First Term School Fees\n` +
-        `Amount Paid: ₦50,000\n` +
+        `Receipt No: ${generateReceiptNo()}\n` +
+        `Student: ${student?.name ?? 'Chidi Okonkwo'}\n` +
+        `Fee: ${paidInvoice?.fee_name ?? 'First Term School Fees'}\n` +
+        `Amount Paid: ${formatNaira(amountPaid)}\n` +
         `Method: Bank Transfer\n` +
-        `Ref: SCH-ABC123\n` +
+        `Ref: ${generatePaymentRef()}\n` +
         `━━━━━━━━━━━━\n\n` +
         `This gives the parent instant proof of payment.`
     );
@@ -727,6 +788,89 @@ async function sendList(
   if (!res.ok) {
     throw new Error(`WhatsApp list failed: ${data}`);
   }
+}
+
+// ─── Demo data helpers ──────────────────────────────────────
+// Assigns each WhatsApp number a consistent "persona" (a demo
+// student row) for the length of their session, and fetches
+// their attendance/fees/pickup data from the real tables so
+// the demo isn't just static copy.
+
+function formatNaira(amount: number): string {
+  return `₦${Number(amount).toLocaleString('en-NG')}`;
+}
+
+function generateReceiptNo(): string {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(
+    now.getMonth() + 1
+  ).padStart(2, '0')}`;
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `SCH-RCP-${yymm}-${rand}`;
+}
+
+function generatePaymentRef(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let ref = '';
+  for (let i = 0; i < 8; i++) {
+    ref += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `SCH-${ref}`;
+}
+
+async function getDemoStudent(phone: string): Promise<any | null> {
+  const db = getSupabase();
+
+  // Already assigned a persona this session?
+  const { data: session } = await db
+    .from('demo_sessions')
+    .select('student_id')
+    .eq('phone', phone)
+    .maybeSingle();
+
+  let studentId = session?.student_id;
+
+  // First time — assign a random persona and remember it.
+  if (!studentId) {
+    const { data: candidates } = await db
+      .from('demo_students')
+      .select('id');
+
+    if (!candidates || candidates.length === 0) return null;
+
+    studentId =
+      candidates[Math.floor(Math.random() * candidates.length)].id;
+
+    await db
+      .from('demo_sessions')
+      .upsert({ phone, student_id: studentId });
+  }
+
+  const { data: student } = await db
+    .from('demo_students')
+    .select('*')
+    .eq('id', studentId)
+    .maybeSingle();
+
+  if (!student) return null;
+
+  const { data: invoices } = await db
+    .from('demo_fee_invoices')
+    .select('*')
+    .eq('student_id', studentId);
+
+  const { data: pickupEvents } = await db
+    .from('demo_pickup_events')
+    .select('*')
+    .eq('student_id', studentId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  return {
+    ...student,
+    invoices: invoices ?? [],
+    pickup: pickupEvents?.[0] ?? null,
+  };
 }
 
 function formatPhone(phone: string): string {
