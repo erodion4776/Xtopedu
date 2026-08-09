@@ -1,13 +1,9 @@
 // ============================================================
-// SCHOOLBOT - WHATSAPP WEBHOOK (SAFE DEBUG VERSION)
+// SCHOOLBOT - WHATSAPP WEBHOOK (ULTRA SIMPLE DEBUG)
 // supabase/functions/whatsapp-webhook/index.ts
 // ============================================================
 
-import { WhatsApp } from '../_shared/whatsapp.ts';
-import { getSupabase } from '../_shared/supabase.ts';
 import type { WebhookBody } from '../_shared/types.ts';
-
-const db = getSupabase();
 
 Deno.serve(async (req: Request): Promise<Response> => {
   // ── GET: Webhook verification ──────────────────────────────
@@ -20,173 +16,139 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const verifyToken =
       Deno.env.get('WHATSAPP_WEBHOOK_VERIFY_TOKEN');
 
+    console.log('[VERIFY]', { mode, token, verifyToken });
+
     if (mode === 'subscribe' && token === verifyToken) {
-      console.log('✅ Webhook verified');
       return new Response(challenge ?? '', { status: 200 });
     }
 
-    console.error('❌ Verification failed');
     return new Response('Forbidden', { status: 403 });
   }
 
-  // ── POST: Incoming messages ───────────────────────────────
+  // ── POST: Incoming webhook ─────────────────────────────────
   if (req.method === 'POST') {
-    const body: WebhookBody = await req.json().catch(() => null);
+    try {
+      const body: WebhookBody = await req.json();
 
-    // Always return 200 immediately
-    const response = new Response('OK', { status: 200 });
+      console.log('[WEBHOOK BODY]', JSON.stringify(body));
 
-    processWebhook(body).catch((err) => {
-      console.error('[Webhook] process error:', err);
-    });
+      if (body.object !== 'whatsapp_business_account') {
+        return new Response('OK', { status: 200 });
+      }
 
-    return response;
+      const value = body.entry?.[0]?.changes?.[0]?.value;
+
+      // Ignore statuses
+      if (value?.statuses?.length) {
+        console.log('[STATUS UPDATE]', JSON.stringify(value.statuses));
+        return new Response('OK', { status: 200 });
+      }
+
+      if (!value?.messages?.length) {
+        console.log('[NO MESSAGES]');
+        return new Response('OK', { status: 200 });
+      }
+
+      const message = value.messages[0];
+      const phone = message.from;
+
+      console.log('[INCOMING]', {
+        from: phone,
+        type: message.type,
+        text: message.text?.body ?? null,
+      });
+
+      // Only handle text for now
+      if (message.type === 'text') {
+        const input = message.text?.body?.trim().toLowerCase() ?? '';
+
+        if (['hi', 'hello', 'start', 'menu'].includes(input)) {
+          const sendResult = await sendWhatsAppText(
+            phone,
+            `✅ SchoolBot is responding!\n\n` +
+            `Welcome to XtopEdu WhatsApp bot.\n\n` +
+            `This confirms:\n` +
+            `• Webhook is working ✅\n` +
+            `• Access token is working ✅\n` +
+            `• Phone number ID is working ✅\n\n` +
+            `Next step is to restore the full bot menu.`
+          );
+
+          console.log('[SEND RESULT]', JSON.stringify(sendResult));
+        } else {
+          const sendResult = await sendWhatsAppText(
+            phone,
+            `You said: ${message.text?.body}\n\n` +
+            `Type *hi* to test again.`
+          );
+
+          console.log('[ECHO RESULT]', JSON.stringify(sendResult));
+        }
+      } else {
+        const sendResult = await sendWhatsAppText(
+          phone,
+          `I only understand text messages for now.\n\nType *hi* to test the bot.`
+        );
+        console.log('[NON-TEXT RESULT]', JSON.stringify(sendResult));
+      }
+
+      return new Response('OK', { status: 200 });
+    } catch (err) {
+      console.error('[WEBHOOK ERROR]', err);
+      return new Response(
+        JSON.stringify({ error: String(err) }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
   }
 
   return new Response('Method Not Allowed', { status: 405 });
 });
 
-async function processWebhook(body: WebhookBody | null): Promise<void> {
-  if (!body || body.object !== 'whatsapp_business_account') {
-    console.error('❌ Invalid webhook body');
-    return;
-  }
+// ─── Direct WhatsApp send helper ──────────────────────────────
+async function sendWhatsAppText(
+  to: string,
+  body: string
+): Promise<unknown> {
+  const apiUrl =
+    Deno.env.get('WHATSAPP_API_URL') ??
+    'https://graph.facebook.com/v25.0';
 
-  // Save raw webhook
-  await db.from('whatsapp_webhooks').insert({
-    event_type: 'incoming',
-    payload: body,
-    processed: false,
-    created_at: new Date().toISOString(),
-  }).catch((err) => {
-    console.error('❌ Failed to save webhook', err);
-  });
+  const phoneNumberId =
+    Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
 
-  const value = body.entry?.[0]?.changes?.[0]?.value;
-  if (!value) {
-    console.error('❌ No value in webhook');
-    return;
-  }
+  const accessToken =
+    Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '';
 
-  // Ignore status updates for now
-  if (value.statuses?.length) {
-    console.log('ℹ️ Got status update');
-    return;
-  }
+  const cleanedTo = to.replace(/\D/g, '');
 
-  if (!value.messages?.length) {
-    console.error('❌ No messages in webhook');
-    return;
-  }
-
-  const message = value.messages[0];
-  const phone = message.from;
-
-  console.log('📩 Incoming message:', JSON.stringify(message));
-
-  // Only handle text and interactive
-  if (!['text', 'interactive'].includes(message.type)) {
-    const wa = new WhatsApp();
-    await wa.text(
-      phone,
-      `I can only understand text messages and menu selections for now.\n\nType *hi* to continue.`
-    );
-    return;
-  }
-
-  const wa = new WhatsApp();
-
-  // Extract text or button/list reply
-  let input = '';
-  if (message.type === 'text') {
-    input = message.text?.body?.trim().toLowerCase() ?? '';
-  } else if (message.type === 'interactive') {
-    input =
-      message.interactive?.button_reply?.id?.toLowerCase() ??
-      message.interactive?.list_reply?.id?.toLowerCase() ??
-      '';
-  }
-
-  console.log('📝 Parsed input:', input);
-
-  // TEMP SAFE RESPONSE
-  // This guarantees the bot replies while we verify webhook flow
-  if (['hi', 'hello', 'start', 'menu'].includes(input)) {
-    await wa.list(
-      phone,
-      '🏫 Welcome to SchoolBot',
-      `Hi there! 👋\n\nYour WhatsApp bot is now connected successfully.\n\nWhat would you like to do?`,
-      'SchoolBot Demo',
-      'Choose Option',
-      [
-        {
-          title: 'Get Started',
-          rows: [
-            {
-              id: 'DEMO_ATTENDANCE',
-              title: '✅ Attendance Demo',
-              description: 'See how school alerts work',
-            },
-            {
-              id: 'DEMO_FEES',
-              title: '💰 Fee Demo',
-              description: 'See how fee payment works',
-            },
-            {
-              id: 'REGISTER_SCHOOL',
-              title: '🏫 Register School',
-              description: 'Start onboarding your school',
-            },
-          ],
+  const res = await fetch(
+    `${apiUrl}/${phoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: cleanedTo,
+        type: 'text',
+        text: {
+          body,
         },
-      ]
-    );
-
-    console.log('✅ Welcome menu sent');
-    return;
-  }
-
-  if (input === 'demo_attendance') {
-    await wa.text(
-      phone,
-      `✅ *Attendance Demo*\n\n` +
-      `When a teacher marks a child absent, the parent gets:\n\n` +
-      `❌ *Absence Alert*\n` +
-      `Your child Chidi Okonkwo was marked absent today.\n` +
-      `🏫 Class: JSS 3A\n\n` +
-      `This happens instantly on WhatsApp.`
-    );
-    return;
-  }
-
-  if (input === 'demo_fees') {
-    await wa.text(
-      phone,
-      `💰 *Fee Demo*\n\n` +
-      `Parent sees:\n` +
-      `School Fee: ₦50,000\n` +
-      `Platform Fee: ₦750\n` +
-      `Processing Fee: ₦125\n` +
-      `━━━━━━━━━━━━\n` +
-      `Total: ₦50,875\n\n` +
-      `School still gets full ₦50,000 ✅`
-    );
-    return;
-  }
-
-  if (input === 'register_school') {
-    await wa.text(
-      phone,
-      `🏫 *Register Your School*\n\n` +
-      `Great! Let's begin.\n\n` +
-      `What is your full name?`
-    );
-    return;
-  }
-
-  // Fallback
-  await wa.text(
-    phone,
-    `I got your message: *${input || 'unknown'}*\n\nType *hi* to see the menu again.`
+      }),
+    }
   );
+
+  const data = await res.json();
+
+  return {
+    ok: res.ok,
+    status: res.status,
+    response: data,
+  };
 }
