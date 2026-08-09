@@ -297,6 +297,13 @@ async function handleDemoFlow(
       ? Math.round((student.present_days / totalDays) * 100)
       : 0;
 
+    const statusLabels: Record<string, string> = {
+      present: '✅ Present',
+      absent: '❌ Absent',
+      late: '⏰ Late',
+    };
+    const todayStatus = student?.today_status ?? 'present';
+
     await sendText(
       phone,
       `✅ *Parent Attendance Experience*\n\n` +
@@ -305,8 +312,8 @@ async function handleDemoFlow(
         `📅 *Today's Attendance*\n` +
         `👤 ${student?.name ?? 'Chidi Okonkwo'}\n` +
         `🏫 ${student?.class ?? 'JSS 3A'}\n` +
-        `📌 Status: ✅ Present\n` +
-        `⏰ Arrival: ${student?.last_arrival_time ?? '07:45 AM'}\n\n` +
+        `📌 Status: ${statusLabels[todayStatus]}\n` +
+        `⏰ Arrival: ${todayStatus === 'absent' ? '—' : student?.last_arrival_time ?? '07:45 AM'}\n\n` +
         `📊 *Term Summary*\n` +
         `Rate: ${rate}%\n` +
         `✅ Present: ${student?.present_days ?? 47} days\n` +
@@ -491,6 +498,8 @@ async function handleDemoFlow(
 
   // ── School admin demo ──────────────────────────────────────
   if (input === 'admin_bot') {
+    const student = await getDemoStudent(phone);
+
     await sendText(
       phone,
       `👨‍💼 *School Admin Experience*\n\n` +
@@ -504,49 +513,90 @@ async function handleDemoFlow(
         `5. 📊 Reports\n` +
         `6. 🧾 Receipts\n` +
         `7. 📢 Broadcast to Parents\n` +
-        `━━━━━━━━━━━━`
+        `━━━━━━━━━━━━\n\n` +
+        `Fees, receipts and broadcasts all work the ` +
+        `same way from here \u2014 search a student, act on it, done.`
     );
 
     await delay(1000);
 
     await sendText(
       phone,
-      `✅ *Attendance Marking Example*\n\n` +
-        `Admin selects class:\n` +
-        `• JSS 1A\n` +
-        `• JSS 1B\n\n` +
-        `Then bot shows one student:\n\n` +
-        `👤 John Doe\n` +
-        `📋 ADM/2026/001\n\n` +
-        `Mark as:\n` +
-        `✅ Present\n` +
-        `❌ Absent\n` +
-        `⏰ Late`
+      `✅ *Attendance Marking*\n\n` +
+        `Admin selects a class, then the bot shows\n` +
+        `one student at a time:\n\n` +
+        `👤 ${student?.name ?? 'John Doe'}\n` +
+        `🏫 ${student?.class ?? 'JSS 1A'}\n` +
+        `📋 ${student?.admission_no ?? 'ADM/2026/001'}\n\n` +
+        `This isn't a mockup \u2014 tap a button below and it ` +
+        `actually updates the record. Then check the *Parent ` +
+        `Experience* and see it reflected instantly.`
     );
 
-    await delay(1000);
+    await delay(800);
+
+    await sendButtons(
+      phone,
+      `Mark ${student?.name ?? 'this student'} as:`,
+      [
+        { id: 'MARK_PRESENT', title: '✅ Present' },
+        { id: 'MARK_ABSENT', title: '❌ Absent' },
+        { id: 'MARK_LATE', title: '⏰ Late' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin marks attendance — writes to the real demo record ─
+  if (['mark_present', 'mark_absent', 'mark_late'].includes(input)) {
+    const student = await getDemoStudent(phone);
+
+    if (!student) {
+      await sendText(phone, `Type *hi* to restart the demo.`);
+      return;
+    }
+
+    const statusMap: Record<string, string> = {
+      mark_present: 'present',
+      mark_absent: 'absent',
+      mark_late: 'late',
+    };
+    const status = statusMap[input];
+    const label =
+      status === 'present'
+        ? '✅ Present'
+        : status === 'absent'
+        ? '❌ Absent'
+        : '⏰ Late';
+
+    const db = getSupabase();
+    await db
+      .from('demo_students')
+      .update({ today_status: status })
+      .eq('id', student.id);
 
     await sendText(
       phone,
-      `💰 *Fee Management Example*\n\n` +
-        `Admin can:\n` +
-        `• Search student by name\n` +
-        `• View outstanding invoices\n` +
-        `• Record cash payment\n` +
-        `• Send fee receipt\n` +
-        `• View collection report\n\n` +
-        `Everything happens inside WhatsApp.`
+      `${label}\n\n` +
+        `👤 ${student.name} marked *${status}* for today.\n` +
+        `📅 ${new Date().toLocaleDateString('en-NG', {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+        })}\n\n` +
+        `Saved. In the real bot the parent is notified on ` +
+        `WhatsApp the moment this happens \u2014 see their side below.`
     );
 
     await delay(1000);
 
     await sendButtons(
       phone,
-      `Would you like to see pricing now?`,
+      `See it from the parent's side?`,
       [
+        { id: 'PARENT_ATT', title: '✅ Parent View' },
+        { id: 'MAIN_MENU', title: '↩️ Back to menu' },
         { id: 'PRICING', title: '💵 Pricing' },
-        { id: 'REGISTER', title: '🏫 Register' },
-        { id: 'MAIN_MENU', title: '↩️ Back' },
       ]
     );
     return;
