@@ -749,6 +749,13 @@ function getInput(message: any): string {
   return '';
 }
 
+function getRawText(message: any): string {
+  if (message.type === 'text') {
+    return message.text?.body?.trim() ?? '';
+  }
+  return '';
+}
+
 function rawLooksLikeLead(text: string): boolean {
   return text.includes('|');
 }
