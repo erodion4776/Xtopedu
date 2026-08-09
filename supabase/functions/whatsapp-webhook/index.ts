@@ -1,10 +1,10 @@
 // ============================================================
-// SCHOOLBOT - WHATSAPP WEBHOOK (CLEAN DEMO + ADMIN VERSION)
+// SCHOOLBOT - WHATSAPP WEBHOOK (REALISTIC DEMO VERSION)
 // supabase/functions/whatsapp-webhook/index.ts
 // ============================================================
 
 Deno.serve(async (req: Request): Promise<Response> => {
-  // ── Webhook verification ───────────────────────────────────
+  // ── GET: Webhook verification ──────────────────────────────
   if (req.method === 'GET') {
     const url = new URL(req.url);
     const mode = url.searchParams.get('hub.mode');
@@ -21,7 +21,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return new Response('Forbidden', { status: 403 });
   }
 
-  // ── Incoming messages ──────────────────────────────────────
+  // ── POST: Incoming messages ─────────────────────────────────
   if (req.method === 'POST') {
     try {
       const body = await req.json();
@@ -42,14 +42,39 @@ Deno.serve(async (req: Request): Promise<Response> => {
   return new Response('Method Not Allowed', { status: 405 });
 });
 
+// ============================================================
+// SIMPLE IN-MEMORY LEAD STATE
+// ============================================================
+
+type LeadState = {
+  step: 'name' | 'school' | 'students' | 'location';
+  data: {
+    fullName?: string;
+    schoolName?: string;
+    studentCount?: string;
+    location?: string;
+  };
+};
+
+const leadSessions = new Map<string, LeadState>();
+
+// ============================================================
+// PROCESS WEBHOOK
+// ============================================================
+
 async function processWebhook(body: any): Promise<void> {
-  if (!body || body.object !== 'whatsapp_business_account') return;
+  if (!body || body.object !== 'whatsapp_business_account') {
+    return;
+  }
 
   const value = body.entry?.[0]?.changes?.[0]?.value;
   if (!value) return;
 
-  // ignore status updates
-  if (value.statuses?.length) return;
+  // Ignore delivery/read statuses
+  if (value.statuses?.length) {
+    return;
+  }
+
   if (!value.messages?.length) return;
 
   const message = value.messages[0];
@@ -64,18 +89,25 @@ async function processWebhook(body: any): Promise<void> {
   }
 
   const input = getInput(message);
-  const formattedPhone = formatPhone(phone);
+  const rawText = getRawText(message);
+  const senderPhone = formatPhone(phone);
   const superAdminPhone = formatPhone(
     Deno.env.get('SUPER_ADMIN_PHONE') ?? ''
   );
 
-  // ── YOU (SUPER ADMIN) ──────────────────────────────────────
-  if (formattedPhone === superAdminPhone) {
+  // ── Super admin path ───────────────────────────────────────
+  if (senderPhone === superAdminPhone) {
     await handleSuperAdminFlow(phone, input);
     return;
   }
 
-  // ── SCHOOL OWNER / NEW USER DEMO FLOW ─────────────────────
+  // ── Lead capture path ──────────────────────────────────────
+  if (leadSessions.has(senderPhone) && message.type === 'text') {
+    await handleLeadCapture(phone, rawText);
+    return;
+  }
+
+  // ── Demo / School owner flow ───────────────────────────────
   await handleDemoFlow(phone, input);
 }
 
@@ -111,7 +143,7 @@ async function handleSuperAdminFlow(
             {
               id: 'ADMIN_LEADS',
               title: '🧲 Leads',
-              description: 'View incoming leads',
+              description: 'View new school leads',
             },
             {
               id: 'ADMIN_TEST',
@@ -129,12 +161,12 @@ async function handleSuperAdminFlow(
     await sendText(
       phone,
       `🏫 *Schools Summary*\n\n` +
-      `Use your web dashboard to see:\n` +
-      `• All schools\n` +
-      `• Student count\n` +
-      `• Setup status\n` +
-      `• Activity\n\n` +
-      `Type *menu* to go back.`
+        `Use your web dashboard to see:\n` +
+        `• all schools\n` +
+        `• onboarding status\n` +
+        `• student count\n` +
+        `• WhatsApp status\n\n` +
+        `Type *menu* to go back.`
     );
     return;
   }
@@ -143,11 +175,12 @@ async function handleSuperAdminFlow(
     await sendText(
       phone,
       `💰 *Revenue Summary*\n\n` +
-      `Use your dashboard to see:\n` +
-      `• Setup fee income\n` +
-      `• Termly platform fees\n` +
-      `• 1.5% school fee commissions\n\n` +
-      `Type *menu* to go back.`
+        `Your income comes from:\n\n` +
+        `1️⃣ *Setup Fee* (one-time)\n` +
+        `2️⃣ *Termly Platform Fee*\n` +
+        `3️⃣ *1.5% Commission* on school fee payments\n\n` +
+        `Use your dashboard for the full breakdown.\n\n` +
+        `Type *menu* to go back.`
     );
     return;
   }
@@ -155,10 +188,11 @@ async function handleSuperAdminFlow(
   if (input === 'admin_leads') {
     await sendText(
       phone,
-      `🧲 *Leads*\n\n` +
-      `New schools that message the bot\n` +
-      `will appear in your dashboard.\n\n` +
-      `Type *menu* to go back.`
+      `🧲 *Lead Capture*\n\n` +
+        `When a school owner registers from this bot,\n` +
+        `their details are captured and sent to you.\n\n` +
+        `Use your dashboard to view all leads.\n\n` +
+        `Type *menu* to go back.`
     );
     return;
   }
@@ -167,10 +201,11 @@ async function handleSuperAdminFlow(
     await sendText(
       phone,
       `✅ *Bot Test Successful!*\n\n` +
-      `• Webhook ✅\n` +
-      `• Sending ✅\n` +
-      `• Admin menu ✅\n` +
-      `• Demo menu ✅`
+        `Everything is working:\n` +
+        `• Webhook ✅\n` +
+        `• Sending ✅\n` +
+        `• Demo menu ✅\n` +
+        `• Admin menu ✅`
     );
     return;
   }
@@ -179,7 +214,7 @@ async function handleSuperAdminFlow(
 }
 
 // ============================================================
-// DEMO / SCHOOL OWNER FLOW
+// DEMO FLOW
 // ============================================================
 
 async function handleDemoFlow(
@@ -191,51 +226,54 @@ async function handleDemoFlow(
       phone,
       '🏫 SchoolBot Demo',
       `Welcome to SchoolBot! 👋\n\n` +
-      `SchoolBot helps schools manage:\n` +
-      `✅ Attendance with WhatsApp alerts\n` +
-      `💰 Fee collection & online payments\n` +
-      `🚗 Pickup security\n` +
-      `📊 Reports & analytics\n\n` +
-      `What would you like to see?`,
+        `This demo shows exactly how the bot feels in real life for:\n` +
+        `• Parents\n` +
+        `• School Admins\n\n` +
+        `What would you like to experience?`,
       'Powered by XtopEdu',
-      'See Demo',
+      'Choose Demo',
       [
         {
-          title: 'Parent Demo',
+          title: 'Parent Experience',
           rows: [
             {
-              id: 'DEMO_PARENT_ATT',
-              title: '✅ Parent Attendance View',
-              description: 'See what parent sees',
+              id: 'PARENT_ATT',
+              title: '✅ Check Attendance',
+              description: 'See parent attendance screen',
             },
             {
-              id: 'DEMO_PARENT_FEES',
-              title: '💰 Parent Fee View',
-              description: 'See payment flow',
+              id: 'PARENT_FEES',
+              title: '💰 Check Fees',
+              description: 'See how parent pays fees',
             },
             {
-              id: 'DEMO_PARENT_PICKUP',
-              title: '🚗 Parent Pickup View',
-              description: 'See pickup alerts',
+              id: 'PARENT_PICKUP',
+              title: '🚗 Pickup Alert',
+              description: 'See pickup notification',
+            },
+            {
+              id: 'PARENT_RECEIPT',
+              title: '🧾 Payment Receipt',
+              description: 'See fee receipt',
             },
           ],
         },
         {
-          title: 'School Demo',
+          title: 'School Experience',
           rows: [
             {
-              id: 'DEMO_ADMIN_BOT',
-              title: '👨‍💼 School Admin Bot View',
-              description: 'See how admin uses it',
+              id: 'ADMIN_BOT',
+              title: '👨‍💼 School Admin Bot',
+              description: 'See how admin uses the bot',
             },
             {
-              id: 'DEMO_PRICING',
+              id: 'PRICING',
               title: '💵 Pricing',
               description: 'Setup fee + termly fee + 1.5%',
             },
             {
-              id: 'REGISTER_SCHOOL',
-              title: '🏫 Register My School',
+              id: 'REGISTER',
+              title: '🏫 Register School',
               description: 'Start school registration',
             },
           ],
@@ -246,230 +284,290 @@ async function handleDemoFlow(
   }
 
   // ── Parent attendance demo ─────────────────────────────────
-  if (input === 'demo_parent_att') {
+  if (input === 'parent_att') {
     await sendText(
       phone,
-      `✅ *Parent Attendance Demo*\n\n` +
-      `This is what a parent sees on WhatsApp:\n\n` +
-      `📅 *Today's Attendance*\n` +
-      `👤 Chidi Okonkwo\n` +
-      `🏫 JSS 3A\n` +
-      `📌 Status: ✅ Present\n` +
-      `⏰ Arrival: 07:45 AM\n\n` +
-      `📊 *Term Summary*\n` +
-      `Rate: 94%\n` +
-      `✅ Present: 47 days\n` +
-      `❌ Absent: 2 days\n` +
-      `⏰ Late: 1 day\n\n` +
-      `Parents can check this anytime by just sending a message.`
+      `✅ *Parent Attendance Experience*\n\n` +
+        `This is what a parent sees on WhatsApp:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `📅 *Today's Attendance*\n` +
+        `👤 Chidi Okonkwo\n` +
+        `🏫 JSS 3A\n` +
+        `📌 Status: ✅ Present\n` +
+        `⏰ Arrival: 07:45 AM\n\n` +
+        `📊 *Term Summary*\n` +
+        `Rate: 94%\n` +
+        `✅ Present: 47 days\n` +
+        `❌ Absent: 2 days\n` +
+        `⏰ Late: 1 day\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `This is the real experience for parents.`
     );
 
     await delay(1000);
 
     await sendButtons(
       phone,
-      `Want to see another demo?`,
+      `Try another parent view?`,
       [
-        { id: 'DEMO_PARENT_FEES', title: '💰 Fee Demo' },
-        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
-        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+        { id: 'PARENT_FEES', title: '💰 Fee View' },
+        { id: 'PARENT_PICKUP', title: '🚗 Pickup' },
+        { id: 'ADMIN_BOT', title: '👨‍💼 School Side' },
       ]
     );
     return;
   }
 
   // ── Parent fee demo ────────────────────────────────────────
-  if (input === 'demo_parent_fees') {
+  if (input === 'parent_fees') {
     await sendText(
       phone,
-      `💰 *Parent Fee Demo*\n\n` +
-      `This is what a parent sees:\n\n` +
-      `💰 *Outstanding Fees*\n` +
-      `👤 Chidi Okonkwo - JSS 3A\n\n` +
-      `1. First Term Fee\n` +
-      `   💵 ₦75,000 remaining\n` +
-      `   📅 Due: 31 Dec 2026\n\n` +
-      `2. PTA Levy\n` +
-      `   💵 ₦15,000\n\n` +
-      `━━━━━━━━━━━━\n` +
-      `💵 *Total: ₦90,000*\n\n` +
-      `Parent taps *Pay Now* and pays online from WhatsApp.`
+      `💰 *Parent Fee Experience*\n\n` +
+        `This is what a parent sees:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `💰 *Outstanding Fees*\n` +
+        `👤 Chidi Okonkwo - JSS 3A\n\n` +
+        `1. First Term School Fees\n` +
+        `   💵 ₦75,000 remaining\n` +
+        `   📅 Due: 31 Dec 2026\n\n` +
+        `2. PTA Levy\n` +
+        `   💵 ₦15,000\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `💵 *Total: ₦90,000*\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `Then parent taps *Pay Now*.`
     );
 
     await delay(1000);
 
     await sendText(
       phone,
-      `💳 *Payment Breakdown Example*\n\n` +
-      `School Fee: ₦50,000\n` +
-      `1.5% Commission: ₦750\n` +
-      `Processing Fee: ₦125\n` +
-      `━━━━━━━━━━━━\n` +
-      `Parent Pays: ₦50,875\n\n` +
-      `🏫 School still receives full ₦50,000 ✅`
+      `💳 *Payment Breakdown*\n\n` +
+        `School Fee:     ₦50,000\n` +
+        `1.5% Fee:       ₦750\n` +
+        `Processing Fee: ₦125\n` +
+        `━━━━━━━━━━━━\n` +
+        `Parent Pays:    ₦50,875\n\n` +
+        `🏫 The school still receives the full ₦50,000.`
     );
 
     await delay(1000);
 
     await sendButtons(
       phone,
-      `Would you like to see more?`,
+      `See another part of the parent experience?`,
       [
-        { id: 'DEMO_PARENT_PICKUP', title: '🚗 Pickup Demo' },
-        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
-        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+        { id: 'PARENT_RECEIPT', title: '🧾 Receipt' },
+        { id: 'PARENT_PICKUP', title: '🚗 Pickup' },
+        { id: 'ADMIN_BOT', title: '👨‍💼 School Side' },
       ]
     );
     return;
   }
 
   // ── Parent pickup demo ─────────────────────────────────────
-  if (input === 'demo_parent_pickup') {
+  if (input === 'parent_pickup') {
     await sendText(
       phone,
-      `🚗 *Parent Pickup Demo*\n\n` +
-      `When a child is picked up, the parent receives:\n\n` +
-      `🚗 *Pickup Notification*\n` +
-      `✅ Amara Adeleke has been picked up!\n` +
-      `👤 Picked up by: Mrs. Funmi Adeleke\n` +
-      `👥 Relationship: Mother\n` +
-      `⏰ Time: 2:30 PM\n\n` +
-      `If this was not authorized,\n` +
-      `the parent knows immediately.`
+      `🚗 *Parent Pickup Experience*\n\n` +
+        `When the child is picked up,\n` +
+        `this is what the parent sees:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `🚗 *Pickup Notification*\n` +
+        `✅ Amara Adeleke has been picked up!\n` +
+        `👤 Picked up by: Mrs. Funmi Adeleke\n` +
+        `👥 Relationship: Mother\n` +
+        `⏰ Time: 2:30 PM\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `If unauthorized, the parent knows instantly.`
     );
 
     await delay(1000);
 
     await sendButtons(
       phone,
-      `Want to continue?`,
+      `Continue exploring?`,
       [
-        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
-        { id: 'DEMO_PRICING', title: '💵 Pricing' },
-        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+        { id: 'PARENT_RECEIPT', title: '🧾 Receipt' },
+        { id: 'ADMIN_BOT', title: '👨‍💼 School Side' },
+        { id: 'PRICING', title: '💵 Pricing' },
       ]
     );
     return;
   }
 
-  // ── School admin bot demo ──────────────────────────────────
-  if (input === 'demo_admin_bot') {
+  // ── Parent receipt demo ────────────────────────────────────
+  if (input === 'parent_receipt') {
     await sendText(
       phone,
-      `👨‍💼 *School Admin Bot Demo*\n\n` +
-      `This is what a school admin sees:\n\n` +
-      `📋 *Admin Menu*\n` +
-      `1. ✅ Attendance\n` +
-      `2. 💰 Fees & Payments\n` +
-      `3. 👨‍🏫 Staff Management\n` +
-      `4. 📤 Upload Students (CSV)\n` +
-      `5. 📊 Reports\n` +
-      `6. 🧾 Receipts\n` +
-      `7. 📢 Broadcast to Parents\n\n` +
-      `Everything is managed directly from WhatsApp.`
-    );
-
-    await delay(1000);
-
-    await sendText(
-      phone,
-      `✅ *Attendance Example*\n\n` +
-      `Admin selects class\n` +
-      `Bot shows each student one by one\n` +
-      `Admin taps:\n` +
-      `✅ Present\n` +
-      `❌ Absent\n` +
-      `⏰ Late\n\n` +
-      `Parent receives alert instantly.`
-    );
-
-    await delay(1000);
-
-    await sendText(
-      phone,
-      `💰 *Fees Example*\n\n` +
-      `Admin can:\n` +
-      `• Search student by name\n` +
-      `• View outstanding invoices\n` +
-      `• Record cash payment\n` +
-      `• Send payment receipt\n` +
-      `• View fee reports\n\n` +
-      `No laptop needed.`
+      `🧾 *Parent Receipt Experience*\n\n` +
+        `After payment, parent receives:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `🧾 *PAYMENT RECEIPT*\n` +
+        `Receipt No: GFA-RCP-2608-1001\n` +
+        `Student: Chidi Okonkwo\n` +
+        `Fee: First Term School Fees\n` +
+        `Amount Paid: ₦50,000\n` +
+        `Method: Bank Transfer\n` +
+        `Ref: SCH-ABC123\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `This gives the parent instant proof of payment.`
     );
 
     await delay(1000);
 
     await sendButtons(
       phone,
-      `This is how the school side works.`,
+      `Want to see the school admin side now?`,
       [
-        { id: 'DEMO_PRICING', title: '💵 Pricing' },
-        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+        { id: 'ADMIN_BOT', title: '👨‍💼 School Side' },
+        { id: 'PRICING', title: '💵 Pricing' },
+        { id: 'REGISTER', title: '🏫 Register' },
+      ]
+    );
+    return;
+  }
+
+  // ── School admin demo ──────────────────────────────────────
+  if (input === 'admin_bot') {
+    await sendText(
+      phone,
+      `👨‍💼 *School Admin Experience*\n\n` +
+        `This is how the school admin uses the bot:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `📋 *Admin Menu*\n` +
+        `1. ✅ Attendance\n` +
+        `2. 💰 Fees & Payments\n` +
+        `3. 👨‍🏫 Staff Management\n` +
+        `4. 📤 Upload Students (CSV)\n` +
+        `5. 📊 Reports\n` +
+        `6. 🧾 Receipts\n` +
+        `7. 📢 Broadcast to Parents\n` +
+        `━━━━━━━━━━━━`
+    );
+
+    await delay(1000);
+
+    await sendText(
+      phone,
+      `✅ *Attendance Marking Example*\n\n` +
+        `Admin selects class:\n` +
+        `• JSS 1A\n` +
+        `• JSS 1B\n\n` +
+        `Then bot shows one student:\n\n` +
+        `👤 John Doe\n` +
+        `📋 ADM/2026/001\n\n` +
+        `Mark as:\n` +
+        `✅ Present\n` +
+        `❌ Absent\n` +
+        `⏰ Late`
+    );
+
+    await delay(1000);
+
+    await sendText(
+      phone,
+      `💰 *Fee Management Example*\n\n` +
+        `Admin can:\n` +
+        `• Search student by name\n` +
+        `• View outstanding invoices\n` +
+        `• Record cash payment\n` +
+        `• Send fee receipt\n` +
+        `• View collection report\n\n` +
+        `Everything happens inside WhatsApp.`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `Would you like to see pricing now?`,
+      [
+        { id: 'PRICING', title: '💵 Pricing' },
+        { id: 'REGISTER', title: '🏫 Register' },
         { id: 'MAIN_MENU', title: '↩️ Back' },
       ]
     );
     return;
   }
 
-  // ── Pricing demo ───────────────────────────────────────────
-  if (input === 'demo_pricing') {
+  // ── Pricing ────────────────────────────────────────────────
+  if (input === 'pricing') {
     await sendText(
       phone,
       `💵 *SchoolBot Pricing*\n\n` +
-      `*1. Setup Fee (one-time)*\n` +
-      `This activates your school:\n\n` +
-      `👥 1–100 students: ₦15,000\n` +
-      `👥 101–300 students: ₦25,000\n` +
-      `👥 301–500 students: ₦35,000\n` +
-      `👥 501–1000 students: ₦50,000\n\n` +
-      `*2. Termly Platform Fee*\n` +
-      `Based on your school size.\n` +
-      `Paid once per term.\n\n` +
-      `*3. 1.5% Commission on fee payments*\n` +
-      `This is added on the parent’s payment,\n` +
-      `so the school still gets 100% of the school fee. ✅`
+        `*1. Setup Fee (one-time)*\n` +
+        `This activates your school:\n\n` +
+        `👥 1–100 students: ₦25,000\n` +
+        `👥 101–300 students: ₦50,000\n` +
+        `👥 301–500 students: ₦80,000\n` +
+        `👥 501–1000 students: ₦120,000\n` +
+        `👥 1001–2000 students: ₦180,000\n` +
+        `👥 2000+ students: ₦250,000\n\n` +
+        `*2. Termly Platform Fee*\n` +
+        `This is separate from setup fee:\n\n` +
+        `👥 1–100 students: ₦15,000 / term\n` +
+        `👥 101–300 students: ₦25,000 / term\n` +
+        `👥 301–500 students: ₦35,000 / term\n` +
+        `👥 501–1000 students: ₦50,000 / term\n\n` +
+        `*3. Fee Payment Commission*\n` +
+        `1.5% is added on the parent payment.\n` +
+        `The school still receives 100% of school fees. ✅`
     );
 
     await delay(1000);
 
     await sendButtons(
       phone,
-      `Would you like to register your school now?`,
+      `Ready to register your school?`,
       [
-        { id: 'REGISTER_SCHOOL', title: '🚀 Register Now' },
-        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
+        { id: 'REGISTER', title: '🏫 Register Now' },
+        { id: 'ADMIN_BOT', title: '👨‍💼 School Demo' },
         { id: 'MAIN_MENU', title: '↩️ Back' },
       ]
     );
     return;
   }
 
-  // ── Register school prompt ─────────────────────────────────
-  if (input === 'register_school') {
+  // ── Register school start ──────────────────────────────────
+  if (input === 'register') {
     await sendText(
       phone,
       `🏫 *Register Your School*\n\n` +
-      `Please send your details in this format:\n\n` +
-      `*Your Name | School Name | Student Count | Location*\n\n` +
-      `Example:\n` +
-      `John Peter | Grace Academy | 250 | Lagos\n\n` +
-      `Once you send it, we will capture your lead and continue onboarding.`
+        `Please send your details in this format:\n\n` +
+        `*Your Name | School Name | Student Count | Location*\n\n` +
+        `Example:\n` +
+        `John Peter | Grace Academy | 250 | Lagos`
     );
     return;
   }
 
-  // ── One-line lead capture ──────────────────────────────────
+  // ── Lead capture (simple) ──────────────────────────────────
   if (rawLooksLikeLead(input)) {
     await sendText(
       phone,
       `✅ *Lead Received*\n\n` +
-      `Thank you! We have received your school details.\n\n` +
-      `Our team will contact you shortly to continue onboarding.`
+        `Thank you! We have received your school details.\n\n` +
+        `Our team will contact you shortly to continue onboarding.`
     );
+
+    const superAdminPhone = formatPhone(
+      Deno.env.get('SUPER_ADMIN_PHONE') ?? ''
+    );
+
+    if (superAdminPhone) {
+      await sendText(
+        superAdminPhone,
+        `🧲 *New School Lead*\n\n` +
+          `📱 From: ${phone}\n` +
+          `📝 Details:\n${input}`
+      );
+    }
+
     return;
   }
 
-  // Fallback
+  // fallback
   await sendText(
     phone,
     `Type *hi* to open the SchoolBot demo menu.`
@@ -637,15 +735,7 @@ function formatPhone(phone: string): string {
   return p;
 }
 
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('en-NG', {
-    style: 'currency',
-    currency: 'NGN',
-    minimumFractionDigits: 0,
-  }).format(amount);
-}
-
-function getInput(message: IncomingMessage): string {
+function getInput(message: any): string {
   if (message.type === 'text') {
     return message.text?.body?.trim().toLowerCase() ?? '';
   }
