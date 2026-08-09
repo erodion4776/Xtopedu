@@ -1,183 +1,668 @@
 // ============================================================
-// SCHOOLBOT - WHATSAPP WEBHOOK (LEAD CAPTURE + PRICING + ADMIN DEMO)
+// SCHOOLBOT - WHATSAPP WEBHOOK (CLEAN DEMO + ADMIN VERSION)
 // supabase/functions/whatsapp-webhook/index.ts
 // ============================================================
 
-import { getSupabase } from '../_shared/supabase.ts';
-import { WhatsApp } from '../_shared/whatsapp.ts';
-import type { WebhookBody, IncomingMessage } from '../_shared/types.ts';
-
-const db = getSupabase();
-
-// Simple in-memory state for lead capture (lasts until function restarts)
-const leadState = new Map<string, { step: string, data: any }>();
-
-const fmt = (n: number) =>
-  new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', minimumFractionDigits: 0 }).format(n);
-
 Deno.serve(async (req: Request): Promise<Response> => {
+  // ── Webhook verification ───────────────────────────────────
   if (req.method === 'GET') {
     const url = new URL(req.url);
     const mode = url.searchParams.get('hub.mode');
     const token = url.searchParams.get('hub.verify_token');
     const challenge = url.searchParams.get('hub.challenge');
-    const verifyToken = Deno.env.get('WHATSAPP_WEBHOOK_VERIFY_TOKEN');
-    if (mode === 'subscribe' && token === verifyToken) return new Response(challenge ?? '', { status: 200 });
+
+    const verifyToken =
+      Deno.env.get('WHATSAPP_WEBHOOK_VERIFY_TOKEN');
+
+    if (mode === 'subscribe' && token === verifyToken) {
+      return new Response(challenge ?? '', { status: 200 });
+    }
+
     return new Response('Forbidden', { status: 403 });
   }
 
+  // ── Incoming messages ──────────────────────────────────────
   if (req.method === 'POST') {
     try {
-      const body: WebhookBody = await req.json();
+      const body = await req.json();
       await processWebhook(body);
       return new Response('OK', { status: 200 });
     } catch (err) {
-      console.error('[Webhook Error]', err);
-      return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+      console.error('[WEBHOOK ERROR]', err);
+      return new Response(
+        JSON.stringify({ error: String(err) }),
+        {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
     }
   }
+
   return new Response('Method Not Allowed', { status: 405 });
 });
 
-async function processWebhook(body: WebhookBody): Promise<void> {
+async function processWebhook(body: any): Promise<void> {
+  if (!body || body.object !== 'whatsapp_business_account') return;
+
   const value = body.entry?.[0]?.changes?.[0]?.value;
-  if (!value || !value.messages?.length) return;
+  if (!value) return;
+
+  // ignore status updates
+  if (value.statuses?.length) return;
+  if (!value.messages?.length) return;
 
   const message = value.messages[0];
   const phone = message.from;
-  const wa = new WhatsApp();
+
+  if (!['text', 'interactive'].includes(message.type)) {
+    await sendText(
+      phone,
+      `I can only understand text messages and menu selections for now.\n\nType *hi* to continue.`
+    );
+    return;
+  }
+
   const input = getInput(message);
-  const rawText = getRawText(message);
-  const formattedPhone = phone.replace(/\D/g, '').replace(/^0/, '234');
+  const formattedPhone = formatPhone(phone);
+  const superAdminPhone = formatPhone(
+    Deno.env.get('SUPER_ADMIN_PHONE') ?? ''
+  );
 
-  // ── Super Admin Check ────────────────────
-  const superAdminPhone = Deno.env.get('SUPER_ADMIN_PHONE');
-  if (formattedPhone === superAdminPhone?.replace(/\D/g, '')) {
-    await handleSuperAdminFlow(phone, input, wa);
+  // ── YOU (SUPER ADMIN) ──────────────────────────────────────
+  if (formattedPhone === superAdminPhone) {
+    await handleSuperAdminFlow(phone, input);
     return;
   }
 
-  // ── Lead Capture State Machine ────────────────────
-  const state = leadState.get(phone);
-  if (state) {
-    if (input === 'cancel') {
-        leadState.delete(phone);
-        await wa.text(phone, "Registration cancelled. Type 'hi' to see the demo again.");
-        return;
-    }
-    await handleLeadCapture(phone, state, rawText, wa);
-    return;
-  }
-
-  // ── Routing ────────────────────
-  switch (input) {
-    case 'hi': case 'hello': case 'menu':
-      await showDemoMenu(phone, wa);
-      break;
-    case 'demo_attendance':
-      await wa.text(phone, `✅ *Attendance Demo (Parent View)*\n\nWhen a teacher marks a student absent, the parent gets this:\n\n❌ *Absence Alert*\nYour child *Chidi Okonkwo* was marked absent today.\n🏫 Class: JSS 3A\n\n*Results:* 98% of parents say this gives them peace of mind!`);
-      break;
-    case 'demo_fees':
-      await wa.text(phone, `💰 *Fee Demo (Parent View)*\n\nParent sees their balance and a pay button:\n\nOutstanding: *${fmt(50000)}*\n\nThey tap "Pay Now", use Transfer or Card, and the school gets *100%* of the money instantly. ✅`);
-      break;
-    case 'demo_admin':
-      await showSchoolAdminDemo(phone, wa);
-      break;
-    case 'demo_pricing':
-      await showPricing(phone, wa);
-      break;
-    case 'register_school':
-      leadState.set(phone, { step: 'NAME', data: {} });
-      await wa.text(phone, `🏫 *Start Registration*\n\nI will help you set up your school. First, what is your *Full Name*?\n\n_(Type 'cancel' to stop)_`);
-      break;
-    default:
-      await wa.text(phone, `Welcome to *SchoolBot*! 👋\nType *hi* to see how we help schools manage attendance and fees.`);
-  }
+  // ── SCHOOL OWNER / NEW USER DEMO FLOW ─────────────────────
+  await handleDemoFlow(phone, input);
 }
 
-async function showDemoMenu(phone: string, wa: WhatsApp) {
-  await wa.list(phone, '🏫 SchoolBot Demo', 
-    "Welcome! Explore how SchoolBot works for Parents and Admins.",
-    "Powered by XtopEdu", "🎯 Explore", [
-    {
-      title: "Demos",
-      rows: [
-        { id: "DEMO_ATTENDANCE", title: "✅ Attendance Demo", description: "What parents see" },
-        { id: "DEMO_FEES", title: "💰 Fee Payment Demo", description: "How parents pay" },
-        { id: "DEMO_ADMIN", title: "👨‍💼 School Admin Demo", description: "How you manage the school" },
-        { id: "DEMO_PRICING", title: "💵 Pricing & Plans", description: "Termly platform fees" },
-        { id: "REGISTER_SCHOOL", title: "🚀 Register My School", description: "Get started today" },
+// ============================================================
+// SUPER ADMIN FLOW
+// ============================================================
+
+async function handleSuperAdminFlow(
+  phone: string,
+  input: string
+): Promise<void> {
+  if (['hi', 'hello', 'menu', 'start', 'main_menu'].includes(input)) {
+    await sendList(
+      phone,
+      '🔐 XtopEdu Admin',
+      `Welcome back! 👋\n\nWhat would you like to do?`,
+      'Super Admin Panel',
+      'Open Menu',
+      [
+        {
+          title: 'Admin Options',
+          rows: [
+            {
+              id: 'ADMIN_SCHOOLS',
+              title: '🏫 Schools',
+              description: 'View school summary',
+            },
+            {
+              id: 'ADMIN_REVENUE',
+              title: '💰 Revenue',
+              description: 'View revenue summary',
+            },
+            {
+              id: 'ADMIN_LEADS',
+              title: '🧲 Leads',
+              description: 'View incoming leads',
+            },
+            {
+              id: 'ADMIN_TEST',
+              title: '🤖 Bot Test',
+              description: 'Confirm bot is working',
+            },
+          ],
+        },
       ]
+    );
+    return;
+  }
+
+  if (input === 'admin_schools') {
+    await sendText(
+      phone,
+      `🏫 *Schools Summary*\n\n` +
+      `Use your web dashboard to see:\n` +
+      `• All schools\n` +
+      `• Student count\n` +
+      `• Setup status\n` +
+      `• Activity\n\n` +
+      `Type *menu* to go back.`
+    );
+    return;
+  }
+
+  if (input === 'admin_revenue') {
+    await sendText(
+      phone,
+      `💰 *Revenue Summary*\n\n` +
+      `Use your dashboard to see:\n` +
+      `• Setup fee income\n` +
+      `• Termly platform fees\n` +
+      `• 1.5% school fee commissions\n\n` +
+      `Type *menu* to go back.`
+    );
+    return;
+  }
+
+  if (input === 'admin_leads') {
+    await sendText(
+      phone,
+      `🧲 *Leads*\n\n` +
+      `New schools that message the bot\n` +
+      `will appear in your dashboard.\n\n` +
+      `Type *menu* to go back.`
+    );
+    return;
+  }
+
+  if (input === 'admin_test') {
+    await sendText(
+      phone,
+      `✅ *Bot Test Successful!*\n\n` +
+      `• Webhook ✅\n` +
+      `• Sending ✅\n` +
+      `• Admin menu ✅\n` +
+      `• Demo menu ✅`
+    );
+    return;
+  }
+
+  await sendText(phone, `Type *menu* to open your admin panel.`);
+}
+
+// ============================================================
+// DEMO / SCHOOL OWNER FLOW
+// ============================================================
+
+async function handleDemoFlow(
+  phone: string,
+  input: string
+): Promise<void> {
+  if (['hi', 'hello', 'menu', 'start', 'main_menu'].includes(input)) {
+    await sendList(
+      phone,
+      '🏫 SchoolBot Demo',
+      `Welcome to SchoolBot! 👋\n\n` +
+      `SchoolBot helps schools manage:\n` +
+      `✅ Attendance with WhatsApp alerts\n` +
+      `💰 Fee collection & online payments\n` +
+      `🚗 Pickup security\n` +
+      `📊 Reports & analytics\n\n` +
+      `What would you like to see?`,
+      'Powered by XtopEdu',
+      'See Demo',
+      [
+        {
+          title: 'Parent Demo',
+          rows: [
+            {
+              id: 'DEMO_PARENT_ATT',
+              title: '✅ Parent Attendance View',
+              description: 'See what parent sees',
+            },
+            {
+              id: 'DEMO_PARENT_FEES',
+              title: '💰 Parent Fee View',
+              description: 'See payment flow',
+            },
+            {
+              id: 'DEMO_PARENT_PICKUP',
+              title: '🚗 Parent Pickup View',
+              description: 'See pickup alerts',
+            },
+          ],
+        },
+        {
+          title: 'School Demo',
+          rows: [
+            {
+              id: 'DEMO_ADMIN_BOT',
+              title: '👨‍💼 School Admin Bot View',
+              description: 'See how admin uses it',
+            },
+            {
+              id: 'DEMO_PRICING',
+              title: '💵 Pricing',
+              description: 'Setup fee + termly fee + 1.5%',
+            },
+            {
+              id: 'REGISTER_SCHOOL',
+              title: '🏫 Register My School',
+              description: 'Start school registration',
+            },
+          ],
+        },
+      ]
+    );
+    return;
+  }
+
+  // ── Parent attendance demo ─────────────────────────────────
+  if (input === 'demo_parent_att') {
+    await sendText(
+      phone,
+      `✅ *Parent Attendance Demo*\n\n` +
+      `This is what a parent sees on WhatsApp:\n\n` +
+      `📅 *Today's Attendance*\n` +
+      `👤 Chidi Okonkwo\n` +
+      `🏫 JSS 3A\n` +
+      `📌 Status: ✅ Present\n` +
+      `⏰ Arrival: 07:45 AM\n\n` +
+      `📊 *Term Summary*\n` +
+      `Rate: 94%\n` +
+      `✅ Present: 47 days\n` +
+      `❌ Absent: 2 days\n` +
+      `⏰ Late: 1 day\n\n` +
+      `Parents can check this anytime by just sending a message.`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `Want to see another demo?`,
+      [
+        { id: 'DEMO_PARENT_FEES', title: '💰 Fee Demo' },
+        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
+        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+      ]
+    );
+    return;
+  }
+
+  // ── Parent fee demo ────────────────────────────────────────
+  if (input === 'demo_parent_fees') {
+    await sendText(
+      phone,
+      `💰 *Parent Fee Demo*\n\n` +
+      `This is what a parent sees:\n\n` +
+      `💰 *Outstanding Fees*\n` +
+      `👤 Chidi Okonkwo - JSS 3A\n\n` +
+      `1. First Term Fee\n` +
+      `   💵 ₦75,000 remaining\n` +
+      `   📅 Due: 31 Dec 2026\n\n` +
+      `2. PTA Levy\n` +
+      `   💵 ₦15,000\n\n` +
+      `━━━━━━━━━━━━\n` +
+      `💵 *Total: ₦90,000*\n\n` +
+      `Parent taps *Pay Now* and pays online from WhatsApp.`
+    );
+
+    await delay(1000);
+
+    await sendText(
+      phone,
+      `💳 *Payment Breakdown Example*\n\n` +
+      `School Fee: ₦50,000\n` +
+      `1.5% Commission: ₦750\n` +
+      `Processing Fee: ₦125\n` +
+      `━━━━━━━━━━━━\n` +
+      `Parent Pays: ₦50,875\n\n` +
+      `🏫 School still receives full ₦50,000 ✅`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `Would you like to see more?`,
+      [
+        { id: 'DEMO_PARENT_PICKUP', title: '🚗 Pickup Demo' },
+        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
+        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+      ]
+    );
+    return;
+  }
+
+  // ── Parent pickup demo ─────────────────────────────────────
+  if (input === 'demo_parent_pickup') {
+    await sendText(
+      phone,
+      `🚗 *Parent Pickup Demo*\n\n` +
+      `When a child is picked up, the parent receives:\n\n` +
+      `🚗 *Pickup Notification*\n` +
+      `✅ Amara Adeleke has been picked up!\n` +
+      `👤 Picked up by: Mrs. Funmi Adeleke\n` +
+      `👥 Relationship: Mother\n` +
+      `⏰ Time: 2:30 PM\n\n` +
+      `If this was not authorized,\n` +
+      `the parent knows immediately.`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `Want to continue?`,
+      [
+        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
+        { id: 'DEMO_PRICING', title: '💵 Pricing' },
+        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+      ]
+    );
+    return;
+  }
+
+  // ── School admin bot demo ──────────────────────────────────
+  if (input === 'demo_admin_bot') {
+    await sendText(
+      phone,
+      `👨‍💼 *School Admin Bot Demo*\n\n` +
+      `This is what a school admin sees:\n\n` +
+      `📋 *Admin Menu*\n` +
+      `1. ✅ Attendance\n` +
+      `2. 💰 Fees & Payments\n` +
+      `3. 👨‍🏫 Staff Management\n` +
+      `4. 📤 Upload Students (CSV)\n` +
+      `5. 📊 Reports\n` +
+      `6. 🧾 Receipts\n` +
+      `7. 📢 Broadcast to Parents\n\n` +
+      `Everything is managed directly from WhatsApp.`
+    );
+
+    await delay(1000);
+
+    await sendText(
+      phone,
+      `✅ *Attendance Example*\n\n` +
+      `Admin selects class\n` +
+      `Bot shows each student one by one\n` +
+      `Admin taps:\n` +
+      `✅ Present\n` +
+      `❌ Absent\n` +
+      `⏰ Late\n\n` +
+      `Parent receives alert instantly.`
+    );
+
+    await delay(1000);
+
+    await sendText(
+      phone,
+      `💰 *Fees Example*\n\n` +
+      `Admin can:\n` +
+      `• Search student by name\n` +
+      `• View outstanding invoices\n` +
+      `• Record cash payment\n` +
+      `• Send payment receipt\n` +
+      `• View fee reports\n\n` +
+      `No laptop needed.`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `This is how the school side works.`,
+      [
+        { id: 'DEMO_PRICING', title: '💵 Pricing' },
+        { id: 'REGISTER_SCHOOL', title: '🚀 Register' },
+        { id: 'MAIN_MENU', title: '↩️ Back' },
+      ]
+    );
+    return;
+  }
+
+  // ── Pricing demo ───────────────────────────────────────────
+  if (input === 'demo_pricing') {
+    await sendText(
+      phone,
+      `💵 *SchoolBot Pricing*\n\n` +
+      `*1. Setup Fee (one-time)*\n` +
+      `This activates your school:\n\n` +
+      `👥 1–100 students: ₦15,000\n` +
+      `👥 101–300 students: ₦25,000\n` +
+      `👥 301–500 students: ₦35,000\n` +
+      `👥 501–1000 students: ₦50,000\n\n` +
+      `*2. Termly Platform Fee*\n` +
+      `Based on your school size.\n` +
+      `Paid once per term.\n\n` +
+      `*3. 1.5% Commission on fee payments*\n` +
+      `This is added on the parent’s payment,\n` +
+      `so the school still gets 100% of the school fee. ✅`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `Would you like to register your school now?`,
+      [
+        { id: 'REGISTER_SCHOOL', title: '🚀 Register Now' },
+        { id: 'DEMO_ADMIN_BOT', title: '👨‍💼 Admin Demo' },
+        { id: 'MAIN_MENU', title: '↩️ Back' },
+      ]
+    );
+    return;
+  }
+
+  // ── Register school prompt ─────────────────────────────────
+  if (input === 'register_school') {
+    await sendText(
+      phone,
+      `🏫 *Register Your School*\n\n` +
+      `Please send your details in this format:\n\n` +
+      `*Your Name | School Name | Student Count | Location*\n\n` +
+      `Example:\n` +
+      `John Peter | Grace Academy | 250 | Lagos\n\n` +
+      `Once you send it, we will capture your lead and continue onboarding.`
+    );
+    return;
+  }
+
+  // ── One-line lead capture ──────────────────────────────────
+  if (rawLooksLikeLead(input)) {
+    await sendText(
+      phone,
+      `✅ *Lead Received*\n\n` +
+      `Thank you! We have received your school details.\n\n` +
+      `Our team will contact you shortly to continue onboarding.`
+    );
+    return;
+  }
+
+  // Fallback
+  await sendText(
+    phone,
+    `Type *hi* to open the SchoolBot demo menu.`
+  );
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+async function sendText(
+  to: string,
+  body: string
+): Promise<void> {
+  const apiUrl =
+    Deno.env.get('WHATSAPP_API_URL') ??
+    'https://graph.facebook.com/v25.0';
+  const phoneNumberId =
+    Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
+  const accessToken =
+    Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '';
+
+  const res = await fetch(
+    `${apiUrl}/${phoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: to.replace(/\D/g, ''),
+        type: 'text',
+        text: { body },
+      }),
     }
-  ]);
-}
+  );
 
-async function showSchoolAdminDemo(phone: string, wa: WhatsApp) {
-  await wa.text(phone, `👨‍💼 *School Admin Demo*\n\nAs an Admin, you can:\n\n1. *Mark Attendance:* Select a class and tap P, A, L, or E for each student. Parents are notified immediately.\n\n2. *Record Payments:* If a parent pays cash, you record it here to update their balance.\n\n3. *Broadcast:* Send a single message to ALL parents in the school or a specific class.\n\n4. *Reports:* Get a daily summary of total money collected and attendance rates.`);
-}
+  const data = await res.text();
+  console.log('[SEND TEXT]', data);
 
-async function showPricing(phone: string, wa: WhatsApp) {
-  await wa.text(phone, `💵 *Termly Platform Fees*\n\nOur pricing is based on student count, paid once per term:\n\n🌱 1-100 students: *${fmt(15000)}/term*\n🚀 101-300 students: *${fmt(25000)}/term*\n🏢 301-500 students: *${fmt(35000)}/term*\n🏆 501-1000 students: *${fmt(50000)}/term*\n\n*Note:* Parents pay a small 1.5% commission on fee payments. Your school keeps *100%* of the fee!`);
-}
-
-async function handleLeadCapture(phone: string, state: any, text: string, wa: WhatsApp) {
-  if (state.step === 'NAME') {
-    state.data.name = text;
-    state.step = 'SCHOOL';
-    leadState.set(phone, state);
-    await wa.text(phone, `Nice to meet you, *${text}*! What is the name of your *School*?`);
-  } else if (state.step === 'SCHOOL') {
-    state.data.school = text;
-    state.step = 'COUNT';
-    leadState.set(phone, state);
-    await wa.list(phone, 'Student Count', "Roughly how many students do you have?", "", "Select", [
-        { title: "Size", rows: [
-            { id: "1-100", title: "1 to 100" },
-            { id: "101-300", title: "101 to 300" },
-            { id: "301-500", title: "301 to 500" },
-            { id: "501-1000", title: "501 to 1000" },
-        ]}
-    ]);
-  } else {
-    // Save to database
-    const studentCount = text; // From list selection
-    const { error } = await db.from('leads').insert({
-        contact_name: state.data.name,
-        school_name: state.data.school,
-        student_count: studentCount,
-        phone: phone,
-        status: 'new'
-    });
-
-    if (error) {
-        await wa.text(phone, "Sorry, there was an error saving your details. Please try again later.");
-    } else {
-        await wa.text(phone, `🎉 *Registration Submitted!*\n\nThank you, ${state.data.name}. We have received your request for *${state.data.school}*.\n\nOur team will contact you on this number shortly to set up your account.`);
-        
-        // Notify Super Admin
-        const superAdminPhone = Deno.env.get('SUPER_ADMIN_PHONE');
-        if (superAdminPhone) {
-            const botWa = new WhatsApp();
-            await botWa.text(superAdminPhone, `🧲 *New Lead Alert!*\n\nName: ${state.data.name}\nSchool: ${state.data.school}\nStudents: ${studentCount}\nPhone: ${phone}`);
-        }
-    }
-    leadState.delete(phone);
+  if (!res.ok) {
+    throw new Error(`WhatsApp send failed: ${data}`);
   }
 }
 
-async function handleSuperAdminFlow(phone: string, input: string, wa: WhatsApp) {
-    // Reuse your working Admin menu logic here...
-    await wa.text(phone, "🔐 *Super Admin Menu*\nWelcome back owner. (Summary of schools and revenue would go here)");
+async function sendButtons(
+  to: string,
+  body: string,
+  buttons: Array<{ id: string; title: string }>
+): Promise<void> {
+  const apiUrl =
+    Deno.env.get('WHATSAPP_API_URL') ??
+    'https://graph.facebook.com/v25.0';
+  const phoneNumberId =
+    Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
+  const accessToken =
+    Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '';
+
+  const res = await fetch(
+    `${apiUrl}/${phoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: to.replace(/\D/g, ''),
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: body },
+          action: {
+            buttons: buttons.slice(0, 3).map((b) => ({
+              type: 'reply',
+              reply: {
+                id: b.id,
+                title: b.title.substring(0, 20),
+              },
+            })),
+          },
+        },
+      }),
+    }
+  );
+
+  const data = await res.text();
+  console.log('[SEND BUTTONS]', data);
+
+  if (!res.ok) {
+    throw new Error(`WhatsApp buttons failed: ${data}`);
+  }
+}
+
+async function sendList(
+  to: string,
+  header: string,
+  body: string,
+  footer: string,
+  buttonLabel: string,
+  sections: Array<{
+    title: string;
+    rows: Array<{
+      id: string;
+      title: string;
+      description?: string;
+    }>;
+  }>
+): Promise<void> {
+  const apiUrl =
+    Deno.env.get('WHATSAPP_API_URL') ??
+    'https://graph.facebook.com/v25.0';
+  const phoneNumberId =
+    Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
+  const accessToken =
+    Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '';
+
+  const res = await fetch(
+    `${apiUrl}/${phoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: to.replace(/\D/g, ''),
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          header: {
+            type: 'text',
+            text: header,
+          },
+          body: {
+            text: body,
+          },
+          footer: {
+            text: footer,
+          },
+          action: {
+            button: buttonLabel,
+            sections,
+          },
+        },
+      }),
+    }
+  );
+
+  const data = await res.text();
+  console.log('[SEND LIST]', data);
+
+  if (!res.ok) {
+    throw new Error(`WhatsApp list failed: ${data}`);
+  }
+}
+
+function formatPhone(phone: string): string {
+  let p = phone.replace(/\D/g, '');
+  if (p.startsWith('0')) p = '234' + p.slice(1);
+  return p;
+}
+
+function formatCurrency(amount: number): string {
+  return new Intl.NumberFormat('en-NG', {
+    style: 'currency',
+    currency: 'NGN',
+    minimumFractionDigits: 0,
+  }).format(amount);
 }
 
 function getInput(message: IncomingMessage): string {
-  if (message.type === 'text') return message.text?.body?.trim().toLowerCase() ?? '';
+  if (message.type === 'text') {
+    return message.text?.body?.trim().toLowerCase() ?? '';
+  }
   if (message.type === 'interactive') {
-    return message.interactive?.button_reply?.id?.toLowerCase() ?? message.interactive?.list_reply?.id?.toLowerCase() ?? '';
+    return (
+      message.interactive?.button_reply?.id?.toLowerCase() ??
+      message.interactive?.list_reply?.id?.toLowerCase() ??
+      ''
+    );
   }
   return '';
 }
 
-function getRawText(message: IncomingMessage): string {
-  return message.type === 'text' ? message.text?.body?.trim() ?? '' : (message.interactive?.list_reply?.title ?? '');
+function rawLooksLikeLead(text: string): boolean {
+  return text.includes('|');
 }
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}f
