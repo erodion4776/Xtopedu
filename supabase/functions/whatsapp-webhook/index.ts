@@ -653,10 +653,14 @@ async function handleDemoFlow(
         : '⏰ Late';
 
     const db = getSupabase();
-    await db
+    const { error: markErr } = await db
       .from('demo_students')
       .update({ today_status: status })
       .eq('id', student.id);
+
+    if (markErr) {
+      console.error('[DEMO DB ERROR] attendance update', markErr);
+    }
 
     await sendText(
       phone,
@@ -770,15 +774,19 @@ async function handleDemoFlow(
     const invoice = outstanding[0];
     const db = getSupabase();
 
-    await db
+    const { error: payErr } = await db
       .from('demo_fee_invoices')
       .update({ amount_paid: invoice.total_amount })
       .eq('id', invoice.id);
 
+    if (payErr) {
+      console.error('[DEMO DB ERROR] invoice update', payErr);
+    }
+
     const receiptNo = generateReceiptNo();
     const reference = generatePaymentRef();
 
-    await db.from('demo_receipts').insert({
+    const { error: receiptErr } = await db.from('demo_receipts').insert({
       student_id: student.id,
       invoice_id: invoice.id,
       fee_name: invoice.fee_name,
@@ -787,6 +795,10 @@ async function handleDemoFlow(
       reference,
       receipt_no: receiptNo,
     });
+
+    if (receiptErr) {
+      console.error('[DEMO DB ERROR] receipt insert', receiptErr);
+    }
 
     await sendText(
       phone,
@@ -1282,49 +1294,73 @@ async function getDemoStudent(phone: string): Promise<any | null> {
   const db = getSupabase();
 
   // Already assigned a persona this session?
-  const { data: session } = await db
+  const { data: session, error: sessionErr } = await db
     .from('demo_sessions')
     .select('student_id')
     .eq('phone', phone)
     .maybeSingle();
 
+  if (sessionErr) {
+    console.error('[DEMO DB ERROR] session select', sessionErr);
+  }
+
   let studentId = session?.student_id;
 
   // First time — assign a random persona and remember it.
   if (!studentId) {
-    const { data: candidates } = await db
+    const { data: candidates, error: candErr } = await db
       .from('demo_students')
       .select('id');
+
+    if (candErr) {
+      console.error('[DEMO DB ERROR] candidates select', candErr);
+    }
 
     if (!candidates || candidates.length === 0) return null;
 
     studentId =
       candidates[Math.floor(Math.random() * candidates.length)].id;
 
-    await db
+    const { error: upsertErr } = await db
       .from('demo_sessions')
-      .upsert({ phone, student_id: studentId });
+      .upsert({ phone, student_id: studentId }, { onConflict: 'phone' });
+
+    if (upsertErr) {
+      console.error('[DEMO DB ERROR] session upsert', upsertErr);
+    }
   }
 
-  const { data: student } = await db
+  const { data: student, error: studentErr } = await db
     .from('demo_students')
     .select('*')
     .eq('id', studentId)
     .maybeSingle();
 
+  if (studentErr) {
+    console.error('[DEMO DB ERROR] student select', studentErr);
+  }
+
   if (!student) return null;
 
-  const { data: invoices } = await db
+  const { data: invoices, error: invErr } = await db
     .from('demo_fee_invoices')
     .select('*')
     .eq('student_id', studentId);
 
-  const { data: pickupEvents } = await db
+  if (invErr) {
+    console.error('[DEMO DB ERROR] invoices select', invErr);
+  }
+
+  const { data: pickupEvents, error: pickupErr } = await db
     .from('demo_pickup_events')
     .select('*')
     .eq('student_id', studentId)
     .order('created_at', { ascending: false })
     .limit(1);
+
+  if (pickupErr) {
+    console.error('[DEMO DB ERROR] pickup select', pickupErr);
+  }
 
   return {
     ...student,
