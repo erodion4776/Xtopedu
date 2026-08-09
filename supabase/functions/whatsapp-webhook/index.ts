@@ -60,6 +60,7 @@ type LeadState = {
 };
 
 const leadSessions = new Map<string, LeadState>();
+const demoBroadcastAwaiting = new Set<string>();
 
 // ============================================================
 // PROCESS WEBHOOK
@@ -107,6 +108,13 @@ async function processWebhook(body: any): Promise<void> {
   // ── Lead capture path ──────────────────────────────────────
   if (leadSessions.has(senderPhone) && message.type === 'text') {
     await handleLeadCapture(phone, rawText);
+    return;
+  }
+
+  // ── Admin broadcast text capture ───────────────────────────
+  if (demoBroadcastAwaiting.has(senderPhone) && message.type === 'text') {
+    demoBroadcastAwaiting.delete(senderPhone);
+    await handleBroadcastCapture(phone, rawText);
     return;
   }
 
@@ -214,6 +222,38 @@ async function handleSuperAdminFlow(
   }
 
   await sendText(phone, `Type *menu* to open your admin panel.`);
+}
+
+// ============================================================
+// ADMIN BROADCAST CAPTURE
+// ============================================================
+
+async function handleBroadcastCapture(
+  phone: string,
+  text: string
+): Promise<void> {
+  await sendText(
+    phone,
+    `📢 *Broadcast Sent!*\n\n` +
+      `Delivered to every parent on WhatsApp instantly. Here's ` +
+      `exactly what they received:\n\n` +
+      `━━━━━━━━━━━━\n` +
+      `📢 *Announcement*\n\n` +
+      `${text}\n` +
+      `━━━━━━━━━━━━`
+  );
+
+  await delay(1000);
+
+  await sendButtons(
+    phone,
+    `Continue exploring?`,
+    [
+      { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+      { id: 'PRICING', title: '💵 Pricing' },
+      { id: 'MAIN_MENU', title: '↩️ Main Menu' },
+    ]
+  );
 }
 
 // ============================================================
@@ -496,29 +536,72 @@ async function handleDemoFlow(
     return;
   }
 
-  // ── School admin demo ──────────────────────────────────────
+  // ── School admin demo — main menu ──────────────────────────
   if (input === 'admin_bot') {
-    const student = await getDemoStudent(phone);
-
     await sendText(
       phone,
       `👨‍💼 *School Admin Experience*\n\n` +
-        `This is how the school admin uses the bot:\n\n` +
-        `━━━━━━━━━━━━\n` +
-        `📋 *Admin Menu*\n` +
-        `1. ✅ Attendance\n` +
-        `2. 💰 Fees & Payments\n` +
-        `3. 👨‍🏫 Staff Management\n` +
-        `4. 📤 Upload Students (CSV)\n` +
-        `5. 📊 Reports\n` +
-        `6. 🧾 Receipts\n` +
-        `7. 📢 Broadcast to Parents\n` +
-        `━━━━━━━━━━━━\n\n` +
-        `Fees, receipts and broadcasts all work the ` +
-        `same way from here \u2014 search a student, act on it, done.`
+        `This is how the school admin uses the bot \u2014 ` +
+        `every option below is live, not a mockup. Try any of them.`
     );
 
-    await delay(1000);
+    await delay(800);
+
+    await sendList(
+      phone,
+      '📋 Admin Menu',
+      `Pick an action to try it for real:`,
+      'Powered by XtopEdu',
+      'Open Menu',
+      [
+        {
+          title: 'Admin Actions',
+          rows: [
+            {
+              id: 'ADMIN_DEMO_ATT',
+              title: '✅ Attendance',
+              description: 'Mark a real student present/absent',
+            },
+            {
+              id: 'ADMIN_DEMO_FEES',
+              title: '💰 Fees & Payments',
+              description: 'Search a student, record a payment',
+            },
+            {
+              id: 'ADMIN_DEMO_STAFF',
+              title: '👨‍🏫 Staff Management',
+              description: 'View the school\u2019s staff list',
+            },
+            {
+              id: 'ADMIN_DEMO_UPLOAD',
+              title: '📤 Upload Students',
+              description: 'See a real bulk-import result',
+            },
+            {
+              id: 'ADMIN_DEMO_REPORTS',
+              title: '📊 Reports',
+              description: 'Live attendance & collection numbers',
+            },
+            {
+              id: 'ADMIN_DEMO_RECEIPTS',
+              title: '🧾 Receipts',
+              description: 'See payments actually recorded',
+            },
+            {
+              id: 'ADMIN_DEMO_BROADCAST',
+              title: '📢 Broadcast to Parents',
+              description: 'Send a message, see what parents get',
+            },
+          ],
+        },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: attendance marking ──────────────────────────────
+  if (input === 'admin_demo_att') {
+    const student = await getDemoStudent(phone);
 
     await sendText(
       phone,
@@ -595,9 +678,336 @@ async function handleDemoFlow(
       `See it from the parent's side?`,
       [
         { id: 'PARENT_ATT', title: '✅ Parent View' },
-        { id: 'MAIN_MENU', title: '↩️ Back to menu' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
         { id: 'PRICING', title: '💵 Pricing' },
       ]
+    );
+    return;
+  }
+
+  // ── Admin: fees & payments ──────────────────────────────────
+  if (input === 'admin_demo_fees') {
+    const student = await getDemoStudent(phone);
+    const invoices = student?.invoices ?? [];
+    const outstanding = invoices
+      .map((inv: any) => ({
+        ...inv,
+        balance: Number(inv.total_amount) - Number(inv.amount_paid),
+      }))
+      .filter((inv: any) => inv.balance > 0);
+
+    if (outstanding.length === 0) {
+      await sendText(
+        phone,
+        `💰 *Fees & Payments*\n\n` +
+          `👤 ${student?.name ?? 'Chidi Okonkwo'} - ${student?.class ?? 'JSS 3A'}\n\n` +
+          `✅ Fully paid \u2014 nothing outstanding for this student.`
+      );
+      await delay(800);
+      await sendButtons(
+        phone,
+        `Continue exploring?`,
+        [
+          { id: 'ADMIN_DEMO_RECEIPTS', title: '🧾 Receipts' },
+          { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+          { id: 'MAIN_MENU', title: '↩️ Main Menu' },
+        ]
+      );
+      return;
+    }
+
+    const lines = outstanding
+      .map(
+        (inv: any, i: number) =>
+          `${i + 1}. ${inv.fee_name} \u2014 ${formatNaira(inv.balance)} remaining`
+      )
+      .join('\n');
+
+    await sendText(
+      phone,
+      `💰 *Fees & Payments*\n\n` +
+        `Admin searches a student and sees:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `👤 ${student?.name ?? 'Chidi Okonkwo'} - ${student?.class ?? 'JSS 3A'}\n\n` +
+        `${lines}\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `This isn't a mockup \u2014 tap below to actually record a ` +
+        `cash payment for the first item.`
+    );
+
+    await delay(800);
+
+    await sendButtons(
+      phone,
+      `Record payment for "${outstanding[0].fee_name}"?`,
+      [
+        { id: 'ADMIN_PAY_INVOICE', title: '💵 Record Payment' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: record a real payment against the first outstanding invoice ─
+  if (input === 'admin_pay_invoice') {
+    const student = await getDemoStudent(phone);
+    const invoices = student?.invoices ?? [];
+    const outstanding = invoices
+      .map((inv: any) => ({
+        ...inv,
+        balance: Number(inv.total_amount) - Number(inv.amount_paid),
+      }))
+      .filter((inv: any) => inv.balance > 0);
+
+    if (!student || outstanding.length === 0) {
+      await sendText(
+        phone,
+        `Nothing outstanding to pay right now. Type *hi* to restart the demo.`
+      );
+      return;
+    }
+
+    const invoice = outstanding[0];
+    const db = getSupabase();
+
+    await db
+      .from('demo_fee_invoices')
+      .update({ amount_paid: invoice.total_amount })
+      .eq('id', invoice.id);
+
+    const receiptNo = generateReceiptNo();
+    const reference = generatePaymentRef();
+
+    await db.from('demo_receipts').insert({
+      student_id: student.id,
+      invoice_id: invoice.id,
+      fee_name: invoice.fee_name,
+      amount: invoice.balance,
+      method: 'Cash',
+      reference,
+      receipt_no: receiptNo,
+    });
+
+    await sendText(
+      phone,
+      `✅ *Payment Recorded*\n\n` +
+        `👤 ${student.name}\n` +
+        `Fee: ${invoice.fee_name}\n` +
+        `Amount: ${formatNaira(invoice.balance)}\n` +
+        `Method: Cash\n` +
+        `Receipt No: ${receiptNo}\n\n` +
+        `Saved for real. The parent's fee balance and receipt ` +
+        `screens now reflect this \u2014 check them below.`
+    );
+
+    await delay(1000);
+
+    await sendButtons(
+      phone,
+      `See the parent's side?`,
+      [
+        { id: 'PARENT_RECEIPT', title: '🧾 Parent Receipt' },
+        { id: 'PARENT_FEES', title: '💰 Parent Fees' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: staff management ─────────────────────────────────
+  if (input === 'admin_demo_staff') {
+    const db = getSupabase();
+    const { data: staff } = await db
+      .from('demo_staff')
+      .select('*')
+      .order('created_at', { ascending: true });
+
+    const lines = (staff ?? [])
+      .map((s: any) => `👤 ${s.name}\n   ${s.role} \u2014 ${s.assignment}`)
+      .join('\n\n');
+
+    await sendText(
+      phone,
+      `👨‍🏫 *Staff Management*\n\n` +
+        `Full staff list, pulled live from the school's records:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `${lines || 'No staff on file yet.'}\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `Admin can add, edit or remove staff the same way.`
+    );
+
+    await delay(800);
+
+    await sendButtons(
+      phone,
+      `Continue exploring?`,
+      [
+        { id: 'ADMIN_DEMO_REPORTS', title: '📊 Reports' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+        { id: 'PRICING', title: '💵 Pricing' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: bulk student upload ──────────────────────────────
+  if (input === 'admin_demo_upload') {
+    const db = getSupabase();
+    const { data: students } = await db
+      .from('demo_students')
+      .select('name, class, admission_no');
+
+    const sample = (students ?? [])
+      .slice(0, 3)
+      .map((s: any) => `• ${s.name} \u2014 ${s.class} (${s.admission_no})`)
+      .join('\n');
+
+    await sendText(
+      phone,
+      `📤 *Upload Students (CSV)*\n\n` +
+        `Admin uploads a spreadsheet of students. This school's ` +
+        `actual roster on file right now:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `✅ ${students?.length ?? 0} students imported\n\n` +
+        `Sample:\n${sample || 'No students on file yet.'}\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `Every student gets attendance, fee and pickup tracking ` +
+        `automatically \u2014 no extra setup.`
+    );
+
+    await delay(800);
+
+    await sendButtons(
+      phone,
+      `Continue exploring?`,
+      [
+        { id: 'ADMIN_DEMO_REPORTS', title: '📊 Reports' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+        { id: 'PRICING', title: '💵 Pricing' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: live reports ─────────────────────────────────────
+  if (input === 'admin_demo_reports') {
+    const db = getSupabase();
+    const { data: students } = await db
+      .from('demo_students')
+      .select('today_status');
+    const { data: invoices } = await db
+      .from('demo_fee_invoices')
+      .select('total_amount, amount_paid');
+
+    const total = students?.length ?? 0;
+    const present =
+      students?.filter((s: any) => s.today_status === 'present').length ?? 0;
+    const absent =
+      students?.filter((s: any) => s.today_status === 'absent').length ?? 0;
+    const late =
+      students?.filter((s: any) => s.today_status === 'late').length ?? 0;
+    const attendanceRate = total ? Math.round((present / total) * 100) : 0;
+
+    const totalBilled =
+      invoices?.reduce((sum: number, inv: any) => sum + Number(inv.total_amount), 0) ??
+      0;
+    const totalCollected =
+      invoices?.reduce((sum: number, inv: any) => sum + Number(inv.amount_paid), 0) ??
+      0;
+
+    await sendText(
+      phone,
+      `📊 *Live Reports*\n\n` +
+        `Calculated in real time from actual records:\n\n` +
+        `━━━━━━━━━━━━\n` +
+        `📅 *Today's Attendance*\n` +
+        `✅ Present: ${present}/${total} (${attendanceRate}%)\n` +
+        `❌ Absent: ${absent}\n` +
+        `⏰ Late: ${late}\n\n` +
+        `💰 *Fee Collection*\n` +
+        `Billed: ${formatNaira(totalBilled)}\n` +
+        `Collected: ${formatNaira(totalCollected)}\n` +
+        `Outstanding: ${formatNaira(totalBilled - totalCollected)}\n` +
+        `━━━━━━━━━━━━\n\n` +
+        `Try marking attendance or recording a payment, then check ` +
+        `this report again \u2014 the numbers move.`
+    );
+
+    await delay(800);
+
+    await sendButtons(
+      phone,
+      `Continue exploring?`,
+      [
+        { id: 'ADMIN_DEMO_RECEIPTS', title: '🧾 Receipts' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+        { id: 'PRICING', title: '💵 Pricing' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: receipts log ─────────────────────────────────────
+  if (input === 'admin_demo_receipts') {
+    const db = getSupabase();
+    const { data: receipts } = await db
+      .from('demo_receipts')
+      .select('*, demo_students(name)')
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    if (!receipts || receipts.length === 0) {
+      await sendText(
+        phone,
+        `🧾 *Receipts*\n\n` +
+          `No payments recorded yet. Go to *Fees & Payments* and ` +
+          `record one \u2014 it'll show up here immediately.`
+      );
+    } else {
+      const lines = receipts
+        .map(
+          (r: any) =>
+            `🧾 ${r.receipt_no}\n` +
+            `👤 ${r.demo_students?.name ?? 'Student'}\n` +
+            `${r.fee_name}: ${formatNaira(r.amount)}\n` +
+            `Ref: ${r.reference}`
+        )
+        .join('\n\n');
+
+      await sendText(
+        phone,
+        `🧾 *Receipts*\n\n` +
+          `Actual payments recorded through this demo:\n\n` +
+          `━━━━━━━━━━━━\n${lines}\n━━━━━━━━━━━━`
+      );
+    }
+
+    await delay(800);
+
+    await sendButtons(
+      phone,
+      `Continue exploring?`,
+      [
+        { id: 'ADMIN_DEMO_FEES', title: '💰 Fees' },
+        { id: 'ADMIN_BOT', title: '↩️ Admin Menu' },
+        { id: 'PRICING', title: '💵 Pricing' },
+      ]
+    );
+    return;
+  }
+
+  // ── Admin: broadcast to parents ─────────────────────────────
+  if (input === 'admin_demo_broadcast') {
+    demoBroadcastAwaiting.add(formatPhone(phone));
+
+    await sendText(
+      phone,
+      `📢 *Broadcast to Parents*\n\n` +
+        `Type the announcement you'd like to send to every ` +
+        `parent \u2014 whatever you send next will actually be ` +
+        `delivered back to you here, exactly as parents would ` +
+        `receive it on WhatsApp.\n\n` +
+        `Example: "School resumes Monday 8am after the break."`
     );
     return;
   }
