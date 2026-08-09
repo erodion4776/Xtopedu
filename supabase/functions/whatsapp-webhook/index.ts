@@ -497,14 +497,57 @@ async function handleDemoFlow(
   // ── Parent receipt demo ────────────────────────────────────
   if (input === 'parent_receipt') {
     const student = await getDemoStudent(phone);
-    const invoices = student?.invoices ?? [];
-    // Prefer an invoice that already has a payment on it; fall back to the first.
-    const paidInvoice =
-      invoices.find((inv: any) => Number(inv.amount_paid) > 0) ??
-      invoices[0];
-    const amountPaid = paidInvoice
-      ? Number(paidInvoice.amount_paid) || Number(paidInvoice.total_amount)
-      : 50000;
+
+    // Prefer a real receipt actually recorded (via Admin → Fees →
+    // Record Payment) — this is what makes the number, amount and
+    // ref match exactly what the admin sees in their Receipts list.
+    const db = getSupabase();
+    let realReceipts: any[] | null = null;
+
+    if (student?.id) {
+      const { data, error: receiptFetchErr } = await db
+        .from('demo_receipts')
+        .select('*')
+        .eq('student_id', student.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (receiptFetchErr) {
+        console.error('[DEMO DB ERROR] receipt fetch (parent view)', receiptFetchErr);
+      }
+      realReceipts = data;
+    }
+
+    const realReceipt = realReceipts?.[0];
+
+    let receiptNo: string;
+    let feeName: string;
+    let amountPaid: number;
+    let method: string;
+    let reference: string;
+
+    if (realReceipt) {
+      // Show the exact record the admin created.
+      receiptNo = realReceipt.receipt_no;
+      feeName = realReceipt.fee_name;
+      amountPaid = Number(realReceipt.amount);
+      method = realReceipt.method;
+      reference = realReceipt.reference;
+    } else {
+      // No real payment recorded yet — fall back to a sample
+      // receipt off the pre-seeded "already paid" invoice, if any.
+      const invoices = student?.invoices ?? [];
+      const paidInvoice =
+        invoices.find((inv: any) => Number(inv.amount_paid) > 0) ??
+        invoices[0];
+      receiptNo = generateReceiptNo();
+      feeName = paidInvoice?.fee_name ?? 'First Term School Fees';
+      amountPaid = paidInvoice
+        ? Number(paidInvoice.amount_paid) || Number(paidInvoice.total_amount)
+        : 50000;
+      method = 'Bank Transfer';
+      reference = generatePaymentRef();
+    }
 
     await sendText(
       phone,
@@ -512,12 +555,12 @@ async function handleDemoFlow(
         `After payment, parent receives:\n\n` +
         `━━━━━━━━━━━━\n` +
         `🧾 *PAYMENT RECEIPT*\n` +
-        `Receipt No: ${generateReceiptNo()}\n` +
+        `Receipt No: ${receiptNo}\n` +
         `Student: ${student?.name ?? 'Chidi Okonkwo'}\n` +
-        `Fee: ${paidInvoice?.fee_name ?? 'First Term School Fees'}\n` +
+        `Fee: ${feeName}\n` +
         `Amount Paid: ${formatNaira(amountPaid)}\n` +
-        `Method: Bank Transfer\n` +
-        `Ref: ${generatePaymentRef()}\n` +
+        `Method: ${method}\n` +
+        `Ref: ${reference}\n` +
         `━━━━━━━━━━━━\n\n` +
         `This gives the parent instant proof of payment.`
     );
