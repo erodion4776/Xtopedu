@@ -1295,7 +1295,7 @@ async function getDemoStudent(phone: string): Promise<any | null> {
 
   // Already assigned a persona this session?
   const { data: session, error: sessionErr } = await db
-    .from('demo_sessions')
+    .from('demo_persona_sessions')
     .select('student_id')
     .eq('phone', phone)
     .maybeSingle();
@@ -1322,7 +1322,7 @@ async function getDemoStudent(phone: string): Promise<any | null> {
       candidates[Math.floor(Math.random() * candidates.length)].id;
 
     const { error: upsertErr } = await db
-      .from('demo_sessions')
+      .from('demo_persona_sessions')
       .upsert({ phone, student_id: studentId }, { onConflict: 'phone' });
 
     if (upsertErr) {
