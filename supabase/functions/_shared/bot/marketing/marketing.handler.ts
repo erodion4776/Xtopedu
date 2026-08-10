@@ -34,7 +34,9 @@ import {
 } from './marketing.session.ts';
 
 // Re-export so handler.ts can import from here
-export { hasActiveMarketingSession } from './marketing.session.ts';
+export {
+  hasActiveMarketingSession,
+} from './marketing.session.ts';
 
 import type { IncomingMessage } from '../../types.ts';
 
@@ -109,10 +111,9 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ✅ KEY FIX: Check onboarding session FIRST
-  // Before checking demo session.
-  // This ensures the registration flow is not
-  // interrupted by the marketing bot AI handler.
+  // ✅ Check onboarding session FIRST
+  // Before anything else so registration flow
+  // is never interrupted by the marketing bot
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
     console.log(
@@ -130,7 +131,8 @@ export async function handleMarketingMessage(
     formatPhone(phone)
   );
 
-  // Reset or new user — show welcome
+  // ✅ Reset, new user, or no session → show welcome
+  // session is guaranteed non-null after this block
   if (!input || RESET_KEYWORDS.has(input) || !session) {
     session = await createMarketingSession(
       formatPhone(phone)
@@ -155,7 +157,7 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── Text input ──────────────────────────────────────────
+  // ✅ session is guaranteed non-null here
   await handleTextInput(
     phone, session, rawText, input, wa
   );
@@ -226,6 +228,7 @@ async function handleMenuSelection(
 
     default:
       if (input.startsWith('tier_')) {
+        // Pricing tier tap → go to registration
         await startRegistration(phone, session, wa);
       } else {
         await handleAI(phone, session, input, wa);
@@ -244,6 +247,17 @@ async function handleTextInput(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
+  // ✅ Guard: user is in registration flow
+  // but somehow fell through — redirect to menu
+  if (
+    session.state === 'REGISTERING' ||
+    session.state === 'WELCOME'
+  ) {
+    await showDemoMainMenu(phone, session, wa);
+    return;
+  }
+
+  // Collecting name
   if (session.state === 'COLLECTING_NAME') {
     if (rawText.trim().length >= 2) {
       session.contactName = rawText.trim();
@@ -287,17 +301,18 @@ async function handleAI(
   const { intent, entities } =
     await ai.detectIntent(input);
 
-  if (entities.school_name && !session.schoolName) {
+  // ✅ Safe access with optional chaining
+  if (entities?.school_name && !session.schoolName) {
     session.schoolName = entities.school_name;
   }
-  if (entities.location && !session.location) {
+  if (entities?.location && !session.location) {
     session.location = entities.location;
   }
 
   const aiResponse = await ai.chat(history, {
-    contactName: session.contactName,
-    schoolName:  session.schoolName,
-    registered:  session.registered,
+    contactName: session.contactName ?? null,
+    schoolName:  session.schoolName  ?? null,
+    registered:  session.registered  ?? false,
     intent,
   });
 
@@ -871,7 +886,7 @@ async function showPricing(
     phone,
     `💵 Setup Fee Tiers`,
     `One-time setup fee based on\nyour student count:`,
-    `Commission: 1.5% per payment (to parent)`,
+    `Commission: 1.5% per payment (charged to parent)`,
     `📋 View Tiers`,
     [
       {
@@ -899,9 +914,9 @@ async function showPricing(
 }
 
 // ============================================================
-// ✅ REGISTRATION — KEY FUNCTION
-// startOnboardingSession is now awaited so the session
-// is saved to DB before the user's next message arrives
+// REGISTRATION
+// ✅ KEY FUNCTION — await ensures session is in DB
+// before user's next message arrives
 // ============================================================
 
 async function startRegistration(
@@ -923,22 +938,19 @@ async function startRegistration(
     schoolType:        session.schoolType   ?? undefined,
   };
 
-  // ✅ KEY FIX: await so session is saved to DB
-  // BEFORE the user sends their next message.
-  // Without await, the session may not exist yet
-  // when the next message arrives, causing the
-  // registration flow to break.
+  // ✅ await so session is saved to DB BEFORE
+  // the user sends their next message
   const obSession = await startOnboardingSession(
     phone, 'marketing', prefill
   );
 
   console.log(
-    `[Marketing] ✅ Onboarding session created | ` +
+    `[Marketing] ✅ Onboarding started | ` +
     `step: ${obSession.step}`
   );
 
   if (session.contactName && session.schoolName) {
-    // We already have enough info — jump to fee
+    // Already have enough info → jump to fee
     await wa.text(
       phone,
       `🚀 *Let's register your school!*\n\n` +
@@ -986,8 +998,8 @@ async function handleNotInterested(
       content: `I'm not sure I'm interested right now`,
     }],
     {
-      contactName: session.contactName,
-      schoolName:  session.schoolName,
+      contactName: session.contactName ?? null,
+      schoolName:  session.schoolName  ?? null,
       intent:      'not_interested',
     }
   );
