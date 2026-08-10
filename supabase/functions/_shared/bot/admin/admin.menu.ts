@@ -134,6 +134,11 @@ function buildMenuSections(isAdmin: boolean) {
           description: 'Bulk import via CSV',
         },
         {
+          id: 'ADMIN_UPLOAD_SCORES',
+          title: '🎓 Upload Scores',
+          description: 'Bulk import exam scores',
+        },
+        {
           id: 'ADMIN_REPORTS',
           title: '📊 Term Reports',
           description: 'Attendance & fee reports',
