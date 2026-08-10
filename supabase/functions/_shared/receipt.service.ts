@@ -5,8 +5,10 @@
 
 import { getSupabase } from './supabase.ts';
 import { WhatsApp } from './whatsapp.ts';
+import { PdfService } from './pdf.service.ts';
 
 const db = getSupabase();
+const pdfSvc = new PdfService();
 
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-NG', {
@@ -317,6 +319,39 @@ export class ReceiptService {
     );
 
     await wa.text(parentPhone, receiptText);
+
+    // Also generate and send a downloadable PDF version. This is
+    // best-effort — if PDF generation/upload fails for any reason,
+    // the parent still has the text receipt above, so we don't
+    // let a PDF failure block the rest of the flow.
+    try {
+      const pdfUrl = await pdfSvc.buildReceiptPdf({
+        receiptNumber: receipt.receipt_number as string,
+        schoolName: school?.name as string ?? 'School',
+        schoolAddress: school?.address as string | null,
+        schoolPhone: school?.phone as string | null,
+        studentName: `${student?.first_name ?? ''} ${student?.last_name ?? ''}`.trim(),
+        admissionNumber: student?.admission_number as string ?? '',
+        className: `${cls} ${arm}`.trim(),
+        feeTitle: (fs?.title as string) ?? 'School Fee',
+        term: (fs?.terms as Record<string, string> | null)?.name,
+        academicYear: (fs?.academic_years as Record<string, string> | null)?.name,
+        amount: parseFloat(String(receipt.amount_paid ?? 0)),
+        paymentMethod: receipt.payment_method as string,
+        reference: payment?.gateway_reference as string,
+        paymentDate: receipt.payment_date as string,
+        issuedTo: receipt.issued_to as string,
+      });
+
+      await wa.document(
+        parentPhone,
+        pdfUrl,
+        `Receipt-${receipt.receipt_number}.pdf`,
+        'Your official payment receipt'
+      );
+    } catch (pdfErr) {
+      console.error('[ReceiptService] PDF generation/send failed:', pdfErr);
+    }
 
     await db
       .from('fee_receipts')
