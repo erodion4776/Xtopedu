@@ -13,13 +13,16 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { Eye, EyeOff } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
+  const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState('');
+  const [showPwd, setShowPwd]   = useState(false);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -27,10 +30,9 @@ export default function LoginPage() {
     setError('');
 
     try {
-      // Sign in
       const { data, error: authError } =
         await supabase.auth.signInWithPassword({
-          email: email.trim(),
+          email:    email.trim(),
           password,
         });
 
@@ -40,7 +42,7 @@ export default function LoginPage() {
         return;
       }
 
-      // Check if super admin
+      // Check platform admin
       const { data: platformAdmin } = await supabase
         .from('platform_admins')
         .select('id, role, is_active')
@@ -49,13 +51,12 @@ export default function LoginPage() {
         .maybeSingle();
 
       if (platformAdmin) {
-        // Use window.location for hard redirect
-        // This ensures cookies are properly set
+        toast.success('Welcome back!');
         window.location.href = '/dashboard';
         return;
       }
 
-      // Check if school staff
+      // Check school staff
       const { data: schoolUser } = await supabase
         .from('school_users')
         .select('id, school_id')
@@ -64,6 +65,7 @@ export default function LoginPage() {
         .maybeSingle();
 
       if (schoolUser) {
+        toast.success('Welcome back!');
         window.location.href = '/school/dashboard';
         return;
       }
@@ -88,7 +90,7 @@ export default function LoginPage() {
 
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl mb-4 shadow-lg">
             <span className="text-white text-2xl font-bold">
               X
             </span>
@@ -101,7 +103,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <Card className="shadow-lg">
+        <Card className="shadow-lg border-0">
           <CardHeader>
             <CardTitle className="text-2xl text-center">
               Sign In
@@ -111,16 +113,23 @@ export default function LoginPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleLogin} className="space-y-4">
-
+            <form
+              onSubmit={handleLogin}
+              className="space-y-4"
+            >
+              {/* Error */}
               {error && (
-                <div className="bg-red-50 border border-red-200 text-red-700 text-sm p-3 rounded-lg">
-                  ❌ {error}
+                <div className="bg-red-50 border border-red-200 text-red-700 text-sm p-3 rounded-lg flex items-center gap-2">
+                  <span>❌</span>
+                  <span>{error}</span>
                 </div>
               )}
 
+              {/* Email */}
               <div className="space-y-2">
-                <Label htmlFor="email">Email Address</Label>
+                <Label htmlFor="email">
+                  Email Address
+                </Label>
                 <Input
                   id="email"
                   type="email"
@@ -129,22 +138,76 @@ export default function LoginPage() {
                   onChange={(e) => setEmail(e.target.value)}
                   required
                   disabled={loading}
+                  autoComplete="email"
                 />
               </div>
 
+              {/* Password */}
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  disabled={loading}
-                />
+                <div className="relative">
+                  <Input
+                    id="password"
+                    type={showPwd ? 'text' : 'password'}
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) =>
+                      setPassword(e.target.value)
+                    }
+                    required
+                    disabled={loading}
+                    autoComplete="current-password"
+                    className="pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPwd(!showPwd)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    tabIndex={-1}
+                  >
+                    {showPwd
+                      ? <EyeOff className="h-4 w-4" />
+                      : <Eye className="h-4 w-4" />
+                    }
+                  </button>
+                </div>
               </div>
 
+              {/* Forgot password */}
+              <div className="text-right">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!email.trim()) {
+                      toast.error(
+                        'Enter your email first'
+                      );
+                      return;
+                    }
+                    const { error } =
+                      await supabase.auth
+                        .resetPasswordForEmail(
+                          email.trim(),
+                          {
+                            redirectTo:
+                              `${window.location.origin}/reset-password`,
+                          }
+                        );
+                    if (error) {
+                      toast.error(error.message);
+                    } else {
+                      toast.success(
+                        'Password reset email sent!'
+                      );
+                    }
+                  }}
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Forgot password?
+                </button>
+              </div>
+
+              {/* Submit */}
               <Button
                 type="submit"
                 className="w-full h-11"
@@ -180,7 +243,8 @@ export default function LoginPage() {
         </Card>
 
         <p className="text-center text-xs text-gray-400 mt-6">
-          © 2025 XtopEdu. All rights reserved.
+          © {new Date().getFullYear()} XtopEdu.
+          All rights reserved.
         </p>
       </div>
     </div>
