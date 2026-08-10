@@ -3,7 +3,7 @@
 // supabase/functions/whatsapp-webhook/index.ts
 //
 // ONE webhook handles ALL numbers:
-// - Your platform number (08073128887) → Marketing bot
+// - Your platform number → Marketing + Super Admin
 // - Each school's own number → School bot
 // ============================================================
 
@@ -17,8 +17,7 @@ import type {
 
 const db = getSupabase();
 
-// Your platform WhatsApp phone_number_id
-// This is 08073128887's phone_number_id from Meta
+// Your platform WhatsApp phone_number_id (08073128887)
 const PLATFORM_PHONE_NUMBER_ID =
   Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
 
@@ -46,7 +45,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'POST') {
     const rawBody = await req.text();
 
-    // Respond 200 immediately — process in background
+    // Respond 200 immediately so WhatsApp doesn't retry
     processWebhook(rawBody).catch((err) => {
       console.error('[Webhook] Processing error:', err);
     });
@@ -57,7 +56,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   return new Response('Method Not Allowed', { status: 405 });
 });
 
-// ─── Process webhook ───────────────────────────────────────
+// ─── Process webhook payload ───────────────────────────────
 async function processWebhook(rawBody: string): Promise<void> {
   let body: WebhookBody;
 
@@ -76,9 +75,9 @@ async function processWebhook(rawBody: string): Promise<void> {
   const value =
     body.entry?.[0]?.changes?.[0]?.value;
 
-  if (!value)                    return;
-  if (value.statuses?.length)    return; // ignore delivery receipts
-  if (!value.messages?.length)   return;
+  if (!value)                  return;
+  if (value.statuses?.length)  return; // ignore read receipts
+  if (!value.messages?.length) return;
 
   const message =
     value.messages[0] as IncomingMessage;
@@ -94,7 +93,6 @@ async function processWebhook(rawBody: string): Promise<void> {
 
   if (isPlatformNumber) {
     // This is YOUR number (08073128887)
-    // Build a platform WA account from env
     waAccount = {
       id:              'platform',
       school_id:       'platform',
@@ -104,8 +102,7 @@ async function processWebhook(rawBody: string): Promise<void> {
       status: 'active',
     };
   } else {
-    // This is a SCHOOL number
-    // Look up which school owns this number
+    // This is a SCHOOL number — look up in DB
     waAccount = await getSchoolWaAccount(
       incomingPhoneNumberId
     );
@@ -120,20 +117,15 @@ async function processWebhook(rawBody: string): Promise<void> {
 
   console.log(
     `[Webhook] From: ${message.from} | ` +
-    `Number: ${incomingPhoneNumberId} | ` +
     `Platform: ${isPlatformNumber} | ` +
     `Type: ${message.type}`
   );
 
-  // ── Route to bot handler ───────────────────────────────
-  await handleMessage(
-    message,
-    waAccount,
-    isPlatformNumber
-  );
+  // ── Route to main bot handler ──────────────────────────
+  await handleMessage(message, waAccount, isPlatformNumber);
 }
 
-// ─── Get school WhatsApp account ───────────────────────────
+// ─── Get school WhatsApp account by phone_number_id ────────
 async function getSchoolWaAccount(
   phoneNumberId: string
 ): Promise<WhatsAppAccount | null> {
