@@ -132,6 +132,26 @@ export class WhatsApp {
     });
   }
 
+  // ─── Send a downloadable document (PDF, etc.) ──────────────────────────
+  async document(
+    to: string,
+    link: string,
+    filename: string,
+    caption?: string
+  ): Promise<void> {
+    await this.post({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: this.formatPhone(to),
+      type: 'document',
+      document: {
+        link,
+        filename,
+        ...(caption ? { caption } : {}),
+      },
+    });
+  }
+
   // ─── Send template message ─────────────────────────────────────────────
   // Templates must be pre-approved in Meta Business Manager
   async template(
