@@ -1,6 +1,9 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
+//
+// Smart router for ALL incoming WhatsApp messages.
+// Identifies user and routes to correct flow.
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -114,7 +117,7 @@ import {
 // ── Marketing bot ────────────────────────────────────────
 import {
   handleMarketingMessage,
-  hasActiveMarketingSession,  // ✅ NEW - check if user has demo session
+  hasActiveMarketingSession,
 } from './marketing/marketing.handler.ts';
 
 // ── Onboarding ───────────────────────────────────────────
@@ -143,6 +146,7 @@ const RESET_KEYWORDS = new Set([
 
 // ============================================================
 // MAIN ENTRY POINT
+// Called by whatsapp-webhook/index.ts for every message
 // ============================================================
 
 export async function handleMessage(
@@ -163,6 +167,8 @@ export async function handleMessage(
   const wa = new WhatsApp(waAccount);
 
   // ── Staff invite token ──────────────────────────────────
+  // Check before anything else so staff can always
+  // activate their account regardless of state
   if (message.type === 'text' && isInviteToken(rawText)) {
     await handleInvitationToken(
       phone,
@@ -173,8 +179,8 @@ export async function handleMessage(
   }
 
   // ── Active onboarding session ───────────────────────────
-  // Check onboarding BEFORE marketing so school owners
-  // completing registration are handled correctly
+  // Check onboarding BEFORE marketing check so school
+  // owners completing registration are handled correctly
   const obSession = getOnboardingSession(phone);
   if (obSession) {
     const handled = await handleOnboardingInput(
@@ -183,17 +189,18 @@ export async function handleMessage(
     if (handled) return;
   }
 
-  // ── ✅ KEY FIX: Check marketing session EARLY ───────────
-  // If this is the platform number AND the user already has
-  // an active marketing demo session, route them directly
-  // to the marketing bot WITHOUT doing a DB reset check.
-  // This is what was causing the menu to reset every time.
-  if (
-    isPlatformNumber &&
-    hasActiveMarketingSession(phone)
-  ) {
-    await handleMarketingMessage(message);
-    return;
+  // ── ✅ KEY FIX: Check marketing session from DB ─────────
+  // If this is the platform number AND user has an active
+  // demo session in DB → route directly to marketing bot
+  // This skips the expensive DB reset check for every msg
+  if (isPlatformNumber) {
+    const isMarketingUser =
+      await hasActiveMarketingSession(formatPhone(phone));
+
+    if (isMarketingUser) {
+      await handleMarketingMessage(message);
+      return;
+    }
   }
 
   // ── Document uploads ────────────────────────────────────
@@ -214,7 +221,7 @@ export async function handleMessage(
     return;
   }
 
-  // ── Only text and interactive beyond this ───────────────
+  // ── Only handle text and interactive beyond this ────────
   if (!['text', 'interactive'].includes(message.type)) {
     await wa.text(
       phone,
@@ -243,6 +250,7 @@ export async function handleMessage(
   }
 
   // ── Reset keywords ──────────────────────────────────────
+  // Reset clears session and re-identifies the user
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
       phone,
@@ -256,12 +264,15 @@ export async function handleMessage(
 
   // ── Get existing DB session ─────────────────────────────
   const session = await sessions.get(phone);
+
   if (!session) {
-    // No DB session — could be marketing user
-    // who sent something other than a reset keyword
+    // No session found
     if (isPlatformNumber) {
+      // Platform number with no session = marketing user
+      // who typed something that is not a reset keyword
       await handleMarketingMessage(message);
     } else {
+      // School number with no session = unknown user
       await handleReset(
         phone,
         message,
@@ -273,6 +284,7 @@ export async function handleMessage(
     return;
   }
 
+  // Update last activity timestamp
   await sessions.touch(phone);
 
   // ── Global shortcuts ────────────────────────────────────
@@ -298,7 +310,11 @@ export async function handleMessage(
 }
 
 // ============================================================
-// IDENTIFY USER (RESET HANDLER)
+// IDENTIFY USER — RESET HANDLER
+// Called when:
+// 1. User sends a reset keyword (hi, menu, etc.)
+// 2. No session exists
+// Looks up who the user is and creates the right session
 // ============================================================
 
 async function handleReset(
@@ -322,9 +338,10 @@ async function handleReset(
       `whatsapp_number.eq.${formatted}`
     )
     .eq('is_active', true)
-    .single();
+    .maybeSingle();
 
   if (platformAdmin) {
+    // Update last login
     await db
       .from('platform_admins')
       .update({ last_login: new Date().toISOString() })
@@ -368,6 +385,7 @@ async function handleReset(
       parentSvc.getWaAccount(parent.school_id),
     ]);
 
+    // Ensure contact & conversation records exist
     const contactId =
       await parentSvc.ensureContact(parent, phone);
     if (contactId) {
@@ -377,6 +395,7 @@ async function handleReset(
       );
     }
 
+    // Ensure parent has a basic subscription
     await ensureParentSubscription(
       parent.id,
       parent.school_id
@@ -391,7 +410,7 @@ async function handleReset(
     return;
   }
 
-  // ── 3. Check registered staff ───────────────────────────
+  // ── 3. Check registered staff / admin ───────────────────
   const schoolUser =
     await adminSvc.findStaffByPhone(phone);
 
@@ -406,12 +425,14 @@ async function handleReset(
       await wa.text(
         phone,
         `❌ *Access Denied*\n\n` +
+        `Your account does not have bot access.\n\n` +
         `Contact your school administrator.`
       );
       return;
     }
 
     const role = isAdmin ? 'admin' : 'teacher';
+
     const session = await sessions.createAdminSession(
       phone,
       schoolUser,
@@ -426,10 +447,10 @@ async function handleReset(
 
   // ── 4. Unknown user ─────────────────────────────────────
   if (isPlatformNumber) {
-    // Your number → Marketing bot
+    // ✅ Your platform number → Marketing/Sales bot
     await handleMarketingMessage(message);
   } else {
-    // School number → Option B
+    // ✅ School number → Option B welcome
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
 }
@@ -443,6 +464,7 @@ async function showSchoolUnknownUser(
   wa: WhatsApp,
   waAccount: WhatsAppAccount | null
 ): Promise<void> {
+  // Get school name from WA account
   let schoolName = 'this school';
 
   if (waAccount?.school_id) {
@@ -486,6 +508,7 @@ async function routeParent(
   rawText: string,
   wa: WhatsApp
 ): Promise<void> {
+  // Handle unknown user button responses
   if (input === 'im_a_parent') {
     await showParentNotRegistered(phone, wa, session);
     return;
@@ -497,6 +520,7 @@ async function routeParent(
   }
 
   switch (session.state) {
+
     case 'MAIN_MENU':
       await handleParentMainMenu(
         phone, session, input, wa
@@ -554,6 +578,7 @@ async function routeParent(
   }
 }
 
+// ─── Parent not registered message ────────────────────────
 async function showParentNotRegistered(
   phone: string,
   wa: WhatsApp,
@@ -569,14 +594,17 @@ async function showParentNotRegistered(
     `To access *${schoolName}* bot,\n` +
     `please contact the school office\n` +
     `to register your WhatsApp number.\n\n` +
+    `The school admin will add you and\n` +
+    `link your children to your account.\n\n` +
     `Once registered, send *hi* to access:\n\n` +
-    `✅ Daily attendance\n` +
+    `✅ Daily attendance records\n` +
     `💰 Fee balance & payments\n` +
     `🚗 Pickup information\n` +
     `📝 Term results`
   );
 }
 
+// ─── Parent main menu handler ─────────────────────────────
 async function handleParentMainMenu(
   phone: string,
   session: BotSession,
@@ -584,6 +612,7 @@ async function handleParentMainMenu(
   wa: WhatsApp
 ): Promise<void> {
   switch (input) {
+
     case 'menu_attendance':
     case 'attendance':
     case 'att':
@@ -645,6 +674,7 @@ async function routeAdmin(
   wa: WhatsApp
 ): Promise<void> {
   switch (session.state) {
+
     case 'ADMIN_MAIN_MENU':
       await handleAdminMainMenu(
         phone, session, input, wa
@@ -668,7 +698,9 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_STUDENTS_SEARCH':
-      await handleStudentSearch(phone, session, rawText, wa);
+      await handleStudentSearch(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_FEES_SELECT_STUDENT':
@@ -712,7 +744,9 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_ADDING_STAFF_NAME':
-      await handleAddStaffName(phone, session, rawText, wa);
+      await handleAddStaffName(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_ADDING_STAFF_PHONE':
@@ -848,6 +882,7 @@ async function routeAdmin(
   }
 }
 
+// ─── Admin main menu handler ──────────────────────────────
 async function handleAdminMainMenu(
   phone: string,
   session: BotSession,
@@ -855,12 +890,15 @@ async function handleAdminMainMenu(
   wa: WhatsApp
 ): Promise<void> {
   switch (input) {
+
     case 'admin_attendance':
       await startAdminAttendance(phone, session, wa);
       break;
+
     case 'admin_fees':
       await startAdminFees(phone, session, wa);
       break;
+
     case 'admin_students':
       await wa.text(
         phone,
@@ -871,37 +909,51 @@ async function handleAdminMainMenu(
         phone, 'ADMIN_STUDENTS_SEARCH'
       );
       break;
+
     case 'admin_staff':
       await startStaffMgmt(phone, session, wa);
       break;
+
     case 'admin_broadcast':
       await startBroadcast(phone, session, wa);
       break;
+
     case 'admin_upload':
       await startBulkUpload(phone, session, wa);
       break;
+
     case 'admin_upload_scores':
       await startScoreUpload(phone, session, wa);
       break;
+
     case 'admin_reports':
       await startReports(phone, session, wa);
       break;
+
     case 'admin_receipts':
       await startReceiptMgmt(phone, session, wa);
       break;
+
     case 'admin_fee_stats':
       await showFeeStats(phone, session, wa);
       break;
+
     case 'admin_today_report':
       await showTodayReport(phone, session, wa);
       break;
+
     case 'admin_help':
       await showAdminHelp(phone, wa);
       break;
+
     default:
       await showAdminMenu(phone, session, wa);
   }
 }
+
+// ============================================================
+// DOCUMENT UPLOAD HANDLER
+// ============================================================
 
 async function handleDocumentUpload(
   phone: string,
@@ -920,13 +972,18 @@ async function handleDocumentUpload(
   } else {
     await wa.text(
       phone,
-      `📤 To upload students:\n\n` +
-      `Admin Menu → Upload Students\n\n` +
-      `Then send your CSV file.`
+      `📤 To upload students go to:\n\n` +
+      `*Admin Menu → Upload Students*\n\n` +
+      `Then send your CSV file here.`
     );
   }
 }
 
+// ============================================================
+// HELPERS
+// ============================================================
+
+// Ensure parent has at least a basic subscription
 async function ensureParentSubscription(
   parentId: string,
   schoolId: string
@@ -937,7 +994,7 @@ async function ensureParentSubscription(
       .select('id')
       .eq('parent_id', parentId)
       .eq('school_id', schoolId)
-      .single();
+      .maybeSingle();
 
     if (existing) return;
 
@@ -945,7 +1002,7 @@ async function ensureParentSubscription(
       .from('alert_plans')
       .select('id')
       .eq('slug', 'basic')
-      .single();
+      .maybeSingle();
 
     await db.from('parent_subscriptions').insert({
       parent_id:    parentId,
@@ -959,10 +1016,11 @@ async function ensureParentSubscription(
       updated_at:   new Date().toISOString(),
     });
   } catch {
-    // Non-critical
+    // Non-critical — don't crash the bot
   }
 }
 
+// Extract interactive button/list input (lowercased)
 export function extractInput(
   message: IncomingMessage
 ): string {
@@ -983,6 +1041,7 @@ export function extractInput(
   return '';
 }
 
+// Extract raw text from message
 export function extractRawText(
   message: IncomingMessage
 ): string {
