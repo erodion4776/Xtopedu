@@ -6,12 +6,14 @@
 import { WhatsApp } from '../../whatsapp.ts';
 import { SessionService } from '../../session.ts';
 import { ReportService } from '../../report.service.ts';
+import { PdfService } from '../../pdf.service.ts';
 import { getSupabase } from '../../supabase.ts';
 import { showAdminMenu } from './admin.menu.ts';
 import type { BotSession } from '../../types.ts';
 
 const sessions = new SessionService();
 const reportSvc = new ReportService();
+const pdfSvc = new PdfService();
 const db = getSupabase();
 
 // ─── Start reports flow ────────────────────────────────────────────────────
@@ -464,6 +466,21 @@ async function generateAndSendReport(
         { id: 'MAIN_MENU', title: '🏠 Menu' },
       ]
     );
+
+    // Also generate and send a downloadable PDF version.
+    // Best-effort — a PDF failure shouldn't block the text report
+    // the admin already received above.
+    try {
+      const pdfUrl = await pdfSvc.buildReportPdf(report, label);
+      await wa.document(
+        phone,
+        pdfUrl,
+        `${label.replace(/\s+/g, '-')}-Report.pdf`,
+        `${label} report`
+      );
+    } catch (pdfErr) {
+      console.error('[Reports] PDF generation/send failed:', pdfErr);
+    }
   } catch (err) {
     console.error('[Reports] generateAndSendReport error:', err);
     await wa.text(
