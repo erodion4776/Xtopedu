@@ -598,6 +598,347 @@ export async function handleConfirmUpload(
   await sessions.setState(phone, 'ADMIN_UPLOAD_MENU');
 }
 
+// ─── Start score upload flow — pick a term first ──────────────────────────
+export async function startScoreUpload(
+  phone: string,
+  session: BotSession,
+  wa: WhatsApp
+): Promise<void> {
+  const { data: terms } = await db
+    .from('terms')
+    .select('id, name, is_current, academic_years ( name )')
+    .order('created_at', { ascending: false })
+    .limit(6);
+
+  if (!terms?.length) {
+    await wa.buttons(
+      phone,
+      `🎓 *Upload Scores*\n\n` +
+      `No terms found.\n\n` +
+      `Please set up academic terms\n` +
+      `before uploading scores.`,
+      [{ id: 'MAIN_MENU', title: '🏠 Menu' }]
+    );
+    return;
+  }
+
+  const rows = terms.map((t) => {
+    const year =
+      (t.academic_years as Record<string, string> | null)?.name ?? '';
+    return {
+      id: `SCORE_UPLOAD_TERM_${t.id}`,
+      title: `${t.name}${t.is_current ? ' ⭐' : ''}`.substring(0, 24),
+      description: year,
+    };
+  });
+
+  await wa.list(
+    phone,
+    `🎓 Upload Scores`,
+    `Which term are these scores for?\n\n` +
+    `⭐ = Current term`,
+    `Bulk import exam scores via CSV`,
+    `🎓 Select Term`,
+    [{ title: 'Available Terms', rows }]
+  );
+
+  await sessions.setState(phone, 'ADMIN_SCORE_UPLOAD_TERM_SELECT');
+}
+
+// ─── Handle term selection, then show the score template ─────────────────
+export async function handleScoreUploadTermSelect(
+  phone: string,
+  session: BotSession,
+  input: string,
+  wa: WhatsApp
+): Promise<void> {
+  if (!input.startsWith('score_upload_term_')) return;
+
+  const termId = input.replace('score_upload_term_', '');
+  const template = csvSvc.generateScoreTemplate();
+
+  try {
+    const fileName = `templates/score_template_${session.school_id}.csv`;
+
+    await db.storage
+      .from('school-files')
+      .upload(fileName, new TextEncoder().encode(template), {
+        contentType: 'text/csv',
+        upsert: true,
+      });
+
+    const { data: urlData } = db.storage
+      .from('school-files')
+      .getPublicUrl(fileName);
+
+    await wa.text(
+      phone,
+      `📥 *Score Template Ready!*\n\n` +
+      `Download your template here:\n` +
+      `${urlData.publicUrl}\n\n` +
+      `*Required Columns:*\n` +
+      `• admission_number *(required)*\n` +
+      `• subject *(required)*\n` +
+      `• ca_score *(required, 0-40 typical)*\n` +
+      `• exam_score *(required, 0-60 typical)*\n\n` +
+      `*One row = one student's score for one subject.*\n` +
+      `Add a new row for each subject per student.\n\n` +
+      `Subjects that don't exist yet are created\n` +
+      `automatically.\n\n` +
+      `After filling, *send the CSV file\n` +
+      `to this chat* and I'll import the scores! 📤`
+    );
+
+    await sessions.setState(
+      phone,
+      'ADMIN_AWAITING_SCORE_CSV',
+      null,
+      { data: { scoreTermId: termId } }
+    );
+  } catch (err) {
+    console.error('[Upload] score template error:', err);
+
+    await wa.text(
+      phone,
+      `📥 *Score Template*\n\n` +
+      `Copy this header row into Excel\n` +
+      `or Google Sheets:\n\n` +
+      `\`admission_number,subject,ca_score,exam_score\`\n\n` +
+      `Fill in one row per student per subject,\n` +
+      `save as CSV and send the file here.`
+    );
+
+    await sessions.setState(
+      phone,
+      'ADMIN_AWAITING_SCORE_CSV',
+      null,
+      { data: { scoreTermId: termId } }
+    );
+  }
+}
+
+// ─── Handle incoming score CSV document ────────────────────────────────────
+// Called from main handler when message type is 'document' and state is
+// ADMIN_AWAITING_SCORE_CSV.
+export async function handleScoreCSVDocument(
+  phone: string,
+  session: BotSession,
+  message: IncomingMessage,
+  wa: WhatsApp
+): Promise<void> {
+  const doc = message.document;
+
+  if (!doc) {
+    await wa.text(phone, `❌ No document found. Please send a CSV file.`);
+    return;
+  }
+
+  const filename = doc.filename ?? '';
+  const mimeType = doc.mime_type ?? '';
+  const isCSV =
+    filename.toLowerCase().endsWith('.csv') ||
+    mimeType.includes('csv') ||
+    mimeType.includes('text/plain');
+
+  if (!isCSV) {
+    await wa.text(
+      phone,
+      `❌ *Wrong File Type!*\n\n` +
+      `Please send a *.csv* file with your scores.`
+    );
+    return;
+  }
+
+  await wa.text(
+    phone,
+    `⏳ *Processing your score file...*\n\n` +
+    `Please wait a moment.`
+  );
+
+  try {
+    const csvText = await wa.downloadMedia(doc.id);
+
+    if (!csvText) {
+      await wa.text(
+        phone,
+        `❌ Could not read the file.\n\nPlease try sending it again.`
+      );
+      return;
+    }
+
+    const { rows, errors: parseErrors } = csvSvc.parseCSV(csvText);
+
+    if (parseErrors.length > 0) {
+      await wa.text(
+        phone,
+        `❌ *CSV Format Error*\n\n${parseErrors.join('\n')}\n\nPlease fix and try again.`
+      );
+      return;
+    }
+
+    if (!rows.length) {
+      await wa.text(
+        phone,
+        `❌ *Empty file!*\n\nThe CSV file has no score data.`
+      );
+      return;
+    }
+
+    const preview = rows.slice(0, 3).map((r, i) => {
+      return (
+        `${i + 1}. ${r.admission_number ?? '?'} — ${r.subject ?? '?'}\n` +
+        `   CA: ${r.ca_score ?? '?'} | Exam: ${r.exam_score ?? '?'}`
+      );
+    }).join('\n\n');
+
+    const moreText =
+      rows.length > 3 ? `\n\n_...and ${rows.length - 3} more rows_` : '';
+
+    await wa.buttons(
+      phone,
+      `📊 *File Preview*\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `📁 File: ${filename}\n` +
+      `📝 Score rows found: *${rows.length}*\n\n` +
+      `*First 3 rows:*\n\n` +
+      `${preview}${moreText}\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `Proceed with import?`,
+      [
+        { id: `CONFIRM_SCORE_UPLOAD_${rows.length}`, title: `✅ Import ${rows.length} Scores` },
+        { id: 'CANCEL_SCORE_UPLOAD', title: '❌ Cancel' },
+      ]
+    );
+
+    await sessions.setState(
+      phone,
+      'ADMIN_CONFIRM_SCORE_UPLOAD',
+      null,
+      {
+        data: {
+          scoreTermId: session.data?.scoreTermId,
+          pendingScoreRows: rows,
+          pendingScoreCount: rows.length,
+          pendingScoreFileName: filename,
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[Upload] score CSV processing error:', err);
+    await wa.text(
+      phone,
+      `❌ *Error processing file*\n\nSomething went wrong.\nError: ${err}`
+    );
+  }
+}
+
+// ─── Handle score upload confirmation ──────────────────────────────────────
+export async function handleConfirmScoreUpload(
+  phone: string,
+  session: BotSession,
+  input: string,
+  wa: WhatsApp
+): Promise<void> {
+  if (input === 'cancel_score_upload') {
+    await wa.text(phone, `❌ Score upload cancelled.`);
+    await showAdminMenu(phone, session, wa);
+    return;
+  }
+
+  if (!input.startsWith('confirm_score_upload_')) return;
+
+  const rows = session.data?.pendingScoreRows as
+    | Array<Record<string, string>>
+    | null;
+  const termId = session.data?.scoreTermId as string;
+  const fileName =
+    (session.data?.pendingScoreFileName as string) ?? 'scores.csv';
+
+  if (!rows?.length || !termId) {
+    await wa.text(phone, `❌ No data to import.\n\nPlease start over.`);
+    await showAdminMenu(phone, session, wa);
+    return;
+  }
+
+  await wa.text(
+    phone,
+    `⏳ *Importing ${rows.length} scores...*\n\n` +
+    `This may take a moment.\n` +
+    `Please do not close this chat.`
+  );
+
+  const { data: job, error: jobError } = await db
+    .from('bulk_upload_jobs')
+    .insert({
+      school_id: session.school_id,
+      upload_type: 'scores',
+      file_name: fileName,
+      total_rows: rows.length,
+      status: 'processing',
+      started_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (jobError || !job) {
+    await wa.text(phone, `❌ Failed to start upload.\n\nPlease try again.`);
+    return;
+  }
+
+  const result = await csvSvc.importScores(
+    session.school_id,
+    termId,
+    rows,
+    job.id
+  );
+
+  const statusIcon =
+    result.failed === 0
+      ? '🎉'
+      : result.created + result.updated === 0
+      ? '❌'
+      : '⚠️';
+
+  let resultMsg =
+    `${statusIcon} *Score Upload Complete!*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `📁 File: ${fileName}\n\n` +
+    `📊 *Results:*\n` +
+    `📝 Total Rows:  *${result.total}*\n` +
+    `✅ Created:     *${result.created}*\n` +
+    `🔄 Updated:     *${result.updated}*\n`;
+
+  if (result.failed > 0) {
+    resultMsg += `❌ Failed:      *${result.failed}*\n`;
+  }
+
+  resultMsg += `━━━━━━━━━━━━━━━━\n`;
+
+  if (result.errors.length > 0) {
+    resultMsg += `\n⚠️ *Errors (first 5):*\n`;
+    result.errors.slice(0, 5).forEach((err) => {
+      resultMsg += `• Row ${err.row}: ${err.message}\n`;
+    });
+
+    if (result.errors.length > 5) {
+      resultMsg += `_...and ${result.errors.length - 5} more errors_\n`;
+    }
+  }
+
+  await wa.buttons(
+    phone,
+    resultMsg,
+    [
+      { id: 'ADMIN_UPLOAD_SCORES', title: '📤 Upload More' },
+      { id: 'ADMIN_REPORTS', title: '🎓 View Results' },
+      { id: 'MAIN_MENU', title: '🏠 Menu' },
+    ]
+  );
+
+  await sessions.setState(phone, 'ADMIN_MENU');
+}
+
 // ─── Show upload history ───────────────────────────────────────────────────
 async function showUploadHistory(
   phone: string,
