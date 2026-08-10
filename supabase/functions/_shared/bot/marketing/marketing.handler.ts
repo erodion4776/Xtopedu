@@ -2,8 +2,9 @@
 // SCHOOLBOT - MARKETING BOT HANDLER
 // _shared/bot/marketing/marketing.handler.ts
 //
+// Handles ALL unknown users on YOUR platform number.
 // Uses DB-backed sessions so state persists across
-// Edge Function instances (fixes the menu reset bug).
+// Edge Function instances.
 // ============================================================
 
 import { WhatsApp }    from '../../whatsapp.ts';
@@ -32,11 +33,8 @@ import {
   type DemoSession,
 } from './marketing.session.ts';
 
-// Re-export hasActiveMarketingSession so handler.ts
-// can import it from here
-export {
-  hasActiveMarketingSession,
-} from './marketing.session.ts';
+// Re-export so handler.ts can import from here
+export { hasActiveMarketingSession } from './marketing.session.ts';
 
 import type { IncomingMessage } from '../../types.ts';
 
@@ -81,7 +79,6 @@ export async function handleMarketingMessage(
   const phone = message.from;
   const wa    = getPlatformWa();
 
-  // Extract inputs
   const rawText =
     message.type === 'text'
       ? message.text?.body?.trim() ?? ''
@@ -112,21 +109,28 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── Active onboarding session ───────────────────────────
-  const obSession = getOnboardingSession(phone);
+  // ✅ KEY FIX: Check onboarding session FIRST
+  // Before checking demo session.
+  // This ensures the registration flow is not
+  // interrupted by the marketing bot AI handler.
+  const obSession = await getOnboardingSession(phone);
   if (obSession) {
+    console.log(
+      `[Marketing] Onboarding session found | ` +
+      `step: ${obSession.step}`
+    );
     const handled = await handleOnboardingInput(
-      phone, input, rawText, wa, 'marketing'
+      phone, input, rawText, wa, obSession.source
     );
     if (handled) return;
   }
 
-  // ── Get session from DB ─────────────────────────────────
+  // ── Get demo session from DB ────────────────────────────
   let session = await getMarketingSession(
     formatPhone(phone)
   );
 
-  // ── Reset or new user ───────────────────────────────────
+  // Reset or new user — show welcome
   if (!input || RESET_KEYWORDS.has(input) || !session) {
     session = await createMarketingSession(
       formatPhone(phone)
@@ -162,10 +166,10 @@ export async function handleMarketingMessage(
 // ============================================================
 
 async function handleMenuSelection(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
 
@@ -221,11 +225,9 @@ async function handleMenuSelection(
       break;
 
     default:
-      // Pricing tier taps → go to registration
       if (input.startsWith('tier_')) {
         await startRegistration(phone, session, wa);
       } else {
-        // Unknown → AI
         await handleAI(phone, session, input, wa);
       }
   }
@@ -236,13 +238,12 @@ async function handleMenuSelection(
 // ============================================================
 
 async function handleTextInput(
-  phone: string,
+  phone:   string,
   session: DemoSession,
   rawText: string,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
-  // Collecting name
   if (session.state === 'COLLECTING_NAME') {
     if (rawText.trim().length >= 2) {
       session.contactName = rawText.trim();
@@ -271,13 +272,13 @@ async function handleTextInput(
 // ============================================================
 
 async function handleAI(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   const history = session.aiHistory as Array<{
-    role: 'user' | 'assistant';
+    role:    'user' | 'assistant';
     content: string;
   }>;
 
@@ -306,15 +307,17 @@ async function handleAI(
 
   await wa.text(phone, aiResponse);
   await delay(1500);
-  await handleIntentFollowUp(phone, session, intent, wa);
+  await handleIntentFollowUp(
+    phone, session, intent, wa
+  );
 }
 
 // ─── Intent follow-up ─────────────────────────────────────
 async function handleIntentFollowUp(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  intent: string,
-  wa: WhatsApp
+  intent:  string,
+  wa:      WhatsApp
 ): Promise<void> {
   switch (intent) {
     case 'attendance_demo':
@@ -350,9 +353,9 @@ async function handleIntentFollowUp(
 // ============================================================
 
 async function sendWelcome(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.text(
     phone,
@@ -376,11 +379,10 @@ async function sendWelcome(
 // ============================================================
 
 async function showDemoMainMenu(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  // ✅ Update state in DB
   session.state = 'DEMO_MENU';
   await saveMarketingSession(session);
 
@@ -450,13 +452,15 @@ async function showDemoMainMenu(
 // ============================================================
 
 async function showAttendanceDemo(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_ATTENDANCE';
   await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'attendance_demo');
+  await logDemoInteraction(
+    formatPhone(phone), 'attendance_demo'
+  );
 
   await wa.text(
     phone,
@@ -502,9 +506,9 @@ async function showAttendanceDemo(
 
 // ─── Parent attendance view ───────────────────────────────
 async function showParentAttView(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_ATTENDANCE_PARENT';
   await saveMarketingSession(session);
@@ -546,9 +550,9 @@ async function showParentAttView(
 
 // ─── Admin attendance view ────────────────────────────────
 async function showAdminAttView(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_ATTENDANCE_ADMIN';
   await saveMarketingSession(session);
@@ -587,13 +591,15 @@ async function showAdminAttView(
 // ============================================================
 
 async function showFeesDemo(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_FEES';
   await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'fees_demo');
+  await logDemoInteraction(
+    formatPhone(phone), 'fees_demo'
+  );
 
   await wa.text(
     phone,
@@ -630,9 +636,9 @@ async function showFeesDemo(
 
 // ─── Parent fees view ─────────────────────────────────────
 async function showParentFeesView(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_FEES_PARENT';
   await saveMarketingSession(session);
@@ -674,9 +680,9 @@ async function showParentFeesView(
 
 // ─── Payment flow demo ────────────────────────────────────
 async function showPaymentDemo(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_FEES_PAYMENT';
   await saveMarketingSession(session);
@@ -698,8 +704,8 @@ async function showPaymentDemo(
     `Pay via:\n` +
     `💳 Card | 🏦 Transfer\n` +
     `📱 USSD | 💵 Mobile Money\n\n` +
-    `*School gets 100% — we add\n` +
-    `our small fee on top!* 💪`
+    `*School gets 100% —\n` +
+    `we add our small fee on top!* 💪`
   );
 
   await delay(2000);
@@ -720,13 +726,15 @@ async function showPaymentDemo(
 // ============================================================
 
 async function showPickupDemo(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_PICKUP';
   await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'pickup_demo');
+  await logDemoInteraction(
+    formatPhone(phone), 'pickup_demo'
+  );
 
   await wa.text(
     phone,
@@ -782,13 +790,15 @@ async function showPickupDemo(
 // ============================================================
 
 async function showReportsDemo(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_REPORTS';
   await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'reports_demo');
+  await logDemoInteraction(
+    formatPhone(phone), 'reports_demo'
+  );
 
   const r = DEMO_REPORTS;
 
@@ -831,9 +841,9 @@ async function showReportsDemo(
 // ============================================================
 
 async function showPricing(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_PRICING';
   await saveMarketingSession(session);
@@ -861,7 +871,7 @@ async function showPricing(
     phone,
     `💵 Setup Fee Tiers`,
     `One-time setup fee based on\nyour student count:`,
-    `Commission: 1.5% per payment (charged to parent)`,
+    `Commission: 1.5% per payment (to parent)`,
     `📋 View Tiers`,
     [
       {
@@ -889,13 +899,15 @@ async function showPricing(
 }
 
 // ============================================================
-// REGISTRATION
+// ✅ REGISTRATION — KEY FUNCTION
+// startOnboardingSession is now awaited so the session
+// is saved to DB before the user's next message arrives
 // ============================================================
 
 async function startRegistration(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'REGISTERING';
   await saveMarketingSession(session);
@@ -911,11 +923,22 @@ async function startRegistration(
     schoolType:        session.schoolType   ?? undefined,
   };
 
-  const obSession = startOnboardingSession(
+  // ✅ KEY FIX: await so session is saved to DB
+  // BEFORE the user sends their next message.
+  // Without await, the session may not exist yet
+  // when the next message arrives, causing the
+  // registration flow to break.
+  const obSession = await startOnboardingSession(
     phone, 'marketing', prefill
   );
 
+  console.log(
+    `[Marketing] ✅ Onboarding session created | ` +
+    `step: ${obSession.step}`
+  );
+
   if (session.contactName && session.schoolName) {
+    // We already have enough info — jump to fee
     await wa.text(
       phone,
       `🚀 *Let's register your school!*\n\n` +
@@ -927,6 +950,7 @@ async function startRegistration(
     await delay(1000);
     await showSetupFeeInfo(phone, obSession, wa);
   } else if (session.contactName) {
+    // Have name, need school name
     await wa.text(
       phone,
       `🚀 *Register Your School!*\n\n` +
@@ -934,6 +958,7 @@ async function startRegistration(
       `What is the name of your school?`
     );
   } else {
+    // Need name first
     await wa.text(
       phone,
       `🚀 *Register Your School!*\n\n` +
@@ -948,9 +973,9 @@ async function startRegistration(
 // ============================================================
 
 async function handleNotInterested(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'NOT_INTERESTED';
   await saveMarketingSession(session);
@@ -986,9 +1011,9 @@ async function handleNotInterested(
 // ============================================================
 
 async function showContactOptions(
-  phone: string,
+  phone:   string,
   session: DemoSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_CONTACT';
   await saveMarketingSession(session);
@@ -1016,7 +1041,7 @@ async function showContactOptions(
 
 async function showQuickOptions(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   await wa.buttons(
     phone,
