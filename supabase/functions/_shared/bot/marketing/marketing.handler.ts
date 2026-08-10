@@ -1,13 +1,12 @@
 // ============================================================
 // SCHOOLBOT - MARKETING BOT HANDLER
-// supabase/functions/_shared/bot/marketing/marketing.handler.ts
+// _shared/bot/marketing/marketing.handler.ts
 //
-// Handles ALL unknown users on YOUR platform number.
-// This is the sales/demo/onboarding bot (Sabi AI).
+// Uses DB-backed sessions so state persists across
+// Edge Function instances (fixes the menu reset bug).
 // ============================================================
 
 import { WhatsApp }    from '../../whatsapp.ts';
-import { getSupabase } from '../../supabase.ts';
 import { AIService }   from '../../ai.service.ts';
 import { formatPhone } from '../../utils.ts';
 import {
@@ -25,31 +24,23 @@ import {
   DEMO_REPORTS,
   SETUP_FEE_TIERS,
 } from './marketing.data.ts';
+import {
+  getMarketingSession,
+  saveMarketingSession,
+  createMarketingSession,
+  logDemoInteraction,
+  type DemoSession,
+} from './marketing.session.ts';
+
+// Re-export hasActiveMarketingSession so handler.ts
+// can import it from here
+export {
+  hasActiveMarketingSession,
+} from './marketing.session.ts';
+
 import type { IncomingMessage } from '../../types.ts';
 
-const db  = getSupabase();
-const ai  = new AIService();
-
-// ─── Demo session type ────────────────────────────────────
-type DemoSession = {
-  phone:        string;
-  contactName:  string | null;
-  schoolName:   string | null;
-  schoolType:   string | null;
-  location:     string | null;
-  studentCount: string | null;
-  email:        string | null;
-  state:        string;
-  aiHistory:    Array<{ role: string; content: string }>;
-  registered:   boolean;
-  lastActivity: number;
-};
-
-// ─── In-memory demo sessions ──────────────────────────────
-// These are short-lived (12 hours max)
-// Each Edge Function instance has its own memory
-const demoSessions = new Map<string, DemoSession>();
-const SESSION_TTL  = 12 * 60 * 60 * 1000; // 12 hours
+const ai = new AIService();
 
 // ─── Reset keywords ───────────────────────────────────────
 const RESET_KEYWORDS = new Set([
@@ -69,32 +60,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ============================================================
-// EXPORTED: Check if user has active marketing session
-// Called by handler.ts to skip DB lookup for known
-// marketing users — this is what fixes the menu reset bug
-// ============================================================
-
-export function hasActiveMarketingSession(
-  phone: string
-): boolean {
-  const key = formatPhone(phone);
-  const s   = demoSessions.get(key);
-
-  if (!s) return false;
-
-  // Check if session expired
-  if (Date.now() - s.lastActivity > SESSION_TTL) {
-    demoSessions.delete(key);
-    return false;
-  }
-
-  // Only return true if user has moved past welcome screen
-  // Fresh visitors still go through reset check first
-  // so registered parents/staff are identified correctly
-  return s.state !== 'WELCOME';
-}
-
 // ─── Get platform WhatsApp client ─────────────────────────
 function getPlatformWa(): WhatsApp {
   return new WhatsApp({
@@ -108,7 +73,6 @@ function getPlatformWa(): WhatsApp {
 
 // ============================================================
 // MAIN ENTRY POINT
-// Called from handler.ts for unknown users on platform number
 // ============================================================
 
 export async function handleMarketingMessage(
@@ -138,7 +102,7 @@ export async function handleMarketingMessage(
   const input =
     buttonId || listId || rawText.toLowerCase().trim();
 
-  // ── Staff invite token check ────────────────────────────
+  // ── Staff invite token ──────────────────────────────────
   if (/^[A-Z0-9]{8}$/i.test(rawText.trim())) {
     await handleInvitationToken(
       phone,
@@ -157,19 +121,19 @@ export async function handleMarketingMessage(
     if (handled) return;
   }
 
-  // ── Get or create demo session ──────────────────────────
-  let session = getSession(phone);
+  // ── Get session from DB ─────────────────────────────────
+  let session = await getMarketingSession(
+    formatPhone(phone)
+  );
 
-  // Reset keywords OR brand new user — show welcome
+  // ── Reset or new user ───────────────────────────────────
   if (!input || RESET_KEYWORDS.has(input) || !session) {
-    session = createSession(phone);
+    session = await createMarketingSession(
+      formatPhone(phone)
+    );
     await sendWelcome(phone, session, wa);
     return;
   }
-
-  // Update last activity
-  session.lastActivity = Date.now();
-  demoSessions.set(formatPhone(phone), session);
 
   // ── Registration triggers ───────────────────────────────
   if ([
@@ -188,12 +152,13 @@ export async function handleMarketingMessage(
   }
 
   // ── Text input ──────────────────────────────────────────
-  await handleTextInput(phone, session, rawText, input, wa);
+  await handleTextInput(
+    phone, session, rawText, input, wa
+  );
 }
 
 // ============================================================
 // MENU SELECTION HANDLER
-// Routes all button/list tap selections
 // ============================================================
 
 async function handleMenuSelection(
@@ -204,7 +169,6 @@ async function handleMenuSelection(
 ): Promise<void> {
   switch (input) {
 
-    // ── Feature demos ──────────────────────────────────
     case 'demo_attendance':
       await showAttendanceDemo(phone, session, wa);
       break;
@@ -221,7 +185,6 @@ async function handleMenuSelection(
       await showReportsDemo(phone, session, wa);
       break;
 
-    // ── Attendance sub-views ───────────────────────────
     case 'att_parent_view':
       await showParentAttView(phone, session, wa);
       break;
@@ -230,7 +193,6 @@ async function handleMenuSelection(
       await showAdminAttView(phone, session, wa);
       break;
 
-    // ── Fees sub-views ─────────────────────────────────
     case 'fees_parent_view':
       await showParentFeesView(phone, session, wa);
       break;
@@ -239,36 +201,31 @@ async function handleMenuSelection(
       await showPaymentDemo(phone, session, wa);
       break;
 
-    // ── Pricing ────────────────────────────────────────
     case 'see_pricing':
       await showPricing(phone, session, wa);
       break;
 
-    // ── Registration ───────────────────────────────────
     case 'register_now':
     case 'start_onboarding':
     case 'start_trial':
       await startRegistration(phone, session, wa);
       break;
 
-    // ── Contact ────────────────────────────────────────
     case 'talk_to_us':
       await showContactOptions(phone, session, wa);
       break;
 
-    // ── Navigation ─────────────────────────────────────
     case 'main_menu':
     case 'back_to_menu':
       await showDemoMainMenu(phone, session, wa);
       break;
 
-    // ── Pricing tier taps (just acknowledge) ──────────
     default:
+      // Pricing tier taps → go to registration
       if (input.startsWith('tier_')) {
-        // User tapped a pricing tier - show registration
         await startRegistration(phone, session, wa);
       } else {
-        // Unknown input - let AI handle it
+        // Unknown → AI
         await handleAI(phone, session, input, wa);
       }
   }
@@ -285,12 +242,12 @@ async function handleTextInput(
   input: string,
   wa: WhatsApp
 ): Promise<void> {
-  // ── Collecting name ────────────────────────────────────
+  // Collecting name
   if (session.state === 'COLLECTING_NAME') {
     if (rawText.trim().length >= 2) {
       session.contactName = rawText.trim();
       session.state       = 'DEMO_MENU';
-      demoSessions.set(formatPhone(phone), session);
+      await saveMarketingSession(session);
 
       const firstName = rawText.split(' ')[0];
       await wa.text(
@@ -300,15 +257,12 @@ async function handleTextInput(
       await delay(800);
       await showDemoMainMenu(phone, session, wa);
     } else {
-      await wa.text(
-        phone,
-        `Please enter your full name:`
-      );
+      await wa.text(phone, `Please enter your full name:`);
     }
     return;
   }
 
-  // ── Everything else → AI ───────────────────────────────
+  // Everything else → AI
   await handleAI(phone, session, rawText, wa);
 }
 
@@ -329,11 +283,9 @@ async function handleAI(
 
   history.push({ role: 'user', content: input });
 
-  // Detect intent from message
   const { intent, entities } =
     await ai.detectIntent(input);
 
-  // Extract entities if found
   if (entities.school_name && !session.schoolName) {
     session.schoolName = entities.school_name;
   }
@@ -341,7 +293,6 @@ async function handleAI(
     session.location = entities.location;
   }
 
-  // Get AI response
   const aiResponse = await ai.chat(history, {
     contactName: session.contactName,
     schoolName:  session.schoolName,
@@ -350,15 +301,11 @@ async function handleAI(
   });
 
   history.push({ role: 'assistant', content: aiResponse });
-
-  // Keep only last 20 messages to avoid memory bloat
   session.aiHistory = history.slice(-20);
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   await wa.text(phone, aiResponse);
   await delay(1500);
-
-  // Follow up based on detected intent
   await handleIntentFollowUp(phone, session, intent, wa);
 }
 
@@ -392,7 +339,6 @@ async function handleIntentFollowUp(
       await handleNotInterested(phone, session, wa);
       break;
     default:
-      // Only show quick options for non-question intents
       if (intent !== 'question') {
         await showQuickOptions(phone, wa);
       }
@@ -400,7 +346,7 @@ async function handleIntentFollowUp(
 }
 
 // ============================================================
-// WELCOME MESSAGE
+// WELCOME
 // ============================================================
 
 async function sendWelcome(
@@ -413,7 +359,7 @@ async function sendWelcome(
     `👋 *Welcome to SchoolBot!*\n\n` +
     `I'm *Sabi* — your SchoolBot assistant! 🤖✨\n\n` +
     `SchoolBot helps Nigerian schools manage:\n` +
-    `✅ Student attendance (WhatsApp alerts to parents)\n` +
+    `✅ Student attendance (WhatsApp alerts)\n` +
     `💰 Fee collection & online payments\n` +
     `🚗 Student pickup management\n` +
     `📊 School reports & analytics\n\n` +
@@ -434,18 +380,14 @@ async function showDemoMainMenu(
   session: DemoSession,
   wa: WhatsApp
 ): Promise<void> {
-  // ✅ IMPORTANT: Update state so hasActiveMarketingSession
-  // returns true for subsequent messages
+  // ✅ Update state in DB
   session.state = 'DEMO_MENU';
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   await wa.list(
     phone,
     `🏫 SchoolBot Demo`,
-    `What would you like to explore?\n\n` +
-    (session.contactName
-      ? `Hi *${session.contactName.split(' ')[0]}!* 👋\n`
-      : ''),
+    `What would you like to explore?`,
     `Powered by SchoolBot · XtopEdu`,
     `🎯 Explore Features`,
     [
@@ -512,11 +454,9 @@ async function showAttendanceDemo(
   session: DemoSession,
   wa: WhatsApp
 ): Promise<void> {
-  // Update state
   session.state = 'DEMO_ATTENDANCE';
-  demoSessions.set(formatPhone(phone), session);
-
-  await logInteraction(phone, 'attendance_demo');
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'attendance_demo');
 
   await wa.text(
     phone,
@@ -528,7 +468,7 @@ async function showAttendanceDemo(
     `❌ Absent:  *${DEMO_ATTENDANCE.today.absent}* students\n` +
     `⏰ Late:    *${DEMO_ATTENDANCE.today.late}* students\n` +
     `📊 Rate:    *${DEMO_ATTENDANCE.today.rate}*\n\n` +
-    `When teacher marks a student, the parent\n` +
+    `When teacher marks a student, parent\n` +
     `gets this WhatsApp message *instantly* 👇`
   );
 
@@ -567,7 +507,7 @@ async function showParentAttView(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_ATTENDANCE_PARENT';
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   const s = DEMO_ATTENDANCE.student;
 
@@ -611,7 +551,7 @@ async function showAdminAttView(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_ATTENDANCE_ADMIN';
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   await wa.text(
     phone,
@@ -633,8 +573,7 @@ async function showAdminAttView(
 
   await wa.buttons(
     phone,
-    `This is how ${DEMO_SCHOOL.name} reduced\n` +
-    `unexplained absences by *67%*! 🎯`,
+    `This reduced absences by *67%*! 🎯`,
     [
       { id: 'demo_fees',    title: '💰 Fee Collection' },
       { id: 'register_now', title: '🚀 Get Started' },
@@ -653,9 +592,8 @@ async function showFeesDemo(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_FEES';
-  demoSessions.set(formatPhone(phone), session);
-
-  await logInteraction(phone, 'fees_demo');
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'fees_demo');
 
   await wa.text(
     phone,
@@ -697,7 +635,7 @@ async function showParentFeesView(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_FEES_PARENT';
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   const inv1 = DEMO_FEES.invoices[0];
   const inv2 = DEMO_FEES.invoices[1];
@@ -741,7 +679,7 @@ async function showPaymentDemo(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_FEES_PAYMENT';
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   await wa.text(
     phone,
@@ -760,8 +698,8 @@ async function showPaymentDemo(
     `Pay via:\n` +
     `💳 Card | 🏦 Transfer\n` +
     `📱 USSD | 💵 Mobile Money\n\n` +
-    `*Your school gets 100% —\n` +
-    `we add our small fee on top!* 💪`
+    `*School gets 100% — we add\n` +
+    `our small fee on top!* 💪`
   );
 
   await delay(2000);
@@ -787,16 +725,15 @@ async function showPickupDemo(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_PICKUP';
-  demoSessions.set(formatPhone(phone), session);
-
-  await logInteraction(phone, 'pickup_demo');
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'pickup_demo');
 
   await wa.text(
     phone,
     `🚗 *Student Pickup Management*\n\n` +
     `Keep students safe with authorized\n` +
     `pickup contacts!\n\n` +
-    `*${DEMO_PICKUP.student}'s Authorized Contacts:*\n` +
+    `*${DEMO_PICKUP.student}'s Contacts:*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
     DEMO_PICKUP.contacts.map((c, i) =>
       `${i + 1}. *${c.name}*\n` +
@@ -850,9 +787,8 @@ async function showReportsDemo(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_REPORTS';
-  demoSessions.set(formatPhone(phone), session);
-
-  await logInteraction(phone, 'reports_demo');
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'reports_demo');
 
   const r = DEMO_REPORTS;
 
@@ -874,9 +810,7 @@ async function showReportsDemo(
     `Messages Sent:  *${r.whatsappStats.messagesSent.toLocaleString()}*\n` +
     `Delivery Rate:  *${r.whatsappStats.deliveryRate}*\n` +
     `Parents Active: *${r.whatsappStats.parentsEngaged}*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `All reports available on web\n` +
-    `dashboard & WhatsApp! 📱💻`
+    `━━━━━━━━━━━━━━━━`
   );
 
   await delay(1500);
@@ -902,9 +836,8 @@ async function showPricing(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_PRICING';
-  demoSessions.set(formatPhone(phone), session);
-
-  await logInteraction(phone, 'pricing');
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'pricing');
 
   await wa.text(
     phone,
@@ -965,9 +898,10 @@ async function startRegistration(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'REGISTERING';
-  demoSessions.set(formatPhone(phone), session);
-
-  await logInteraction(phone, 'registration_started');
+  await saveMarketingSession(session);
+  await logDemoInteraction(
+    formatPhone(phone), 'registration_started'
+  );
 
   const prefill = {
     contactName:       session.contactName  ?? undefined,
@@ -1018,8 +952,8 @@ async function handleNotInterested(
   session: DemoSession,
   wa: WhatsApp
 ): Promise<void> {
-  session.state = 'DEMO_NOT_INTERESTED';
-  demoSessions.set(formatPhone(phone), session);
+  session.state = 'NOT_INTERESTED';
+  await saveMarketingSession(session);
 
   const response = await ai.chat(
     [{
@@ -1040,9 +974,9 @@ async function handleNotInterested(
     phone,
     `No problem! We're here whenever\nyou're ready 😊`,
     [
-      { id: 'see_pricing',  title: '💵 See Pricing' },
-      { id: 'main_menu',    title: '🎯 See Features' },
-      { id: 'talk_to_us',   title: '📞 Contact Us' },
+      { id: 'see_pricing', title: '💵 See Pricing' },
+      { id: 'main_menu',   title: '🎯 See Features' },
+      { id: 'talk_to_us',  title: '📞 Contact Us' },
     ]
   );
 }
@@ -1057,7 +991,7 @@ async function showContactOptions(
   wa: WhatsApp
 ): Promise<void> {
   session.state = 'DEMO_CONTACT';
-  demoSessions.set(formatPhone(phone), session);
+  await saveMarketingSession(session);
 
   const adminPhone =
     Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
@@ -1077,7 +1011,7 @@ async function showContactOptions(
 }
 
 // ============================================================
-// QUICK OPTIONS (after AI response)
+// QUICK OPTIONS
 // ============================================================
 
 async function showQuickOptions(
@@ -1093,87 +1027,4 @@ async function showQuickOptions(
       { id: 'see_pricing',  title: '💵 Pricing' },
     ]
   );
-}
-
-// ============================================================
-// SESSION HELPERS
-// ============================================================
-
-function getSession(phone: string): DemoSession | null {
-  const key = formatPhone(phone);
-  const s   = demoSessions.get(key);
-
-  if (!s) return null;
-
-  // Expired?
-  if (Date.now() - s.lastActivity > SESSION_TTL) {
-    demoSessions.delete(key);
-    return null;
-  }
-
-  return s;
-}
-
-function createSession(phone: string): DemoSession {
-  const key = formatPhone(phone);
-  const s: DemoSession = {
-    phone:        key,
-    contactName:  null,
-    schoolName:   null,
-    schoolType:   null,
-    location:     null,
-    studentCount: null,
-    email:        null,
-    state:        'WELCOME',
-    aiHistory:    [],
-    registered:   false,
-    lastActivity: Date.now(),
-  };
-  demoSessions.set(key, s);
-  return s;
-}
-
-// ============================================================
-// LOG INTERACTION TO DB (non-critical analytics)
-// ============================================================
-
-async function logInteraction(
-  phone: string,
-  feature: string
-): Promise<void> {
-  try {
-    // Upsert demo session record
-    const formatted = formatPhone(phone);
-
-    await db
-      .from('demo_sessions')
-      .upsert(
-        {
-          phone:         formatted,
-          state:         'DEMO_MENU',
-          interested:    true,
-          registered:    false,
-          demo_completed: false,
-          last_activity: new Date().toISOString(),
-        },
-        { onConflict: 'phone' }
-      );
-
-    // Log the interaction
-    const { data: session } = await db
-      .from('demo_sessions')
-      .select('id')
-      .eq('phone', formatted)
-      .single();
-
-    if (session?.id) {
-      await db.from('demo_interactions').insert({
-        session_id:  session.id,
-        feature,
-        created_at:  new Date().toISOString(),
-      });
-    }
-  } catch {
-    // Non-critical — don't crash the bot
-  }
 }
