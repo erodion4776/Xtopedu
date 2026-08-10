@@ -3,7 +3,7 @@
 // supabase/functions/_shared/bot/handler.ts
 //
 // Smart router for ALL incoming WhatsApp messages.
-// Identifies user and routes to correct flow.
+// Identifies user and routes to the correct flow.
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -14,9 +14,10 @@ import { getSupabase }    from '../supabase.ts';
 import {
   formatPhone,
   isInviteToken,
+  delay,
 } from '../utils.ts';
 
-// ── Parent flows ─────────────────────────────────────────
+// ── Parent flows ──────────────────────────────────────────
 import {
   showMainMenu,
   showInviteCodePrompt,
@@ -45,7 +46,7 @@ import {
   handleStudentSelect as pickupStudentSelect,
 } from './pickup.ts';
 
-// ── Admin flows ──────────────────────────────────────────
+// ── Admin flows ───────────────────────────────────────────
 import {
   showAdminMenu,
   showAdminHelp,
@@ -114,13 +115,22 @@ import {
   handleSendReceipt,
 } from './admin/admin.receipts.ts';
 
-// ── Marketing bot ────────────────────────────────────────
+// ── Super admin bot ───────────────────────────────────────
+import {
+  showSuperAdminMenu,
+  handleSuperAdminMenu,
+  handleSuperAdminBroadcast,
+  isSuperAdminTestMode,
+  clearTestMode,
+} from './superadmin/superadmin.menu.ts';
+
+// ── Marketing bot ─────────────────────────────────────────
 import {
   handleMarketingMessage,
   hasActiveMarketingSession,
 } from './marketing/marketing.handler.ts';
 
-// ── Onboarding ───────────────────────────────────────────
+// ── Onboarding ────────────────────────────────────────────
 import {
   getOnboardingSession,
   handleOnboardingInput,
@@ -139,6 +149,7 @@ const parentSvc = new ParentService();
 const adminSvc  = new AdminService();
 const db        = getSupabase();
 
+// Keywords that reset session and re-identify user
 const RESET_KEYWORDS = new Set([
   'hi', 'hello', 'hey', 'start',
   'menu', 'home', 'restart', '00',
@@ -167,8 +178,7 @@ export async function handleMessage(
   const wa = new WhatsApp(waAccount);
 
   // ── Staff invite token ──────────────────────────────────
-  // Check before anything else so staff can always
-  // activate their account regardless of state
+  // Must be checked before everything else
   if (message.type === 'text' && isInviteToken(rawText)) {
     await handleInvitationToken(
       phone,
@@ -178,9 +188,52 @@ export async function handleMessage(
     return;
   }
 
+  // ── EXIT keyword — leave test mode ──────────────────────
+  if (
+    message.type === 'text' &&
+    rawText.trim().toUpperCase() === 'EXIT' &&
+    isPlatformNumber
+  ) {
+    const testMode = await isSuperAdminTestMode(phone);
+
+    if (testMode.active) {
+      await clearTestMode(phone);
+      await sessions.delete(phone);
+
+      await wa.text(
+        phone,
+        `✅ *Test Mode Ended*\n\n` +
+        `Returning to your admin panel...`
+      );
+
+      await delay(500);
+
+      await handleReset(
+        phone, message, wa, waAccount, isPlatformNumber
+      );
+      return;
+    }
+  }
+
+  // ── Super admin test mode routing ───────────────────────
+  // If super admin is in test mode, route accordingly
+  if (isPlatformNumber) {
+    const testMode = await isSuperAdminTestMode(phone);
+
+    if (testMode.active) {
+      if (testMode.testRole === 'marketing') {
+        // Route to marketing bot for testing
+        await handleMarketingMessage(message);
+        return;
+      }
+      // For parent/admin test mode, a real session was
+      // created so normal routing below will handle it
+    }
+  }
+
   // ── Active onboarding session ───────────────────────────
-  // Check onboarding BEFORE marketing check so school
-  // owners completing registration are handled correctly
+  // Check BEFORE marketing so school owners completing
+  // registration are handled correctly
   const obSession = getOnboardingSession(phone);
   if (obSession) {
     const handled = await handleOnboardingInput(
@@ -189,10 +242,10 @@ export async function handleMessage(
     if (handled) return;
   }
 
-  // ── ✅ KEY FIX: Check marketing session from DB ─────────
-  // If this is the platform number AND user has an active
-  // demo session in DB → route directly to marketing bot
-  // This skips the expensive DB reset check for every msg
+  // ── ✅ Marketing session check (DB-backed) ──────────────
+  // If platform number AND user has active demo session
+  // in DB → route directly to marketing bot
+  // Skips expensive DB reset check for every message
   if (isPlatformNumber) {
     const isMarketingUser =
       await hasActiveMarketingSession(formatPhone(phone));
@@ -250,14 +303,9 @@ export async function handleMessage(
   }
 
   // ── Reset keywords ──────────────────────────────────────
-  // Reset clears session and re-identifies the user
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
-      phone,
-      message,
-      wa,
-      waAccount,
-      isPlatformNumber
+      phone, message, wa, waAccount, isPlatformNumber
     );
     return;
   }
@@ -268,29 +316,27 @@ export async function handleMessage(
   if (!session) {
     // No session found
     if (isPlatformNumber) {
-      // Platform number with no session = marketing user
-      // who typed something that is not a reset keyword
+      // Platform number + no session = marketing user
+      // who typed something other than a reset keyword
       await handleMarketingMessage(message);
     } else {
-      // School number with no session = unknown user
+      // School number + no session = unknown user
       await handleReset(
-        phone,
-        message,
-        wa,
-        waAccount,
-        isPlatformNumber
+        phone, message, wa, waAccount, isPlatformNumber
       );
     }
     return;
   }
 
-  // Update last activity timestamp
+  // Update last activity
   await sessions.touch(phone);
 
   // ── Global shortcuts ────────────────────────────────────
   if (['0', 'back', 'main_menu'].includes(input)) {
     if (session.role === 'parent') {
       await showMainMenu(phone, session, wa);
+    } else if (isSuperAdminRole(session)) {
+      await showSuperAdminMenu(phone, session, wa);
     } else {
       await showAdminMenu(phone, session, wa);
     }
@@ -299,22 +345,27 @@ export async function handleMessage(
 
   // ── Route by role ───────────────────────────────────────
   if (session.role === 'parent') {
-    await routeParent(
+    await routeParent(phone, session, input, rawText, wa);
+  } else if (isSuperAdminRole(session)) {
+    await routeSuperAdmin(
       phone, session, input, rawText, wa
     );
   } else {
-    await routeAdmin(
-      phone, session, input, rawText, wa
-    );
+    await routeAdmin(phone, session, input, rawText, wa);
   }
+}
+
+// ─── Check if session belongs to super admin ──────────────
+function isSuperAdminRole(session: BotSession): boolean {
+  return (
+    session.schoolUser?.roles?.name === 'super_admin' ||
+    (session.school_id === session.school_user_id &&
+      session.role === 'admin')
+  );
 }
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
-// Called when:
-// 1. User sends a reset keyword (hi, menu, etc.)
-// 2. No session exists
-// Looks up who the user is and creates the right session
 // ============================================================
 
 async function handleReset(
@@ -341,7 +392,6 @@ async function handleReset(
     .maybeSingle();
 
   if (platformAdmin) {
-    // Update last login
     await db
       .from('platform_admins')
       .update({ last_login: new Date().toISOString() })
@@ -372,7 +422,8 @@ async function handleReset(
       'admin'
     );
 
-    await showAdminMenu(phone, session, wa);
+    // ✅ Super admin sees THEIR OWN special menu
+    await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
@@ -385,20 +436,16 @@ async function handleReset(
       parentSvc.getWaAccount(parent.school_id),
     ]);
 
-    // Ensure contact & conversation records exist
     const contactId =
       await parentSvc.ensureContact(parent, phone);
     if (contactId) {
       await parentSvc.ensureConversation(
-        contactId,
-        parent.school_id
+        contactId, parent.school_id
       );
     }
 
-    // Ensure parent has a basic subscription
     await ensureParentSubscription(
-      parent.id,
-      parent.school_id
+      parent.id, parent.school_id
     );
 
     const session = await sessions.createParentSession(
@@ -447,10 +494,10 @@ async function handleReset(
 
   // ── 4. Unknown user ─────────────────────────────────────
   if (isPlatformNumber) {
-    // ✅ Your platform number → Marketing/Sales bot
+    // Your platform number → Marketing bot
     await handleMarketingMessage(message);
   } else {
-    // ✅ School number → Option B welcome
+    // School number → Option B welcome
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
 }
@@ -464,7 +511,6 @@ async function showSchoolUnknownUser(
   wa: WhatsApp,
   waAccount: WhatsAppAccount | null
 ): Promise<void> {
-  // Get school name from WA account
   let schoolName = 'this school';
 
   if (waAccount?.school_id) {
@@ -483,17 +529,36 @@ async function showSchoolUnknownUser(
     `Your number is not registered yet.\n\n` +
     `Are you a:`,
     [
-      {
-        id:    'IM_A_PARENT',
-        title: '👨‍👩‍👧 Parent',
-      },
-      {
-        id:    'ENTER_INVITE_CODE',
-        title: '🔑 I Have a Code',
-      },
+      { id: 'IM_A_PARENT',      title: '👨‍👩‍👧 Parent' },
+      { id: 'ENTER_INVITE_CODE', title: '🔑 I Have a Code' },
     ],
     schoolName,
     `Select your role to continue`
+  );
+}
+
+// ============================================================
+// SUPER ADMIN ROUTING
+// ============================================================
+
+async function routeSuperAdmin(
+  phone: string,
+  session: BotSession,
+  input: string,
+  rawText: string,
+  wa: WhatsApp
+): Promise<void> {
+  // Broadcast compose state
+  if (session.sub_state === 'SA_BROADCAST_COMPOSE') {
+    await handleSuperAdminBroadcast(
+      phone, session, rawText, wa
+    );
+    return;
+  }
+
+  // All other inputs go to super admin menu handler
+  await handleSuperAdminMenu(
+    phone, session, input, rawText, wa
   );
 }
 
@@ -578,15 +643,15 @@ async function routeParent(
   }
 }
 
-// ─── Parent not registered message ────────────────────────
+// ─── Parent not registered ────────────────────────────────
 async function showParentNotRegistered(
   phone: string,
   wa: WhatsApp,
   session: BotSession
 ): Promise<void> {
   const schoolName =
-    (session.parent?.schools?.name as string | undefined) ??
-    'the school';
+    (session.parent?.schools?.name as string | undefined)
+    ?? 'the school';
 
   await wa.text(
     phone,
@@ -983,7 +1048,6 @@ async function handleDocumentUpload(
 // HELPERS
 // ============================================================
 
-// Ensure parent has at least a basic subscription
 async function ensureParentSubscription(
   parentId: string,
   schoolId: string
@@ -1016,11 +1080,10 @@ async function ensureParentSubscription(
       updated_at:   new Date().toISOString(),
     });
   } catch {
-    // Non-critical — don't crash the bot
+    // Non-critical
   }
 }
 
-// Extract interactive button/list input (lowercased)
 export function extractInput(
   message: IncomingMessage
 ): string {
@@ -1041,7 +1104,6 @@ export function extractInput(
   return '';
 }
 
-// Extract raw text from message
 export function extractRawText(
   message: IncomingMessage
 ): string {
