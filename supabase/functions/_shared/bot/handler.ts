@@ -152,22 +152,41 @@ const RESET_KEYWORDS = new Set([
 ]);
 
 // ============================================================
+// ✅ SUPER ADMIN PHONE FROM ENV
+// This is the single source of truth.
+// No DB lookup needed — just compare phone numbers.
+// ============================================================
+
+function getSuperAdminPhone(): string {
+  return formatPhone(
+    Deno.env.get('SUPER_ADMIN_PHONE') ?? ''
+  );
+}
+
+function isSuperAdminPhone(phone: string): boolean {
+  const superPhone = getSuperAdminPhone();
+  if (!superPhone) return false;
+  return formatPhone(phone) === superPhone;
+}
+
+// ============================================================
 // MAIN ENTRY POINT
 // ============================================================
 
 export async function handleMessage(
-  message: IncomingMessage,
-  waAccount: WhatsAppAccount | null,
-  isPlatformNumber = false
+  message:          IncomingMessage,
+  waAccount:        WhatsAppAccount | null,
+  isPlatformNumber: boolean = false
 ): Promise<void> {
   const phone   = message.from;
   const rawText = extractRawText(message);
   const input   = extractInput(message);
 
   console.log(
-    `[Bot] ${phone} | ` +
+    `[Bot] from=${phone} | ` +
     `platform=${isPlatformNumber} | ` +
-    `input="${input.substring(0, 50)}"`
+    `isSuperAdmin=${isSuperAdminPhone(phone)} | ` +
+    `input="${input.substring(0, 40)}"`
   );
 
   const wa = new WhatsApp(waAccount);
@@ -183,76 +202,17 @@ export async function handleMessage(
   }
 
   // ╔══════════════════════════════════════════════════════╗
-  // ║  ✅ SUPER ADMIN CHECK — MUST BE FIRST               ║
-  // ║  Check if this phone is a platform admin BEFORE     ║
-  // ║  any marketing or session checks. This ensures      ║
-  // ║  the super admin ALWAYS gets their panel and        ║
-  // ║  never falls through to the marketing bot.          ║
+  // ║  ✅ SUPER ADMIN CHECK — USING ENV VARIABLE          ║
+  // ║  Compare incoming phone against SUPER_ADMIN_PHONE   ║
+  // ║  This runs BEFORE everything else so super admin    ║
+  // ║  NEVER falls through to marketing bot               ║
   // ╚══════════════════════════════════════════════════════╝
-  if (isPlatformNumber) {
-    const formatted = formatPhone(phone);
-
-    const { data: platformAdmin } = await db
-      .from('platform_admins')
-      .select(
-        'id, full_name, phone, whatsapp_number, ' +
-        'is_active, role'
-      )
-      .or(
-        `phone.eq.${formatted},` +
-        `whatsapp_number.eq.${formatted}`
-      )
-      .eq('is_active', true)
-      .maybeSingle();
-
-    if (platformAdmin) {
-      // ✅ This is the super admin — handle directly
-      await handleSuperAdminMessage(
-        phone,
-        message,
-        rawText,
-        input,
-        platformAdmin,
-        waAccount,
-        wa
-      );
-      return;
-    }
-  }
-
-  // ── EXIT keyword — leave test mode ──────────────────────
-  if (
-    message.type === 'text' &&
-    rawText.trim().toUpperCase() === 'EXIT' &&
-    isPlatformNumber
-  ) {
-    const testMode = await isSuperAdminTestMode(phone);
-    if (testMode.active) {
-      await clearTestMode(phone);
-      await sessions.delete(phone);
-      await wa.text(
-        phone,
-        `✅ *Test Mode Ended*\n\n` +
-        `Returning to your admin panel...`
-      );
-      await delay(500);
-      await handleReset(
-        phone, message, wa, waAccount, isPlatformNumber
-      );
-      return;
-    }
-  }
-
-  // ── Super admin test mode routing ───────────────────────
-  if (isPlatformNumber) {
-    const testMode = await isSuperAdminTestMode(phone);
-    if (testMode.active) {
-      if (testMode.testRole === 'marketing') {
-        await handleMarketingMessage(message);
-        return;
-      }
-      // parent/admin test — let normal routing handle
-    }
+  if (isSuperAdminPhone(phone)) {
+    console.log('[Bot] ✅ Super admin identified via env');
+    await handleSuperAdminFlow(
+      phone, message, rawText, input, waAccount, wa
+    );
+    return;
   }
 
   // ── Active onboarding session ───────────────────────────
@@ -265,7 +225,7 @@ export async function handleMessage(
   }
 
   // ── Marketing session check (DB-backed) ─────────────────
-  // Only for platform number AND not a known staff/parent
+  // Only for platform number unknown users
   if (isPlatformNumber) {
     const isMarketingUser =
       await hasActiveMarketingSession(formatPhone(phone));
@@ -350,8 +310,6 @@ export async function handleMessage(
   if (['0', 'back', 'main_menu'].includes(input)) {
     if (session.role === 'parent') {
       await showMainMenu(phone, session, wa);
-    } else if (isSuperAdminRole(session)) {
-      await showSuperAdminMenu(phone, session, wa);
     } else {
       await showAdminMenu(phone, session, wa);
     }
@@ -360,42 +318,28 @@ export async function handleMessage(
 
   // ── Route by role ───────────────────────────────────────
   if (session.role === 'parent') {
-    await routeParent(
-      phone, session, input, rawText, wa
-    );
-  } else if (isSuperAdminRole(session)) {
-    await routeSuperAdmin(
-      phone, session, input, rawText, wa
-    );
+    await routeParent(phone, session, input, rawText, wa);
   } else {
-    await routeAdmin(
-      phone, session, input, rawText, wa
-    );
+    await routeAdmin(phone, session, input, rawText, wa);
   }
 }
 
 // ============================================================
-// ✅ SUPER ADMIN MESSAGE HANDLER
-// Handles ALL messages from the super admin phone number
-// Called immediately after confirming they are super admin
+// ✅ SUPER ADMIN FLOW
+// Called immediately when SUPER_ADMIN_PHONE matches.
+// Handles ALL super admin interactions including test mode.
 // ============================================================
 
-async function handleSuperAdminMessage(
-  phone:         string,
-  message:       IncomingMessage,
-  rawText:       string,
-  input:         string,
-  platformAdmin: Record<string, unknown>,
-  waAccount:     WhatsAppAccount | null,
-  wa:            WhatsApp
+async function handleSuperAdminFlow(
+  phone:     string,
+  message:   IncomingMessage,
+  rawText:   string,
+  input:     string,
+  waAccount: WhatsAppAccount | null,
+  wa:        WhatsApp
 ): Promise<void> {
-  // Update last login
-  await db
-    .from('platform_admins')
-    .update({ last_login: new Date().toISOString() })
-    .eq('id', platformAdmin.id as string);
 
-  // ── EXIT test mode ──────────────────────────────────────
+  // ── EXIT — leave test mode ──────────────────────────────
   if (rawText.trim().toUpperCase() === 'EXIT') {
     const testMode = await isSuperAdminTestMode(phone);
     if (testMode.active) {
@@ -404,49 +348,51 @@ async function handleSuperAdminMessage(
       await wa.text(
         phone,
         `✅ *Test Mode Ended*\n\n` +
-        `Returning to your admin panel...`
+        `Returning to your super admin panel...`
       );
-      await delay(500);
+      await delay(800);
+      // Fall through to show super admin menu
     }
-    // Fall through to show super admin menu
   }
 
-  // ── Check test mode ─────────────────────────────────────
+  // ── Check if in test mode ───────────────────────────────
   const testMode = await isSuperAdminTestMode(phone);
 
   if (testMode.active) {
     if (testMode.testRole === 'marketing') {
-      // Super admin testing marketing bot
+      // Testing marketing bot
       await handleMarketingMessage(message);
       return;
     }
-    // For parent/admin test, a real session was created
-    // Get that session and route through normal flow
+
+    // Testing parent or admin bot
+    // A real session was created — use it
     const testSession = await sessions.get(phone);
     if (testSession) {
       await sessions.touch(phone);
-      if (testSession.role === 'parent') {
-        const testWa = new WhatsApp(
-          testSession.waAccount ?? waAccount
-        );
-        if (['0', 'back', 'main_menu'].includes(input)) {
+
+      const testWa = new WhatsApp(
+        testSession.waAccount ?? waAccount
+      );
+
+      // Allow exit from test via menu
+      if (['0', 'back', 'main_menu'].includes(input)) {
+        if (testSession.role === 'parent') {
           await showMainMenu(phone, testSession, testWa);
         } else {
-          await routeParent(
-            phone, testSession, input, rawText, testWa
-          );
-        }
-      } else {
-        const testWa = new WhatsApp(
-          testSession.waAccount ?? waAccount
-        );
-        if (['0', 'back', 'main_menu'].includes(input)) {
           await showAdminMenu(phone, testSession, testWa);
-        } else {
-          await routeAdmin(
-            phone, testSession, input, rawText, testWa
-          );
         }
+        return;
+      }
+
+      if (testSession.role === 'parent') {
+        await routeParent(
+          phone, testSession, input, rawText, testWa
+        );
+      } else {
+        await routeAdmin(
+          phone, testSession, input, rawText, testWa
+        );
       }
       return;
     }
@@ -456,11 +402,11 @@ async function handleSuperAdminMessage(
   let session = await sessions.get(phone);
 
   if (!session) {
-    // Create super admin session
-    const adminUser = {
-      id:        platformAdmin.id as string,
-      school_id: platformAdmin.id as string,
-      user_id:   platformAdmin.id as string,
+    // Build super admin user object
+    const saUser = {
+      id:        'super_admin',
+      school_id: 'super_admin',
+      user_id:   'super_admin',
       role_id:   'super_admin',
       status:    'active',
       roles: {
@@ -468,53 +414,54 @@ async function handleSuperAdminMessage(
         name: 'super_admin',
       },
       profiles: {
-        id:         platformAdmin.id as string,
-        full_name:  platformAdmin.full_name as string,
-        phone:      platformAdmin.phone as string | null,
+        id:         'super_admin',
+        full_name:  'Super Admin',
+        phone:      phone,
         avatar_url: null,
       },
     };
 
     session = await sessions.createAdminSession(
       phone,
-      adminUser as never,
+      saUser as never,
       waAccount,
       'admin'
     );
+
+    console.log('[Bot] ✅ Super admin session created');
   } else {
     await sessions.touch(phone);
   }
 
-  // ── Reset keywords — show super admin menu ───────────────
+  // ── Reset / hi / menu → show super admin panel ──────────
   if (!input || RESET_KEYWORDS.has(input)) {
     await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
-  // ── Global shortcuts ────────────────────────────────────
+  // ── Global back shortcut ────────────────────────────────
   if (['0', 'back', 'main_menu'].includes(input)) {
     await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
-  // ── Route to super admin handler ─────────────────────────
-  await routeSuperAdmin(phone, session, input, rawText, wa);
-}
+  // ── Broadcast compose state ─────────────────────────────
+  if (session.sub_state === 'SA_BROADCAST_COMPOSE') {
+    await handleSuperAdminBroadcast(
+      phone, session, rawText, wa
+    );
+    return;
+  }
 
-// ─── Check if session is super admin ──────────────────────
-function isSuperAdminRole(session: BotSession): boolean {
-  return (
-    session.schoolUser?.roles?.name === 'super_admin' ||
-    (
-      session.school_id === session.school_user_id &&
-      session.role === 'admin'
-    )
+  // ── Route to super admin menu handler ───────────────────
+  await handleSuperAdminMenu(
+    phone, session, input, rawText, wa
   );
 }
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
-// Only called for NON super admin users
+// Only for non-super-admin users
 // ============================================================
 
 async function handleReset(
@@ -524,7 +471,6 @@ async function handleReset(
   waAccount:        WhatsAppAccount | null,
   isPlatformNumber: boolean
 ): Promise<void> {
-  const formatted = formatPhone(phone);
 
   // ── 1. Check registered parent ──────────────────────────
   const parent = await parentSvc.findByPhone(phone);
@@ -571,7 +517,6 @@ async function handleReset(
       await wa.text(
         phone,
         `❌ *Access Denied*\n\n` +
-        `Your account does not have bot access.\n\n` +
         `Contact your school administrator.`
       );
       return;
@@ -593,10 +538,8 @@ async function handleReset(
 
   // ── 3. Unknown user ─────────────────────────────────────
   if (isPlatformNumber) {
-    // Platform number → Marketing bot
     await handleMarketingMessage(message);
   } else {
-    // School number → Option B
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
 }
@@ -633,31 +576,6 @@ async function showSchoolUnknownUser(
     ],
     schoolName,
     `Select your role to continue`
-  );
-}
-
-// ============================================================
-// SUPER ADMIN ROUTING
-// ============================================================
-
-async function routeSuperAdmin(
-  phone:   string,
-  session: BotSession,
-  input:   string,
-  rawText: string,
-  wa:      WhatsApp
-): Promise<void> {
-  // Broadcast compose state
-  if (session.sub_state === 'SA_BROADCAST_COMPOSE') {
-    await handleSuperAdminBroadcast(
-      phone, session, rawText, wa
-    );
-    return;
-  }
-
-  // All other inputs
-  await handleSuperAdminMenu(
-    phone, session, input, rawText, wa
   );
 }
 
