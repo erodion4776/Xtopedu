@@ -20,17 +20,17 @@ import {
 import toast from 'react-hot-toast';
 
 interface School {
-  id:                 string;
-  name:               string;
-  email:              string | null;
-  phone:              string | null;
-  student_count:      number;
-  subscription_plan:  string;
-  onboarding_status:  string;
-  is_active:          boolean;
-  setup_fee_paid:     boolean;
-  monthly_fee:        number;
-  created_at:         string;
+  id:                string;
+  name:              string;
+  email:             string | null;
+  phone:             string | null;
+  student_count:     number;
+  subscription_plan: string;
+  onboarding_status: string;
+  is_active:         boolean;
+  setup_fee_paid:    boolean;
+  monthly_fee:       number;
+  created_at:        string;
 }
 
 const fmt = (n: number) =>
@@ -44,13 +44,13 @@ const PAGE_SIZE = 10;
 
 export default function SchoolsPage() {
   const router = useRouter();
-  const [schools, setSchools]     = useState<School[]>([]);
-  const [loading, setLoading]     = useState(true);
-  const [toggling, setToggling]   = useState<string | null>(null);
-  const [search, setSearch]       = useState('');
-  const [page, setPage]           = useState(1);
-  const [total, setTotal]         = useState(0);
-  const [filter, setFilter]       = useState<
+  const [schools, setSchools]   = useState<School[]>([]);
+  const [loading, setLoading]   = useState(true);
+  const [toggling, setToggling] = useState<string | null>(null);
+  const [search, setSearch]     = useState('');
+  const [page, setPage]         = useState(1);
+  const [total, setTotal]       = useState(0);
+  const [filter, setFilter]     = useState<
     'all' | 'active' | 'inactive'
   >('all');
 
@@ -90,7 +90,8 @@ export default function SchoolsPage() {
 
       if (error) throw error;
 
-      setSchools((data as School[]) ?? []);
+      // ✅ Fix: cast through unknown to avoid type error
+      setSchools((data as unknown as School[]) ?? []);
       setTotal(count ?? 0);
     } catch (err) {
       console.error('Schools error:', err);
@@ -104,7 +105,6 @@ export default function SchoolsPage() {
     loadSchools();
   }, [loadSchools]);
 
-  // Reset page when search/filter changes
   useEffect(() => {
     setPage(1);
   }, [search, filter]);
