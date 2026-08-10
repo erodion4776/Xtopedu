@@ -60,6 +60,27 @@ export type BulkUploadStatus =
   | 'completed_with_errors'
   | 'failed';
 
+// ─── Score CSV ──────────────────────────────────────────────────
+export const SCORE_CSV_HEADERS = [
+  'admission_number',
+  'subject',
+  'ca_score',
+  'exam_score',
+];
+
+export type ScoreUploadResult = {
+  success: boolean;
+  total: number;
+  created: number;
+  updated: number;
+  failed: number;
+  errors: Array<{
+    row: number;
+    field: string;
+    message: string;
+  }>;
+};
+
 export class CSVService {
 
   // ─── Generate CSV template ───────────────────────────────────
@@ -100,7 +121,10 @@ export class CSVService {
   }
 
   // ─── Parse CSV text into rows ────────────────────────────────
-  parseCSV(csvText: string): {
+  parseCSV(
+    csvText: string,
+    requiredHeaders: string[] = ['first_name', 'last_name', 'admission_number', 'class_name']
+  ): {
     headers: string[];
     rows: Record<string, string>[];
     errors: string[];
@@ -131,14 +155,7 @@ export class CSVService {
       h.toLowerCase().trim().replace(/\s+/g, '_')
     );
 
-    const required = [
-      'first_name',
-      'last_name',
-      'admission_number',
-      'class_name',
-    ];
-
-    const missing = required.filter((r) => !headers.includes(r));
+    const missing = requiredHeaders.filter((r) => !headers.includes(r));
 
     if (missing.length > 0) {
       errors.push(
@@ -364,6 +381,229 @@ export class CSVService {
             phone: this.formatPhone(row.parent_phone.trim()),
             email: row.parent_email?.trim() || null,
           });
+        }
+
+        if (i % 10 === 0) {
+          await db
+            .from('bulk_upload_jobs')
+            .update({
+              processed_rows: i + 1,
+              success_rows: result.created + result.updated,
+              failed_rows: result.failed,
+            })
+            .eq('id', jobId);
+        }
+      } catch (err) {
+        result.errors.push({
+          row: rowNumber,
+          field: 'general',
+          message: String(err),
+        });
+        result.failed++;
+      }
+    }
+
+    let finalStatus: BulkUploadStatus = 'completed';
+    if (result.failed === result.total) {
+      finalStatus = 'failed';
+    } else if (result.failed > 0) {
+      finalStatus = 'completed_with_errors';
+    }
+
+    await db
+      .from('bulk_upload_jobs')
+      .update({
+        processed_rows: rows.length,
+        success_rows: result.created + result.updated,
+        failed_rows: result.failed,
+        status: finalStatus,
+        errors: result.errors.slice(0, 50),
+        result_summary: {
+          total: result.total,
+          created: result.created,
+          updated: result.updated,
+          failed: result.failed,
+        },
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', jobId);
+
+    return result;
+  }
+
+  // ─── Generate score CSV template ─────────────────────────────
+  generateScoreTemplate(): string {
+    const headers = SCORE_CSV_HEADERS.join(',');
+
+    const example = [
+      'ADM/2024/001',
+      'Mathematics',
+      '28',
+      '65',
+    ].join(',');
+
+    const example2 = [
+      'ADM/2024/001',
+      'English Language',
+      '25',
+      '60',
+    ].join(',');
+
+    return headers + '\n' + example + '\n' + example2 + '\n';
+  }
+
+  // ─── Import scores from parsed rows ──────────────────────────
+  // One row = one student's score for one subject, for the given term.
+  // Subjects are auto-created for the school if they don't exist yet.
+  async importScores(
+    schoolId: string,
+    termId: string,
+    rows: Record<string, string>[],
+    jobId: string
+  ): Promise<ScoreUploadResult> {
+    const result: ScoreUploadResult = {
+      success: true,
+      total: rows.length,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    // Cache students by admission number
+    const { data: students } = await db
+      .from('students')
+      .select('id, admission_number')
+      .eq('school_id', schoolId);
+
+    const studentMap = new Map<string, string>();
+    for (const s of students ?? []) {
+      studentMap.set(
+        String(s.admission_number).trim().toUpperCase(),
+        s.id
+      );
+    }
+
+    // Cache subjects by name; create on the fly if missing
+    const { data: subjects } = await db
+      .from('subjects')
+      .select('id, name')
+      .eq('school_id', schoolId);
+
+    const subjectMap = new Map<string, string>();
+    for (const sub of subjects ?? []) {
+      subjectMap.set(String(sub.name).trim().toUpperCase(), sub.id);
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNumber = i + 2;
+
+      try {
+        const admNo = row.admission_number?.trim().toUpperCase();
+        if (!admNo) {
+          result.errors.push({
+            row: rowNumber,
+            field: 'admission_number',
+            message: 'Admission number is required',
+          });
+          result.failed++;
+          continue;
+        }
+
+        const studentId = studentMap.get(admNo);
+        if (!studentId) {
+          result.errors.push({
+            row: rowNumber,
+            field: 'admission_number',
+            message: `No student found with admission number "${row.admission_number}"`,
+          });
+          result.failed++;
+          continue;
+        }
+
+        const subjectName = row.subject?.trim();
+        if (!subjectName) {
+          result.errors.push({
+            row: rowNumber,
+            field: 'subject',
+            message: 'Subject is required',
+          });
+          result.failed++;
+          continue;
+        }
+
+        const subjectKey = subjectName.toUpperCase();
+        let subjectId = subjectMap.get(subjectKey);
+
+        if (!subjectId) {
+          const { data: newSubject, error: subErr } = await db
+            .from('subjects')
+            .insert({ school_id: schoolId, name: subjectName })
+            .select('id')
+            .single();
+
+          if (subErr || !newSubject) {
+            result.errors.push({
+              row: rowNumber,
+              field: 'subject',
+              message: `Could not create subject "${subjectName}"`,
+            });
+            result.failed++;
+            continue;
+          }
+
+          subjectId = newSubject.id;
+          subjectMap.set(subjectKey, subjectId);
+        }
+
+        const caScore = parseFloat(row.ca_score?.trim() || '0');
+        const examScore = parseFloat(row.exam_score?.trim() || '0');
+
+        if (isNaN(caScore) || isNaN(examScore)) {
+          result.errors.push({
+            row: rowNumber,
+            field: 'ca_score/exam_score',
+            message: 'Scores must be numbers',
+          });
+          result.failed++;
+          continue;
+        }
+
+        const { data: existing } = await db
+          .from('student_scores')
+          .select('id')
+          .eq('student_id', studentId)
+          .eq('subject_id', subjectId)
+          .eq('term_id', termId)
+          .maybeSingle();
+
+        if (existing) {
+          await db
+            .from('student_scores')
+            .update({
+              ca_score: caScore,
+              exam_score: examScore,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+          result.updated++;
+        } else {
+          const { error: insertErr } = await db
+            .from('student_scores')
+            .insert({
+              school_id: schoolId,
+              student_id: studentId,
+              subject_id: subjectId,
+              term_id: termId,
+              ca_score: caScore,
+              exam_score: examScore,
+            });
+
+          if (insertErr) {
+            throw new Error(insertErr.message);
+          }
+          result.created++;
         }
 
         if (i % 10 === 0) {
