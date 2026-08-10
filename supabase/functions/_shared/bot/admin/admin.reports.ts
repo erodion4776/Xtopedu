@@ -138,6 +138,11 @@ export async function handleReportTermSelect(
             title: '👤 Individual Student',
             description: 'Single student report',
           },
+          {
+            id: `RPT_RESULT_${termId}`,
+            title: '🎓 Academic Result',
+            description: 'Subject scores, grade, position',
+          },
         ],
       },
     ]
@@ -171,7 +176,8 @@ export async function handleReportTypeSelect(
     | 'attendance'
     | 'fees'
     | 'class'
-    | 'student';
+    | 'student'
+    | 'result';
   const termId = parts.slice(2).join('_');
 
   // Class report - need to select class first
@@ -195,7 +201,27 @@ export async function handleReportTypeSelect(
       phone,
       'ADMIN_REPORT_SEARCH_STUDENT',
       null,
-      { data: { reportTermId: termId } }
+      { data: { reportTermId: termId, reportKind: 'attendance_fee' } }
+    );
+    return;
+  }
+
+  // Academic result — also needs a student search first
+  if (reportType === 'result') {
+    await wa.text(
+      phone,
+      `🎓 *Academic Result*\n\n` +
+      `Enter the student's name or\n` +
+      `admission number:\n\n` +
+      `_Example: John or ADM/2024/001_\n\n` +
+      `Type *0* to go back.`
+    );
+
+    await sessions.setState(
+      phone,
+      'ADMIN_REPORT_SEARCH_STUDENT',
+      null,
+      { data: { reportTermId: termId, reportKind: 'result' } }
     );
     return;
   }
@@ -299,6 +325,77 @@ export async function handleClassReportSelect(
   );
 }
 
+// ─── Generate + send either the attendance/fee report or academic result ──
+async function sendStudentOrResultReport(
+  phone: string,
+  studentId: string,
+  termId: string,
+  reportKind: 'attendance_fee' | 'result',
+  wa: WhatsApp
+): Promise<void> {
+  if (reportKind === 'result') {
+    const data = await reportSvc.generateStudentResultData(studentId, termId);
+
+    if (!data) {
+      await wa.text(phone, `❌ Student not found.`);
+      return;
+    }
+
+    const text = reportSvc.formatWhatsAppResult(data);
+
+    await wa.buttons(
+      phone,
+      text,
+      [
+        { id: 'ADMIN_REPORTS', title: '📊 More Reports' },
+        { id: 'MAIN_MENU', title: '🏠 Menu' },
+      ]
+    );
+
+    try {
+      const pdfUrl = await pdfSvc.buildResultPdf(data);
+      const student = data.student as Record<string, string>;
+      await wa.document(
+        phone,
+        pdfUrl,
+        `Result-${student.admission_number}.pdf`,
+        'Academic result'
+      );
+    } catch (pdfErr) {
+      console.error('[Reports] Result PDF generation/send failed:', pdfErr);
+    }
+    return;
+  }
+
+  // Default: attendance/fee student report
+  const text = await reportSvc.generateStudentReport(studentId, termId);
+
+  await wa.buttons(
+    phone,
+    text,
+    [
+      { id: 'ADMIN_REPORTS', title: '📊 More Reports' },
+      { id: 'MAIN_MENU', title: '🏠 Menu' },
+    ]
+  );
+
+  try {
+    const data = await reportSvc.generateStudentReportData(studentId, termId);
+    if (data) {
+      const pdfUrl = await pdfSvc.buildStudentReportPdf(data);
+      const student = data.student as Record<string, string>;
+      await wa.document(
+        phone,
+        pdfUrl,
+        `Report-${student.admission_number}.pdf`,
+        'Student term report'
+      );
+    }
+  } catch (pdfErr) {
+    console.error('[Reports] Student report PDF generation/send failed:', pdfErr);
+  }
+}
+
 // ─── Handle student search for individual report ───────────────────────────
 export async function handleStudentReportSearch(
   phone: string,
@@ -307,6 +404,9 @@ export async function handleStudentReportSearch(
   wa: WhatsApp
 ): Promise<void> {
   const termId = session.data?.reportTermId as string;
+  const reportKind =
+    (session.data?.reportKind as 'attendance_fee' | 'result') ?? 'attendance_fee';
+  const kindCode = reportKind === 'result' ? 'res' : 'af';
   const text = searchText.trim();
 
   if (text.length < 2) {
@@ -350,19 +450,7 @@ export async function handleStudentReportSearch(
 
   // Single result - generate directly
   if (students.length === 1) {
-    const report = await reportSvc.generateStudentReport(
-      students[0].id,
-      termId
-    );
-
-    await wa.buttons(
-      phone,
-      report,
-      [
-        { id: 'ADMIN_REPORTS', title: '📊 More Reports' },
-        { id: 'MAIN_MENU', title: '🏠 Menu' },
-      ]
-    );
+    await sendStudentOrResultReport(phone, students[0].id, termId, reportKind, wa);
     return;
   }
 
@@ -374,7 +462,7 @@ export async function handleStudentReportSearch(
       (s.class_arms as Record<string, string> | null)?.name ?? '';
 
     return {
-      id: `STUDENT_REPORT_${s.id}_${termId}`,
+      id: `STUDENT_REPORT_${s.id}_${termId}_${kindCode}`,
       title: `${s.first_name} ${s.last_name}`.substring(0, 24),
       description: `${cls} ${arm} • ${s.admission_number}`,
     };
@@ -400,27 +488,15 @@ export async function handleStudentReportSelect(
 ): Promise<void> {
   if (!input.startsWith('student_report_')) return;
 
-  // Format: student_report_{studentId}_{termId}
+  // Format: student_report_{studentId}_{termId}_{kindCode}
   const withoutPrefix = input.replace('student_report_', '');
-  const lastUnderscore = withoutPrefix.lastIndexOf('_');
-  const studentId = withoutPrefix.substring(0, lastUnderscore);
-  const termId = withoutPrefix.substring(lastUnderscore + 1);
+  const [studentId, termId, kindCode] = withoutPrefix.split('_');
+  const reportKind: 'attendance_fee' | 'result' =
+    kindCode === 'res' ? 'result' : 'attendance_fee';
 
   await wa.text(phone, `⏳ Generating report...`);
 
-  const report = await reportSvc.generateStudentReport(
-    studentId,
-    termId
-  );
-
-  await wa.buttons(
-    phone,
-    report,
-    [
-      { id: 'ADMIN_REPORTS', title: '📊 More Reports' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
-    ]
-  );
+  await sendStudentOrResultReport(phone, studentId, termId, reportKind, wa);
 }
 
 // ─── Generate and send report ──────────────────────────────────────────────
