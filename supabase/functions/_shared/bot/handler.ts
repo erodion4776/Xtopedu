@@ -152,9 +152,10 @@ const RESET_KEYWORDS = new Set([
 ]);
 
 // ============================================================
-// ✅ SUPER ADMIN PHONE FROM ENV
-// This is the single source of truth.
-// No DB lookup needed — just compare phone numbers.
+// ✅ SUPER ADMIN DETECTION USING ENV VARIABLE
+// Simple phone comparison — no DB lookup needed.
+// SUPER_ADMIN_PHONE must be in international format
+// e.g. 2348073128887 (no + sign)
 // ============================================================
 
 function getSuperAdminPhone(): string {
@@ -171,6 +172,7 @@ function isSuperAdminPhone(phone: string): boolean {
 
 // ============================================================
 // MAIN ENTRY POINT
+// Called by whatsapp-webhook/index.ts for every message
 // ============================================================
 
 export async function handleMessage(
@@ -185,7 +187,7 @@ export async function handleMessage(
   console.log(
     `[Bot] from=${phone} | ` +
     `platform=${isPlatformNumber} | ` +
-    `isSuperAdmin=${isSuperAdminPhone(phone)} | ` +
+    `superAdmin=${isSuperAdminPhone(phone)} | ` +
     `input="${input.substring(0, 40)}"`
   );
 
@@ -202,15 +204,20 @@ export async function handleMessage(
   }
 
   // ╔══════════════════════════════════════════════════════╗
-  // ║  ✅ SUPER ADMIN CHECK — USING ENV VARIABLE          ║
-  // ║  Compare incoming phone against SUPER_ADMIN_PHONE   ║
-  // ║  This runs BEFORE everything else so super admin    ║
-  // ║  NEVER falls through to marketing bot               ║
+  // ║  ✅ SUPER ADMIN CHECK — RUNS FIRST ALWAYS           ║
+  // ║  Uses SUPER_ADMIN_PHONE env variable.               ║
+  // ║  No DB lookup. No session check. Instant.           ║
+  // ║  Super admin NEVER falls through to marketing bot.  ║
   // ╚══════════════════════════════════════════════════════╝
   if (isSuperAdminPhone(phone)) {
-    console.log('[Bot] ✅ Super admin identified via env');
+    console.log('[Bot] ✅ Super admin detected via env');
     await handleSuperAdminFlow(
-      phone, message, rawText, input, waAccount, wa
+      phone,
+      message,
+      rawText,
+      input,
+      waAccount,
+      wa
     );
     return;
   }
@@ -224,8 +231,8 @@ export async function handleMessage(
     if (handled) return;
   }
 
-  // ── Marketing session check (DB-backed) ─────────────────
-  // Only for platform number unknown users
+  // ── Marketing session check ─────────────────────────────
+  // Only for unknown users on platform number
   if (isPlatformNumber) {
     const isMarketingUser =
       await hasActiveMarketingSession(formatPhone(phone));
@@ -295,8 +302,10 @@ export async function handleMessage(
 
   if (!session) {
     if (isPlatformNumber) {
+      // Platform number + no session = marketing user
       await handleMarketingMessage(message);
     } else {
+      // School number + no session = unknown user
       await handleReset(
         phone, message, wa, waAccount, isPlatformNumber
       );
@@ -326,8 +335,9 @@ export async function handleMessage(
 
 // ============================================================
 // ✅ SUPER ADMIN FLOW
-// Called immediately when SUPER_ADMIN_PHONE matches.
-// Handles ALL super admin interactions including test mode.
+// Handles ALL messages from SUPER_ADMIN_PHONE.
+// Uses direct DB upsert with null UUID fields to avoid
+// the "invalid input syntax for type uuid" error.
 // ============================================================
 
 async function handleSuperAdminFlow(
@@ -351,7 +361,7 @@ async function handleSuperAdminFlow(
         `Returning to your super admin panel...`
       );
       await delay(800);
-      // Fall through to show super admin menu
+      // Fall through — will show super admin menu below
     }
   }
 
@@ -360,12 +370,12 @@ async function handleSuperAdminFlow(
 
   if (testMode.active) {
     if (testMode.testRole === 'marketing') {
-      // Testing marketing bot
+      // Testing marketing bot experience
       await handleMarketingMessage(message);
       return;
     }
 
-    // Testing parent or admin bot
+    // Testing parent or admin bot experience
     // A real session was created — use it
     const testSession = await sessions.get(phone);
     if (testSession) {
@@ -375,7 +385,7 @@ async function handleSuperAdminFlow(
         testSession.waAccount ?? waAccount
       );
 
-      // Allow exit from test via menu
+      // Allow going back to super admin menu
       if (['0', 'back', 'main_menu'].includes(input)) {
         if (testSession.role === 'parent') {
           await showMainMenu(phone, testSession, testWa);
@@ -399,11 +409,65 @@ async function handleSuperAdminFlow(
   }
 
   // ── Get or create super admin session ───────────────────
-  let session = await sessions.get(phone);
+  // ✅ KEY FIX: Use null for UUID fields (school_id,
+  // school_user_id) — NOT the string "super_admin"
+  // which causes "invalid input syntax for type uuid"
+  let dbSession = await sessions.get(phone);
 
-  if (!session) {
-    // Build super admin user object
-    const saUser = {
+  if (!dbSession) {
+    const { data, error } = await db
+      .from('bot_sessions')
+      .upsert(
+        {
+          phone:               formatPhone(phone),
+          parent_id:           null,  // ✅ null not "super_admin"
+          school_user_id:      null,  // ✅ null not "super_admin"
+          school_id:           null,  // ✅ null not "super_admin"
+          role:                'admin',
+          state:               'ADMIN_MAIN_MENU',
+          sub_state:           null,
+          selected_student_id: null,
+          data:                { is_super_admin: true },
+          last_activity:       new Date().toISOString(),
+        },
+        { onConflict: 'phone' }
+      )
+      .select()
+      .single();
+
+    if (error) {
+      console.error(
+        '[SuperAdmin] Session upsert error:',
+        error.message
+      );
+      // Still continue — build a temp session object
+    }
+
+    dbSession = data as BotSession | null;
+    console.log('[Bot] ✅ Super admin session created');
+  } else {
+    await sessions.touch(phone);
+  }
+
+  // Build full session with super admin runtime data
+  const session: BotSession = {
+    // Spread DB data or use defaults
+    ...(dbSession ?? {
+      id:                  'sa-temp',
+      phone:               formatPhone(phone),
+      parent_id:           null,
+      school_user_id:      null,
+      school_id:           null,
+      role:                'admin',
+      state:               'ADMIN_MAIN_MENU',
+      sub_state:           null,
+      selected_student_id: null,
+      data:                { is_super_admin: true },
+      last_activity:       new Date().toISOString(),
+      created_at:          new Date().toISOString(),
+    }),
+    // ✅ Attach runtime data (not stored in DB)
+    schoolUser: {
       id:        'super_admin',
       school_id: 'super_admin',
       user_id:   'super_admin',
@@ -419,19 +483,9 @@ async function handleSuperAdminFlow(
         phone:      phone,
         avatar_url: null,
       },
-    };
-
-    session = await sessions.createAdminSession(
-      phone,
-      saUser as never,
-      waAccount,
-      'admin'
-    );
-
-    console.log('[Bot] ✅ Super admin session created');
-  } else {
-    await sessions.touch(phone);
-  }
+    },
+    waAccount: waAccount,
+  } as BotSession;
 
   // ── Reset / hi / menu → show super admin panel ──────────
   if (!input || RESET_KEYWORDS.has(input)) {
@@ -453,7 +507,7 @@ async function handleSuperAdminFlow(
     return;
   }
 
-  // ── Route to super admin menu handler ───────────────────
+  // ── All other inputs → super admin menu handler ─────────
   await handleSuperAdminMenu(
     phone, session, input, rawText, wa
   );
@@ -461,7 +515,7 @@ async function handleSuperAdminFlow(
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
-// Only for non-super-admin users
+// Only called for non-super-admin users
 // ============================================================
 
 async function handleReset(
@@ -485,12 +539,14 @@ async function handleReset(
       await parentSvc.ensureContact(parent, phone);
     if (contactId) {
       await parentSvc.ensureConversation(
-        contactId, parent.school_id
+        contactId,
+        parent.school_id
       );
     }
 
     await ensureParentSubscription(
-      parent.id, parent.school_id
+      parent.id,
+      parent.school_id
     );
 
     const session = await sessions.createParentSession(
@@ -517,6 +573,7 @@ async function handleReset(
       await wa.text(
         phone,
         `❌ *Access Denied*\n\n` +
+        `Your account does not have bot access.\n\n` +
         `Contact your school administrator.`
       );
       return;
@@ -538,8 +595,10 @@ async function handleReset(
 
   // ── 3. Unknown user ─────────────────────────────────────
   if (isPlatformNumber) {
+    // Platform number → Marketing/Sales bot
     await handleMarketingMessage(message);
   } else {
+    // School number → Option B welcome
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
 }
@@ -571,8 +630,14 @@ async function showSchoolUnknownUser(
     `Your number is not registered yet.\n\n` +
     `Are you a:`,
     [
-      { id: 'IM_A_PARENT',       title: '👨‍👩‍👧 Parent' },
-      { id: 'ENTER_INVITE_CODE', title: '🔑 I Have a Code' },
+      {
+        id:    'IM_A_PARENT',
+        title: '👨‍👩‍👧 Parent',
+      },
+      {
+        id:    'ENTER_INVITE_CODE',
+        title: '🔑 I Have a Code',
+      },
     ],
     schoolName,
     `Select your role to continue`
@@ -590,6 +655,7 @@ async function routeParent(
   rawText: string,
   wa:      WhatsApp
 ): Promise<void> {
+  // Handle unknown user button responses
   if (input === 'im_a_parent') {
     await showParentNotRegistered(phone, wa, session);
     return;
@@ -659,6 +725,7 @@ async function routeParent(
   }
 }
 
+// ─── Parent not registered ────────────────────────────────
 async function showParentNotRegistered(
   phone:   string,
   wa:      WhatsApp,
@@ -674,6 +741,8 @@ async function showParentNotRegistered(
     `To access *${schoolName}* bot,\n` +
     `please contact the school office\n` +
     `to register your WhatsApp number.\n\n` +
+    `The school admin will add you and\n` +
+    `link your children to your account.\n\n` +
     `Once registered, send *hi* to access:\n\n` +
     `✅ Daily attendance records\n` +
     `💰 Fee balance & payments\n` +
@@ -682,6 +751,7 @@ async function showParentNotRegistered(
   );
 }
 
+// ─── Parent main menu handler ─────────────────────────────
 async function handleParentMainMenu(
   phone:   string,
   session: BotSession,
@@ -959,6 +1029,7 @@ async function routeAdmin(
   }
 }
 
+// ─── Admin main menu handler ──────────────────────────────
 async function handleAdminMainMenu(
   phone:   string,
   session: BotSession,
@@ -982,7 +1053,8 @@ async function handleAdminMainMenu(
         `Type student name or admission number:`
       );
       await sessions.setState(
-        phone, 'ADMIN_STUDENTS_SEARCH'
+        phone,
+        'ADMIN_STUDENTS_SEARCH'
       );
       break;
 
@@ -1091,7 +1163,7 @@ async function ensureParentSubscription(
       updated_at:   new Date().toISOString(),
     });
   } catch {
-    // Non-critical
+    // Non-critical — don't crash the bot
   }
 }
 
