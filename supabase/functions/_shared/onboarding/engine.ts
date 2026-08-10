@@ -2,9 +2,8 @@
 // SCHOOLBOT - ONBOARDING ENGINE
 // supabase/functions/_shared/onboarding/engine.ts
 //
-// FIXED: Sessions now stored in DB instead of memory
-// so they survive Edge Function cold starts and
-// multiple instances.
+// DB-backed sessions — survives Edge Function restarts
+// and multiple instances.
 // ============================================================
 
 import { getSupabase }    from '../supabase.ts';
@@ -19,10 +18,9 @@ import type {
   OnboardingStep,
 } from '../types.ts';
 
-const db      = getSupabase();
+const db       = getSupabase();
 const paystack = new PaystackService();
 
-// ─── Currency formatter ────────────────────────────────────
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-NG', {
     style:                 'currency',
@@ -30,7 +28,6 @@ const fmt = (n: number) =>
     minimumFractionDigits: 0,
   }).format(n);
 
-// Session TTL — 6 hours
 const SESSION_TTL_HOURS = 6;
 
 // ============================================================
@@ -55,20 +52,24 @@ export async function getOnboardingSession(
   if (error || !data) return null;
 
   return {
-    phone:              data.phone,
-    step:               data.step as OnboardingStep,
-    source:             data.source as 'marketing' | 'main',
-    contactName:        data.contact_name  ?? null,
-    schoolName:         data.school_name   ?? null,
-    studentCount:       data.student_count ?? null,
-    studentCountRange:  data.student_count_range ?? null,
-    schoolType:         data.school_type   ?? null,
-    location:           data.location      ?? null,
-    email:              data.email         ?? null,
-    schoolId:           data.school_id     ?? null,
-    setupFeePaid:       data.setup_fee_paid ?? false,
-    tempData:           (data.temp_data as Record<string, unknown>) ?? {},
-    lastActivity:       new Date(data.last_activity).getTime(),
+    phone:             data.phone,
+    step:              data.step as OnboardingStep,
+    source:            data.source as 'marketing' | 'main',
+    contactName:       data.contact_name        ?? null,
+    schoolName:        data.school_name         ?? null,
+    studentCount:      data.student_count       ?? null,
+    studentCountRange: data.student_count_range ?? null,
+    schoolType:        data.school_type         ?? null,
+    location:          data.location            ?? null,
+    email:             data.email               ?? null,
+    schoolId:          data.school_id           ?? null,
+    setupFeePaid:      data.setup_fee_paid      ?? false,
+    tempData: (
+      data.temp_data as Record<string, unknown>
+    ) ?? {},
+    lastActivity: new Date(
+      data.last_activity
+    ).getTime(),
   };
 }
 
@@ -78,7 +79,7 @@ export async function setOnboardingSession(
 ): Promise<void> {
   const formatted = formatPhone(phone);
 
-  await db
+  const { error } = await db
     .from('onboarding_sessions')
     .upsert(
       {
@@ -99,6 +100,12 @@ export async function setOnboardingSession(
       },
       { onConflict: 'phone' }
     );
+
+  if (error) {
+    console.error(
+      '[Onboarding] setSession error:', error.message
+    );
+  }
 }
 
 export async function clearOnboardingSession(
@@ -111,12 +118,12 @@ export async function clearOnboardingSession(
     .eq('phone', formatted);
 }
 
-export function startOnboardingSession(
+// ✅ Now async — awaits DB save before returning
+export async function startOnboardingSession(
   phone:   string,
   source:  'marketing' | 'main',
   prefill?: Partial<OnboardingState>
-): OnboardingState {
-  // Decide starting step based on what we know
+): Promise<OnboardingState> {
   let startStep: OnboardingStep = 'COLLECT_NAME';
 
   if (prefill?.contactName && prefill?.schoolName) {
@@ -142,9 +149,13 @@ export function startOnboardingSession(
     lastActivity:      Date.now(),
   };
 
-  // Save to DB immediately (async, don't await)
-  setOnboardingSession(phone, session).catch(
-    (err) => console.error('[Onboarding] save error:', err)
+  // ✅ Await DB save so session exists before
+  // user's next message arrives
+  await setOnboardingSession(phone, session);
+
+  console.log(
+    `[Onboarding] ✅ Session started for ${phone} | ` +
+    `step: ${startStep} | source: ${source}`
   );
 
   return session;
@@ -161,9 +172,6 @@ export async function handleOnboardingInput(
   wa:      WhatsApp,
   source:  'marketing' | 'main'
 ): Promise<boolean> {
-  // Returns true if handled by onboarding
-  // Returns false if caller should handle it
-
   let session = await getOnboardingSession(phone);
   if (!session) return false;
 
@@ -186,10 +194,16 @@ export async function handleOnboardingInput(
     return true;
   }
 
-  // Route to correct step handler
+  console.log(
+    `[Onboarding] Handling step: ${session.step} | ` +
+    `input: "${input.substring(0, 30)}"`
+  );
+
   switch (session.step) {
     case 'COLLECT_NAME':
-      await handleCollectName(phone, session, rawText, wa);
+      await handleCollectName(
+        phone, session, rawText, wa
+      );
       break;
     case 'COLLECT_SCHOOL_NAME':
       await handleCollectSchoolName(
@@ -276,6 +290,9 @@ export async function handleOnboardingInput(
       await showComplete(phone, session, wa);
       break;
     default:
+      console.warn(
+        `[Onboarding] Unknown step: ${session.step}`
+      );
       return false;
   }
 
@@ -548,14 +565,12 @@ export async function showSetupFeeInfo(
   session: OnboardingState,
   wa:      WhatsApp
 ): Promise<void> {
-  // Create school record if not done yet
   if (!session.schoolId) {
-    const schoolId = await createSchoolRecord(session);
+    const schoolId   = await createSchoolRecord(session);
     session.schoolId = schoolId;
     await setOnboardingSession(phone, session);
   }
 
-  // Check if fee already paid
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -572,7 +587,8 @@ export async function showSetupFeeInfo(
     await wa.text(
       phone,
       `❌ Could not calculate setup fee.\n\n` +
-      `Contact us: *${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
+      `Contact us: ` +
+      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
     );
     return;
   }
@@ -588,8 +604,7 @@ export async function showSetupFeeInfo(
     `🏫 *Type:* ${session.schoolType}\n` +
     (session.email
       ? `📧 *Email:* ${session.email}\n`
-      : ''
-    ) +
+      : '') +
     `\n━━━━━━━━━━━━━━━━\n` +
     `💰 *One-Time Setup Fee*\n\n` +
     `📦 *Tier:* ${feeInfo.tier}\n` +
@@ -615,8 +630,14 @@ export async function showSetupFeeInfo(
     phone,
     `Ready to pay and get started?`,
     [
-      { id: 'PROCEED_SETUP_FEE', title: '💳 Pay Setup Fee' },
-      { id: 'SETUP_FEE_QUESTION', title: '❓ I have questions' },
+      {
+        id:    'PROCEED_SETUP_FEE',
+        title: '💳 Pay Setup Fee',
+      },
+      {
+        id:    'SETUP_FEE_QUESTION',
+        title: '❓ I have questions',
+      },
     ]
   );
 
@@ -631,7 +652,6 @@ async function handleSetupFeeStep(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
-  // Check if payment was completed
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -668,15 +688,13 @@ async function handleSetupFeeStep(
       `📞 *Talk to us:*\n` +
       `${Deno.env.get('SUPER_ADMIN_PHONE') ?? 'Contact support'}`
     );
-
     await delay(1000);
-
     await wa.buttons(
       phone,
       `Ready to proceed?`,
       [
         { id: 'PROCEED_SETUP_FEE', title: '💳 Pay Now' },
-        { id: 'SETUP_TALK_TO_US',  title: '📞 Call Us First' },
+        { id: 'SETUP_TALK_TO_US',  title: '📞 Call Us' },
       ]
     );
     return;
@@ -716,15 +734,14 @@ async function handleSetupFeeStep(
         `Contact us if having issues:\n` +
         `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`,
         [
-          { id: 'RETRY_PAYMENT',  title: '🔄 New Pay Link' },
-          { id: 'CHECK_PAYMENT',  title: '✅ Check Again' },
+          { id: 'RETRY_PAYMENT', title: '🔄 New Pay Link' },
+          { id: 'CHECK_PAYMENT', title: '✅ Check Again' },
         ]
       );
     }
     return;
   }
 
-  // Default — show fee info again
   await showSetupFeeInfo(phone, session, wa);
 }
 
@@ -750,13 +767,13 @@ async function generateAndSendSetupFeeLink(
   const appUrl = Deno.env.get('APP_URL')!;
 
   const result = await paystack.initializeSetupFeePayment({
-    schoolId:    session.schoolId!,
-    schoolName:  session.schoolName!,
-    adminEmail:  session.email ?? `${phone}@schoolbot.ng`,
-    adminPhone:  phone,
-    amount:      feeInfo.amount,
+    schoolId:     session.schoolId!,
+    schoolName:   session.schoolName!,
+    adminEmail:   session.email ?? `${phone}@schoolbot.ng`,
+    adminPhone:   phone,
+    amount:       feeInfo.amount,
     studentCount: session.studentCount!,
-    tierName:    feeInfo.tier,
+    tierName:     feeInfo.tier,
     callbackUrl:
       `${appUrl}/functions/v1/payment-callback` +
       `?type=setup_fee`,
@@ -828,25 +845,81 @@ async function showBankList(
       {
         title: 'Commercial Banks',
         rows: [
-          { id: 'BANK_044',   title: 'Access Bank',   description: 'Code: 044' },
-          { id: 'BANK_058',   title: 'GTBank',         description: 'Code: 058' },
-          { id: 'BANK_011',   title: 'First Bank',     description: 'Code: 011' },
-          { id: 'BANK_057',   title: 'Zenith Bank',    description: 'Code: 057' },
-          { id: 'BANK_033',   title: 'UBA',            description: 'Code: 033' },
-          { id: 'BANK_232',   title: 'Sterling Bank',  description: 'Code: 232' },
-          { id: 'BANK_221',   title: 'Stanbic IBTC',   description: 'Code: 221' },
-          { id: 'BANK_070',   title: 'Fidelity Bank',  description: 'Code: 070' },
+          {
+            id:          'BANK_044',
+            title:       'Access Bank',
+            description: 'Code: 044',
+          },
+          {
+            id:          'BANK_058',
+            title:       'GTBank',
+            description: 'Code: 058',
+          },
+          {
+            id:          'BANK_011',
+            title:       'First Bank',
+            description: 'Code: 011',
+          },
+          {
+            id:          'BANK_057',
+            title:       'Zenith Bank',
+            description: 'Code: 057',
+          },
+          {
+            id:          'BANK_033',
+            title:       'UBA',
+            description: 'Code: 033',
+          },
+          {
+            id:          'BANK_232',
+            title:       'Sterling Bank',
+            description: 'Code: 232',
+          },
+          {
+            id:          'BANK_221',
+            title:       'Stanbic IBTC',
+            description: 'Code: 221',
+          },
+          {
+            id:          'BANK_070',
+            title:       'Fidelity Bank',
+            description: 'Code: 070',
+          },
         ],
       },
       {
         title: 'Digital Banks & Others',
         rows: [
-          { id: 'BANK_50211',  title: 'Kuda Bank',    description: 'Code: 50211' },
-          { id: 'BANK_999992', title: 'OPay',         description: 'Code: 999992' },
-          { id: 'BANK_999991', title: 'PalmPay',      description: 'Code: 999991' },
-          { id: 'BANK_50515',  title: 'Moniepoint',   description: 'Code: 50515' },
-          { id: 'BANK_032',    title: 'Union Bank',   description: 'Code: 032' },
-          { id: 'BANK_035',    title: 'Wema Bank',    description: 'Code: 035' },
+          {
+            id:          'BANK_50211',
+            title:       'Kuda Bank',
+            description: 'Code: 50211',
+          },
+          {
+            id:          'BANK_999992',
+            title:       'OPay',
+            description: 'Code: 999992',
+          },
+          {
+            id:          'BANK_999991',
+            title:       'PalmPay',
+            description: 'Code: 999991',
+          },
+          {
+            id:          'BANK_50515',
+            title:       'Moniepoint',
+            description: 'Code: 50515',
+          },
+          {
+            id:          'BANK_032',
+            title:       'Union Bank',
+            description: 'Code: 032',
+          },
+          {
+            id:          'BANK_035',
+            title:       'Wema Bank',
+            description: 'Code: 035',
+          },
         ],
       },
     ]
@@ -932,8 +1005,9 @@ async function handleBankAccountNumber(
   if (!resolved) {
     await wa.buttons(
       phone,
-      `❌ Could not verify account with *${bankName}*.\n\n` +
-      `Please check the account number and try again.`,
+      `❌ Could not verify account\n` +
+      `with *${bankName}*.\n\n` +
+      `Please check and try again.`,
       [
         { id: `BANK_${bankCode}`, title: '🔄 Try Again' },
         { id: 'BANK_CHANGE',      title: '🏦 Change Bank' },
@@ -1017,8 +1091,8 @@ async function handleBankConfirm(
       `🏦 ${bankName}\n` +
       `👤 ${accountName}\n` +
       `💳 ${accountNumber}\n\n` +
-      `Parents will pay directly into this\n` +
-      `account from now on. 💰`
+      `Parents will pay directly into\n` +
+      `this account from now on. 💰`
     );
 
     await delay(1000);
@@ -1134,7 +1208,8 @@ async function handleClassMenu(
   }
 
   if (input.startsWith('use_template_')) {
-    const templateType = input.replace('use_template_', '');
+    const templateType =
+      input.replace('use_template_', '');
     await applyClassTemplate(
       phone, session, templateType, wa
     );
@@ -1169,7 +1244,10 @@ async function handleClassAddName(
   const name = rawText.trim();
 
   if (name.length < 2) {
-    await wa.text(phone, `Please enter a valid class name:`);
+    await wa.text(
+      phone,
+      `Please enter a valid class name:`
+    );
     return;
   }
 
@@ -1254,10 +1332,10 @@ async function handleClassAddArm(
 }
 
 async function applyClassTemplate(
-  phone:        string,
-  session:      OnboardingState,
-  type:         string,
-  wa:           WhatsApp
+  phone:   string,
+  session: OnboardingState,
+  type:    string,
+  wa:      WhatsApp
 ): Promise<void> {
   const templates: Record<
     string,
@@ -1387,7 +1465,7 @@ async function showStaffSetup(
         const inv = (
           s.staff_invitations as Array<{
             status: string;
-            token: string;
+            token:  string;
           }> | null
         )?.[0];
         const icon =
@@ -1396,8 +1474,7 @@ async function showStaffSetup(
           `${icon} ${s.first_name} ${s.last_name}` +
           (inv?.status === 'pending'
             ? ` (Code: ${inv.token})`
-            : ''
-          )
+            : '')
         );
       }).join('\n')
     : '_No staff added yet_';
@@ -1522,10 +1599,7 @@ async function handleStaffAddPhone(
 ): Promise<void> {
   const cleaned = rawText.replace(/\D/g, '');
 
-  if (
-    cleaned.length < 10 ||
-    cleaned.length > 13
-  ) {
+  if (cleaned.length < 10 || cleaned.length > 13) {
     await wa.text(
       phone,
       `❌ Invalid phone number.\n\n` +
@@ -1626,9 +1700,10 @@ async function handleStaffAddRole(
   } = session.tempData as Record<string, string>;
 
   try {
-    const nameParts  = pendingStaffName.split(' ');
-    const firstName  = nameParts[0];
-    const lastName   = nameParts.slice(1).join(' ') || 'Staff';
+    const nameParts = pendingStaffName.split(' ');
+    const firstName = nameParts[0];
+    const lastName  =
+      nameParts.slice(1).join(' ') || 'Staff';
 
     const { data: staff } = await db
       .from('staff')
@@ -1696,8 +1771,8 @@ async function handleStaffAddRole(
       `━━━━━━━━━━━━━━━━\n\n` +
       `✅ Invite sent to their WhatsApp!`,
       [
-        { id: 'ADD_STAFF_NOW', title: '➕ Add More Staff' },
-        { id: 'STAFF_DONE',    title: '✅ Complete Setup' },
+        { id: 'ADD_STAFF_NOW', title: '➕ Add More' },
+        { id: 'STAFF_DONE',    title: '✅ Complete' },
       ]
     );
 
@@ -1748,7 +1823,8 @@ async function showComplete(
   );
 
   // Notify super admin
-  const superPhone = Deno.env.get('SUPER_ADMIN_PHONE');
+  const superPhone =
+    Deno.env.get('SUPER_ADMIN_PHONE');
   if (superPhone) {
     const notifyWa = new WhatsApp();
     await notifyWa.text(
@@ -1766,7 +1842,7 @@ async function showComplete(
     );
   }
 
-  // Create bot session so admin can use the bot
+  // Create bot session for admin
   await db.from('bot_sessions').upsert(
     {
       phone:               formatPhone(phone),
@@ -1826,7 +1902,9 @@ export async function handleInvitationToken(
     return;
   }
 
-  if (new Date(invitation.expires_at) < new Date()) {
+  if (
+    new Date(invitation.expires_at) < new Date()
+  ) {
     await db
       .from('staff_invitations')
       .update({ status: 'expired' })
@@ -1867,7 +1945,8 @@ export async function handleInvitationToken(
   await db.from('whatsapp_contacts').upsert(
     {
       phone:      formatted,
-      full_name:  `${staff.first_name} ${staff.last_name}`,
+      full_name:
+        `${staff.first_name} ${staff.last_name}`,
       school_id:  invitation.school_id,
       role:       invitation.role,
       last_seen:  new Date().toISOString(),
@@ -1886,8 +1965,10 @@ export async function handleInvitationToken(
       state:               'ADMIN_MAIN_MENU',
       sub_state:           null,
       selected_student_id: null,
-      data:                { staff_id: invitation.staff_id },
-      last_activity:       new Date().toISOString(),
+      data: {
+        staff_id: invitation.staff_id,
+      },
+      last_activity: new Date().toISOString(),
     },
     { onConflict: 'phone' }
   );
@@ -1922,12 +2003,11 @@ async function createSchoolRecord(
     '-' +
     Date.now().toString(36);
 
-  // Check if already created
   const { data: existingLead } = await db
     .from('leads')
     .select('converted_school_id')
     .eq('phone', session.phone)
-    .single();
+    .maybeSingle();
 
   if (existingLead?.converted_school_id) {
     return existingLead.converted_school_id;
@@ -1961,14 +2041,14 @@ async function createSchoolRecord(
 
   await db.from('school_onboarding').upsert(
     {
-      school_id:            school.id,
-      admin_phone:          session.phone,
-      admin_name:           session.contactName,
-      admin_email:          session.email,
-      step_school_created:  true,
-      current_step:         'setup_fee',
-      created_at:           new Date().toISOString(),
-      updated_at:           new Date().toISOString(),
+      school_id:           school.id,
+      admin_phone:         session.phone,
+      admin_name:          session.contactName,
+      admin_email:         session.email,
+      step_school_created: true,
+      current_step:        'setup_fee',
+      created_at:          new Date().toISOString(),
+      updated_at:          new Date().toISOString(),
     },
     { onConflict: 'school_id' }
   );
@@ -1976,7 +2056,7 @@ async function createSchoolRecord(
   await db.from('leads').upsert(
     {
       contact_name:        session.contactName ?? 'Unknown',
-      school_name:         session.schoolName  ?? 'Unknown School',
+      school_name:         session.schoolName  ?? 'Unknown',
       school_type:         session.schoolType,
       location:            session.location,
       student_count:       session.studentCountRange,
@@ -2015,7 +2095,8 @@ function generateToken(): string {
     'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   return Array.from(
     { length: 8 },
-    () => chars[Math.floor(Math.random() * chars.length)]
+    () =>
+      chars[Math.floor(Math.random() * chars.length)]
   ).join('');
 }
 
