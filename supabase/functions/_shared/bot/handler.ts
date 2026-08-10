@@ -1,9 +1,6 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
-//
-// Smart router for ALL incoming messages.
-// Identifies user and routes to correct flow.
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -151,7 +148,7 @@ const RESET_KEYWORDS = new Set([
 export async function handleMessage(
   message: IncomingMessage,
   waAccount: WhatsAppAccount | null,
-  isPlatformNumber: boolean = false
+  isPlatformNumber = false
 ): Promise<void> {
   const phone   = message.from;
   const rawText = extractRawText(message);
@@ -233,7 +230,11 @@ export async function handleMessage(
   // ── Reset keywords ──────────────────────────────────────
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
-      phone, wa, waAccount, isPlatformNumber
+      phone,
+      message,       // ✅ pass message here
+      wa,
+      waAccount,
+      isPlatformNumber
     );
     return;
   }
@@ -242,7 +243,11 @@ export async function handleMessage(
   const session = await sessions.get(phone);
   if (!session) {
     await handleReset(
-      phone, wa, waAccount, isPlatformNumber
+      phone,
+      message,       // ✅ pass message here
+      wa,
+      waAccount,
+      isPlatformNumber
     );
     return;
   }
@@ -264,10 +269,6 @@ export async function handleMessage(
     await routeParent(
       phone, session, input, rawText, wa
     );
-  } else if (session.role === 'marketing') {
-    // Unknown user on platform number
-    // who has an active marketing session
-    await handleMarketingMessage(message);
   } else {
     await routeAdmin(
       phone, session, input, rawText, wa
@@ -277,10 +278,12 @@ export async function handleMessage(
 
 // ============================================================
 // IDENTIFY USER (RESET HANDLER)
+// ✅ FIX: message is now a proper parameter
 // ============================================================
 
 async function handleReset(
   phone: string,
+  message: IncomingMessage,   // ✅ FIXED - was missing before
   wa: WhatsApp,
   waAccount: WhatsAppAccount | null,
   isPlatformNumber: boolean
@@ -403,10 +406,11 @@ async function handleReset(
 
   // ── 4. Unknown user ─────────────────────────────────────
   if (isPlatformNumber) {
-    // ✅ YOUR number → Show Marketing Bot
+    // ✅ YOUR number → Marketing bot
+    // message is now properly in scope
     await handleMarketingMessage(message);
   } else {
-    // ✅ SCHOOL number → Show Option B
+    // ✅ SCHOOL number → Option B
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
 }
@@ -420,7 +424,6 @@ async function showSchoolUnknownUser(
   wa: WhatsApp,
   waAccount: WhatsAppAccount | null
 ): Promise<void> {
-  // Get school name
   let schoolName = 'this school';
 
   if (waAccount?.school_id) {
@@ -464,7 +467,7 @@ async function routeParent(
   rawText: string,
   wa: WhatsApp
 ): Promise<void> {
-  // Handle unknown user buttons
+  // Handle unknown user button responses
   if (input === 'im_a_parent') {
     await showParentNotRegistered(phone, wa, session);
     return;
@@ -533,26 +536,23 @@ async function routeParent(
   }
 }
 
-// ─── Parent not registered message ───────────────────────
+// ─── Parent not registered ────────────────────────────────
 async function showParentNotRegistered(
   phone: string,
   wa: WhatsApp,
   session: BotSession
 ): Promise<void> {
   const schoolName =
-    (session.parent?.schools?.name as string) ??
+    (session.parent?.schools?.name as string | undefined) ??
     'the school';
 
   await wa.text(
     phone,
     `👨‍👩‍👧 *Parent Registration*\n\n` +
-    `To get access to *${schoolName}* bot,\n` +
+    `To access *${schoolName}* bot,\n` +
     `please contact the school office\n` +
     `to register your WhatsApp number.\n\n` +
-    `The school admin will add you and\n` +
-    `link your children to your account.\n\n` +
-    `Once registered, send *hi* here to\n` +
-    `check your child's:\n\n` +
+    `Once registered, send *hi* to access:\n\n` +
     `✅ Daily attendance\n` +
     `💰 Fee balance & payments\n` +
     `🚗 Pickup information\n` +
@@ -560,7 +560,7 @@ async function showParentNotRegistered(
   );
 }
 
-// ─── Parent main menu handler ─────────────────────────────
+// ─── Parent main menu ─────────────────────────────────────
 async function handleParentMainMenu(
   phone: string,
   session: BotSession,
@@ -897,7 +897,9 @@ async function handleDocumentUpload(
 ): Promise<void> {
   if (session.state === 'ADMIN_AWAITING_CSV') {
     await handleCSVDocument(phone, session, message, wa);
-  } else if (session.state === 'ADMIN_AWAITING_SCORE_CSV') {
+  } else if (
+    session.state === 'ADMIN_AWAITING_SCORE_CSV'
+  ) {
     await handleScoreCSVDocument(
       phone, session, message, wa
     );
@@ -953,12 +955,16 @@ export function extractInput(
   message: IncomingMessage
 ): string {
   if (message.type === 'text') {
-    return message.text?.body?.trim().toLowerCase() ?? '';
+    return (
+      message.text?.body?.trim().toLowerCase() ?? ''
+    );
   }
   if (message.type === 'interactive') {
     return (
-      message.interactive?.button_reply?.id?.toLowerCase() ??
-      message.interactive?.list_reply?.id?.toLowerCase() ??
+      message.interactive?.button_reply?.id
+        ?.toLowerCase() ??
+      message.interactive?.list_reply?.id
+        ?.toLowerCase() ??
       ''
     );
   }
@@ -973,6 +979,3 @@ export function extractRawText(
   }
   return '';
 }
-
-// Fix: pass message to marketing handler
-declare let message: IncomingMessage;
