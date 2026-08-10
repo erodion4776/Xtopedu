@@ -25,9 +25,6 @@ jobs:
             WHATSAPP_PHONE_NUMBER_ID="${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}" \
             WHATSAPP_ACCESS_TOKEN="${{ secrets.WHATSAPP_ACCESS_TOKEN }}" \
             WHATSAPP_WEBHOOK_VERIFY_TOKEN="${{ secrets.WHATSAPP_WEBHOOK_VERIFY_TOKEN }}" \
-            MARKETING_WA_PHONE_NUMBER_ID="${{ secrets.MARKETING_WA_PHONE_NUMBER_ID }}" \
-            MARKETING_WA_ACCESS_TOKEN="${{ secrets.MARKETING_WA_ACCESS_TOKEN }}" \
-            MARKETING_WA_WEBHOOK_VERIFY_TOKEN="${{ secrets.MARKETING_WA_WEBHOOK_VERIFY_TOKEN }}" \
             WHATSAPP_DISPLAY_NUMBER="${{ secrets.WHATSAPP_DISPLAY_NUMBER }}" \
             PAYSTACK_SECRET_KEY="${{ secrets.PAYSTACK_SECRET_KEY }}" \
             APP_URL="${{ secrets.APP_URL }}" \
@@ -43,12 +40,28 @@ jobs:
 
       - name: Deploy Edge Functions
         run: |
-          supabase functions deploy whatsapp-webhook --no-verify-jwt --project-ref nigloptmadtmsfjqshvm
-          supabase functions deploy payment-callback --no-verify-jwt --project-ref nigloptmadtmsfjqshvm
-          supabase functions deploy attendance-notify --no-verify-jwt --project-ref nigloptmadtmsfjqshvm
-          supabase functions deploy super-admin-api --no-verify-jwt --project-ref nigloptmadtmsfjqshvm
-          supabase functions deploy marketing-webhook --no-verify-jwt --project-ref nigloptmadtmsfjqshvm
-          supabase functions deploy send-test --no-verify-jwt --project-ref nigloptmadtmsfjqshvm
-          supabase functions deploy fee-reminder-cron --no-verify-jwt --project-ref nigloptmadtmsfjqshvm || true
+          supabase functions deploy whatsapp-webhook \
+            --no-verify-jwt \
+            --project-ref nigloptmadtmsfjqshvm
+
+          supabase functions deploy payment-callback \
+            --no-verify-jwt \
+            --project-ref nigloptmadtmsfjqshvm
+
+          supabase functions deploy attendance-notify \
+            --no-verify-jwt \
+            --project-ref nigloptmadtmsfjqshvm
+
+          supabase functions deploy super-admin-api \
+            --no-verify-jwt \
+            --project-ref nigloptmadtmsfjqshvm
+
+          supabase functions deploy send-test \
+            --no-verify-jwt \
+            --project-ref nigloptmadtmsfjqshvm
+
+          supabase functions deploy fee-reminder-cron \
+            --no-verify-jwt \
+            --project-ref nigloptmadtmsfjqshvm || true
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
