@@ -11,7 +11,6 @@ import { getSupabase }    from '../supabase.ts';
 import {
   formatPhone,
   isInviteToken,
-  delay,
 } from '../utils.ts';
 
 // ── Parent flows ─────────────────────────────────────────
@@ -115,6 +114,7 @@ import {
 // ── Marketing bot ────────────────────────────────────────
 import {
   handleMarketingMessage,
+  hasActiveMarketingSession,  // ✅ NEW - check if user has demo session
 } from './marketing/marketing.handler.ts';
 
 // ── Onboarding ───────────────────────────────────────────
@@ -173,12 +173,27 @@ export async function handleMessage(
   }
 
   // ── Active onboarding session ───────────────────────────
+  // Check onboarding BEFORE marketing so school owners
+  // completing registration are handled correctly
   const obSession = getOnboardingSession(phone);
   if (obSession) {
     const handled = await handleOnboardingInput(
       phone, input, rawText, wa, obSession.source
     );
     if (handled) return;
+  }
+
+  // ── ✅ KEY FIX: Check marketing session EARLY ───────────
+  // If this is the platform number AND the user already has
+  // an active marketing demo session, route them directly
+  // to the marketing bot WITHOUT doing a DB reset check.
+  // This is what was causing the menu to reset every time.
+  if (
+    isPlatformNumber &&
+    hasActiveMarketingSession(phone)
+  ) {
+    await handleMarketingMessage(message);
+    return;
   }
 
   // ── Document uploads ────────────────────────────────────
@@ -231,7 +246,7 @@ export async function handleMessage(
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
       phone,
-      message,       // ✅ pass message here
+      message,
       wa,
       waAccount,
       isPlatformNumber
@@ -239,16 +254,22 @@ export async function handleMessage(
     return;
   }
 
-  // ── Get existing session ────────────────────────────────
+  // ── Get existing DB session ─────────────────────────────
   const session = await sessions.get(phone);
   if (!session) {
-    await handleReset(
-      phone,
-      message,       // ✅ pass message here
-      wa,
-      waAccount,
-      isPlatformNumber
-    );
+    // No DB session — could be marketing user
+    // who sent something other than a reset keyword
+    if (isPlatformNumber) {
+      await handleMarketingMessage(message);
+    } else {
+      await handleReset(
+        phone,
+        message,
+        wa,
+        waAccount,
+        isPlatformNumber
+      );
+    }
     return;
   }
 
@@ -278,12 +299,11 @@ export async function handleMessage(
 
 // ============================================================
 // IDENTIFY USER (RESET HANDLER)
-// ✅ FIX: message is now a proper parameter
 // ============================================================
 
 async function handleReset(
   phone: string,
-  message: IncomingMessage,   // ✅ FIXED - was missing before
+  message: IncomingMessage,
   wa: WhatsApp,
   waAccount: WhatsAppAccount | null,
   isPlatformNumber: boolean
@@ -406,11 +426,10 @@ async function handleReset(
 
   // ── 4. Unknown user ─────────────────────────────────────
   if (isPlatformNumber) {
-    // ✅ YOUR number → Marketing bot
-    // message is now properly in scope
+    // Your number → Marketing bot
     await handleMarketingMessage(message);
   } else {
-    // ✅ SCHOOL number → Option B
+    // School number → Option B
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
 }
@@ -467,7 +486,6 @@ async function routeParent(
   rawText: string,
   wa: WhatsApp
 ): Promise<void> {
-  // Handle unknown user button responses
   if (input === 'im_a_parent') {
     await showParentNotRegistered(phone, wa, session);
     return;
@@ -536,7 +554,6 @@ async function routeParent(
   }
 }
 
-// ─── Parent not registered ────────────────────────────────
 async function showParentNotRegistered(
   phone: string,
   wa: WhatsApp,
@@ -560,7 +577,6 @@ async function showParentNotRegistered(
   );
 }
 
-// ─── Parent main menu ─────────────────────────────────────
 async function handleParentMainMenu(
   phone: string,
   session: BotSession,
@@ -832,7 +848,6 @@ async function routeAdmin(
   }
 }
 
-// ─── Admin main menu ──────────────────────────────────────
 async function handleAdminMainMenu(
   phone: string,
   session: BotSession,
@@ -888,7 +903,6 @@ async function handleAdminMainMenu(
   }
 }
 
-// ─── Document upload handler ──────────────────────────────
 async function handleDocumentUpload(
   phone: string,
   session: BotSession,
@@ -913,7 +927,6 @@ async function handleDocumentUpload(
   }
 }
 
-// ─── Ensure parent subscription ───────────────────────────
 async function ensureParentSubscription(
   parentId: string,
   schoolId: string
@@ -950,7 +963,6 @@ async function ensureParentSubscription(
   }
 }
 
-// ─── Extract helpers ──────────────────────────────────────
 export function extractInput(
   message: IncomingMessage
 ): string {
