@@ -12,14 +12,37 @@ interface SchoolInfo {
   phone: string | null;
 }
 
-const META_APP_ID    =
-  process.env.NEXT_PUBLIC_META_APP_ID    ?? '';
-const META_CONFIG_ID =
-  process.env.NEXT_PUBLIC_META_CONFIG_ID ?? '';
+// ✅ Your exact Meta credentials
+const META_APP_ID    = '2411474669340870';
+const META_CONFIG_ID = '1397969345545432';
+
+// ✅ Meta-hosted URL as fallback
+const META_SIGNUP_URL =
+  'https://business.facebook.com/messaging/whatsapp/onboard/' +
+  '?app_id=2411474669340870' +
+  '&config_id=1397969345545432' +
+  '&extras=%7B%22sessionInfoVersion%22%3A%223%22%2C%22version%22%3A%22v4%22%7D';
+
+// Extend window type for FB SDK
+declare global {
+  interface Window {
+    fbAsyncInit: () => void;
+    FB: {
+      init: (opts: Record<string, unknown>) => void;
+      login: (
+        cb: (response: { status: string }) => void,
+        opts: Record<string, unknown>
+      ) => void;
+      getLoginStatus: (
+        cb: (response: { status: string }) => void
+      ) => void;
+    };
+  }
+}
 
 export default function ActivatePage() {
-  const params  = useParams();
-  const token   = params.token as string;
+  const params = useParams();
+  const token  = params.token as string;
 
   const [school, setSchool]         =
     useState<SchoolInfo | null>(null);
@@ -28,19 +51,20 @@ export default function ActivatePage() {
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected]   = useState(false);
   const [fbReady, setFbReady]       = useState(false);
-  const [debugInfo, setDebugInfo]   = useState('');
+  const [statusMsg, setStatusMsg]   = useState('');
 
-  const fbSdkLoaded = useRef(false);
+  const sdkLoaded = useRef(false);
 
   useEffect(() => {
     loadSchool();
   }, [token]);
 
+  // ── Load school from token ────────────────────────
   async function loadSchool() {
     setLoading(true);
     setError('');
 
-    // ✅ Test mode bypass
+    // Test mode for Meta reviewers
     if (token === 'test') {
       setSchool({
         id:    'test-school-id',
@@ -48,7 +72,7 @@ export default function ActivatePage() {
         phone: null,
       });
       setLoading(false);
-      loadFbSdk();
+      initFbSdk();
       return;
     }
 
@@ -71,13 +95,7 @@ export default function ActivatePage() {
         .eq('token', token)
         .maybeSingle();
 
-      if (dbError) {
-        setError('Database error. Please try again.');
-        setLoading(false);
-        return;
-      }
-
-      if (!data) {
+      if (dbError || !data) {
         setError(
           'Invalid or expired activation link.\n\n' +
           'Please contact support for a new link.'
@@ -101,77 +119,65 @@ export default function ActivatePage() {
         return;
       }
 
-      const schoolData =
-        data.schools as unknown as SchoolInfo;
-
-      setSchool({
-        id:    schoolData.id,
-        name:  schoolData.name,
-        phone: schoolData.phone,
-      });
-
+      const s = data.schools as unknown as SchoolInfo;
+      setSchool({ id: s.id, name: s.name, phone: s.phone });
       setLoading(false);
-      loadFbSdk();
 
-    } catch (err) {
+      // Load SDK after school is confirmed
+      initFbSdk();
+
+    } catch {
       setError('Something went wrong. Please try again.');
       setLoading(false);
     }
   }
 
-  // ── Load Facebook SDK ─────────────────────────────
-  function loadFbSdk() {
-    if (!META_APP_ID) {
-      setDebugInfo('❌ META_APP_ID not set');
-      return;
-    }
+  // ── Initialize Facebook SDK ───────────────────────
+  // Using EXACTLY the code Meta gave you
+  function initFbSdk() {
+    if (sdkLoaded.current) return;
+    sdkLoaded.current = true;
 
-    if (fbSdkLoaded.current) return;
-    fbSdkLoaded.current = true;
+    // ✅ EXACT CODE FROM META
+    window.fbAsyncInit = function () {
+      window.FB.init({
+        appId:            META_APP_ID,
+        autoLogAppEvents: true,
+        xfbml:            true,
+        version:          'v26.0',  // ← Meta's latest version
+      });
 
-    setDebugInfo('Loading Facebook SDK...');
+      // SDK is ready!
+      setFbReady(true);
+      setStatusMsg('✅ Ready to connect');
+      console.log('[Activate] FB SDK ready ✅');
 
-    // Set up fbAsyncInit BEFORE loading script
-    (window as unknown as Record<string, unknown>)
-      .fbAsyncInit = function () {
-        (window as unknown as {
-          FB: {
-            init: (o: Record<string, unknown>) => void;
-          };
-        }).FB.init({
-          appId:   META_APP_ID,
-          version: 'v18.0',
-          xfbml:   false,
-          cookie:  false,
-        });
+      // Listen for Embedded Signup messages
+      window.addEventListener('message', handleFbMessage);
+    };
 
-        setFbReady(true);
-        setDebugInfo('✅ Facebook SDK ready');
-        console.log('[Activate] FB SDK initialized');
-      };
-
-    // Load SDK script
+    // ✅ EXACT SCRIPT FROM META
     const script       = document.createElement('script');
-    script.id          = 'facebook-jssdk';
     script.src         =
       'https://connect.facebook.net/en_US/sdk.js';
     script.async       = true;
     script.defer       = true;
     script.crossOrigin = 'anonymous';
 
+    script.onload = () => {
+      console.log('[Activate] FB script loaded');
+    };
+
     script.onerror = () => {
-      setDebugInfo('❌ Failed to load Facebook SDK');
-      console.error('[Activate] FB SDK load error');
+      console.error('[Activate] FB script failed');
+      setStatusMsg('❌ Facebook failed to load');
     };
 
     document.body.appendChild(script);
-
-    // Listen for Embedded Signup messages
-    window.addEventListener('message', handleMessage);
   }
 
   // ── Handle Facebook postMessage ───────────────────
-  function handleMessage(event: MessageEvent) {
+  function handleFbMessage(event: MessageEvent) {
     if (
       event.origin !== 'https://www.facebook.com' &&
       event.origin !== 'https://web.facebook.com'
@@ -191,12 +197,18 @@ export default function ActivatePage() {
             phone_number_id,
             waba_id,
           } = data.data;
-          handleSignupComplete(
-            phone_number_id, waba_id
-          );
+
+          console.log('[Activate] ✅ FINISH:', {
+            phone_number_id,
+            waba_id,
+          });
+
+          handleSignupComplete(phone_number_id, waba_id);
+
         } else if (data.event === 'CANCEL') {
           setConnecting(false);
-          setDebugInfo('Signup cancelled');
+          setStatusMsg('Cancelled — try again');
+
         } else if (data.event === 'ERROR') {
           setConnecting(false);
           setError(
@@ -208,7 +220,7 @@ export default function ActivatePage() {
         }
       }
     } catch {
-      // Not relevant message
+      // Not a relevant message
     }
   }
 
@@ -217,13 +229,9 @@ export default function ActivatePage() {
     phoneNumberId: string,
     wabaId:        string
   ) {
-    if (!school) return;
+    setStatusMsg(`Got Phone Number ID: ${phoneNumberId}`);
 
-    setDebugInfo(
-      `Got phone_number_id: ${phoneNumberId}`
-    );
-
-    // For test mode — just show success
+    // Test mode — just show success
     if (token === 'test') {
       setConnected(true);
       setConnecting(false);
@@ -240,7 +248,7 @@ export default function ActivatePage() {
           },
           body: JSON.stringify({
             token,
-            schoolId:      school.id,
+            schoolId:      school?.id,
             phoneNumberId,
             wabaId,
           }),
@@ -249,9 +257,7 @@ export default function ActivatePage() {
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(
-          err.error ?? 'Activation failed'
-        );
+        throw new Error(err.error ?? 'Failed');
       }
 
       setConnected(true);
@@ -264,42 +270,30 @@ export default function ActivatePage() {
 
   // ── Launch Embedded Signup ────────────────────────
   function launchEmbeddedSignup() {
-    const fb = (window as unknown as {
-      FB?: {
-        login: (
-          cb: (r: Record<string, unknown>) => void,
-          opts: Record<string, unknown>
-        ) => void;
-      };
-    }).FB;
-
-    if (!fb) {
-      setError(
-        'Facebook not loaded yet.\n' +
-        'Please wait a moment and try again.'
-      );
-      return;
-    }
-
-    if (!META_CONFIG_ID) {
-      setError(
-        'Configuration error.\n' +
-        'Please contact support.'
-      );
+    if (!window.FB) {
+      setStatusMsg('❌ Facebook not loaded yet');
       return;
     }
 
     setConnecting(true);
-    setDebugInfo('Opening Facebook login...');
+    setStatusMsg('Opening Facebook...');
 
-    fb.login(
-      (response: Record<string, unknown>) => {
-        console.log('[Activate] FB login:', response);
+    window.FB.login(
+      (response) => {
+        console.log('[Activate] Login:', response);
+        setStatusMsg(`Status: ${response.status}`);
 
-        if (response.status !== 'connected') {
+        if (response.status === 'connected') {
+          setStatusMsg('Connected! Completing setup...');
+          // FINISH message comes via postMessage
+        } else if (response.status === 'not_authorized') {
           setConnecting(false);
-          setDebugInfo(
-            `Login status: ${response.status}`
+          setStatusMsg('Please authorize the app');
+        } else {
+          // unknown — not logged into Facebook
+          setConnecting(false);
+          setStatusMsg(
+            'Please log into Facebook first'
           );
         }
       },
@@ -346,7 +340,7 @@ export default function ActivatePage() {
               href="https://wa.me/2348184774884"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-block px-6 py-3 bg-green-600 text-white rounded-xl font-medium hover:bg-green-700"
+              className="inline-block px-6 py-3 bg-green-600 text-white rounded-xl font-medium"
             >
               💬 Contact Support on WhatsApp
             </a>
@@ -367,22 +361,25 @@ export default function ActivatePage() {
               You&apos;re LIVE!
             </h2>
             <p className="text-gray-600 mb-6">
-              <strong>{school?.name}</strong> WhatsApp
-              bot is now active!
+              <strong>{school?.name}</strong> is
+              now connected to SchoolBot!
             </p>
-            <div className="bg-blue-50 rounded-xl p-4 text-left text-sm space-y-2 mb-6">
-              <p className="font-semibold text-blue-800">
-                What to do next:
+            <div className="bg-green-50 rounded-xl p-4 text-left text-sm space-y-2 mb-4">
+              <p className="font-semibold text-green-800">
+                Next steps:
               </p>
-              <p>1️⃣ Open WhatsApp on your phone</p>
-              <p>
-                2️⃣ Message your school&apos;s
-                WhatsApp number
+              <p className="text-green-700">
+                1️⃣ Open WhatsApp on your phone
               </p>
-              <p>
+              <p className="text-green-700">
+                2️⃣ Message your school&apos;s number
+              </p>
+              <p className="text-green-700">
                 3️⃣ Type <strong>menu</strong>
               </p>
-              <p>4️⃣ Start using SchoolBot! 🚀</p>
+              <p className="text-green-700">
+                4️⃣ Start managing your school! 🚀
+              </p>
             </div>
             <p className="text-xs text-gray-400">
               Powered by SchoolBot · XtopEdu
@@ -414,11 +411,11 @@ export default function ActivatePage() {
         </div>
 
         {/* Main Card */}
-        <div className="bg-white rounded-2xl shadow-lg p-6 space-y-6">
+        <div className="bg-white rounded-2xl shadow-lg p-6 space-y-5">
 
-          {/* School Name */}
+          {/* School */}
           <div className="text-center">
-            <div className="text-3xl mb-2">🏫</div>
+            <div className="text-4xl mb-3">🏫</div>
             <h2 className="text-xl font-bold">
               {school?.name}
             </h2>
@@ -428,50 +425,39 @@ export default function ActivatePage() {
           </div>
 
           {/* Steps */}
-          <div className="bg-gray-50 rounded-xl p-4 space-y-3">
-            <p className="font-semibold text-sm text-gray-700">
-              What happens when you connect:
+          <div className="bg-blue-50 rounded-xl p-4 space-y-2">
+            <p className="font-semibold text-sm text-blue-800">
+              What happens next:
             </p>
-            <div className="space-y-2 text-sm text-gray-600">
-              <div className="flex items-start gap-2">
-                <span>1️⃣</span>
-                <span>Facebook popup opens</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span>2️⃣</span>
-                <span>Login with Facebook account</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span>3️⃣</span>
-                <span>
-                  Select your WhatsApp Business number
-                </span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span>4️⃣</span>
-                <span>Grant permission to SchoolBot</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span>✅</span>
-                <span className="font-medium text-green-700">
-                  Your school bot goes LIVE instantly!
-                </span>
-              </div>
-            </div>
+            <p className="text-sm text-blue-700">
+              1️⃣ Facebook popup opens
+            </p>
+            <p className="text-sm text-blue-700">
+              2️⃣ Login with your Facebook account
+            </p>
+            <p className="text-sm text-blue-700">
+              3️⃣ Select your WhatsApp Business number
+            </p>
+            <p className="text-sm text-blue-700">
+              4️⃣ Grant permission to SchoolBot
+            </p>
+            <p className="text-sm font-medium text-green-700">
+              ✅ Your school goes LIVE instantly!
+            </p>
           </div>
 
-          {/* Debug info - remove in production */}
-          {debugInfo && (
-            <div className="bg-gray-100 rounded-lg p-2 text-xs text-gray-500 font-mono">
-              {debugInfo}
+          {/* Status message */}
+          {statusMsg && (
+            <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-500 font-mono text-center">
+              {statusMsg}
             </div>
           )}
 
-          {/* Connect Button */}
+          {/* ✅ SDK Button */}
           <Button
             onClick={launchEmbeddedSignup}
             disabled={connecting || !fbReady}
-            className="w-full h-14 text-base bg-[#1877F2] hover:bg-[#166FE5] text-white rounded-xl disabled:opacity-50"
+            className="w-full h-14 text-base bg-[#1877F2] hover:bg-[#166FE5] text-white rounded-xl disabled:opacity-60"
           >
             {connecting ? (
               <span className="flex items-center gap-2">
@@ -529,15 +515,23 @@ export default function ActivatePage() {
             )}
           </Button>
 
-          {/* Not ready message */}
-          {!fbReady && !connecting && (
-            <p className="text-center text-xs text-gray-400">
-              Loading Facebook SDK...
+          {/* Fallback direct link */}
+          <div className="text-center">
+            <p className="text-xs text-gray-400 mb-2">
+              Button not working?
             </p>
-          )}
+            <a
+              href={META_SIGNUP_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-600 underline"
+            >
+              Click here to connect directly →
+            </a>
+          </div>
 
           <p className="text-center text-xs text-gray-400">
-            🔒 Secure • Takes less than 2 minutes
+            🔒 Secure • Powered by Meta WhatsApp API
           </p>
 
         </div>
