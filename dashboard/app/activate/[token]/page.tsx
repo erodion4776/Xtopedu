@@ -7,8 +7,8 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 
 interface SchoolInfo {
-  id:   string;
-  name: string;
+  id:    string;
+  name:  string;
   phone: string | null;
 }
 
@@ -27,6 +27,8 @@ export default function ActivatePage() {
   const [error, setError]           = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected]   = useState(false);
+  const [fbReady, setFbReady]       = useState(false);
+  const [debugInfo, setDebugInfo]   = useState('');
 
   const fbSdkLoaded = useRef(false);
 
@@ -38,8 +40,7 @@ export default function ActivatePage() {
     setLoading(true);
     setError('');
 
-    // ✅ TEST MODE BYPASS
-    // For Meta App Review testing
+    // ✅ Test mode bypass
     if (token === 'test') {
       setSchool({
         id:    'test-school-id',
@@ -52,7 +53,6 @@ export default function ActivatePage() {
     }
 
     try {
-      // Look up token in database
       const { data, error: dbError } = await supabase
         .from('school_activation_tokens')
         .select(`
@@ -71,13 +71,8 @@ export default function ActivatePage() {
         .eq('token', token)
         .maybeSingle();
 
-      console.log('[Activate] Token lookup:', data, dbError);
-
       if (dbError) {
-        console.error('[Activate] DB Error:', dbError);
-        setError(
-          'Something went wrong. Please try again.'
-        );
+        setError('Database error. Please try again.');
         setLoading(false);
         return;
       }
@@ -85,23 +80,21 @@ export default function ActivatePage() {
       if (!data) {
         setError(
           'Invalid or expired activation link.\n\n' +
-          'Please contact XtopEdu support for a new link.'
+          'Please contact support for a new link.'
         );
         setLoading(false);
         return;
       }
 
-      // Check if expired
       if (new Date(data.expires_at) < new Date()) {
         setError(
           'This activation link has expired.\n\n' +
-          'Please contact XtopEdu support for a new link.'
+          'Please contact support for a new link.'
         );
         setLoading(false);
         return;
       }
 
-      // Check if already used
       if (data.used) {
         setConnected(true);
         setLoading(false);
@@ -109,16 +102,7 @@ export default function ActivatePage() {
       }
 
       const schoolData =
-        data.schools as unknown as SchoolInfo & {
-          setup_fee_paid: boolean;
-          is_active:      boolean;
-        };
-
-      if (!schoolData) {
-        setError('School not found.');
-        setLoading(false);
-        return;
-      }
+        data.schools as unknown as SchoolInfo;
 
       setSchool({
         id:    schoolData.id,
@@ -130,31 +114,26 @@ export default function ActivatePage() {
       loadFbSdk();
 
     } catch (err) {
-      console.error('[Activate] Error:', err);
-      setError(
-        'Something went wrong. Please try again.'
-      );
+      setError('Something went wrong. Please try again.');
       setLoading(false);
     }
   }
 
   // ── Load Facebook SDK ─────────────────────────────
   function loadFbSdk() {
-    if (fbSdkLoaded.current || !META_APP_ID) return;
+    if (!META_APP_ID) {
+      setDebugInfo('❌ META_APP_ID not set');
+      return;
+    }
+
+    if (fbSdkLoaded.current) return;
     fbSdkLoaded.current = true;
 
-    const script       = document.createElement('script');
-    script.src         =
-      'https://connect.facebook.net/en_US/sdk.js';
-    script.async       = true;
-    script.defer       = true;
-    script.crossOrigin = 'anonymous';
-    document.body.appendChild(script);
+    setDebugInfo('Loading Facebook SDK...');
 
-    script.onload = () => {
-      (window as unknown as {
-        fbAsyncInit: () => void;
-      }).fbAsyncInit = () => {
+    // Set up fbAsyncInit BEFORE loading script
+    (window as unknown as Record<string, unknown>)
+      .fbAsyncInit = function () {
         (window as unknown as {
           FB: {
             init: (o: Record<string, unknown>) => void;
@@ -162,10 +141,32 @@ export default function ActivatePage() {
         }).FB.init({
           appId:   META_APP_ID,
           version: 'v18.0',
+          xfbml:   false,
+          cookie:  false,
         });
+
+        setFbReady(true);
+        setDebugInfo('✅ Facebook SDK ready');
+        console.log('[Activate] FB SDK initialized');
       };
+
+    // Load SDK script
+    const script       = document.createElement('script');
+    script.id          = 'facebook-jssdk';
+    script.src         =
+      'https://connect.facebook.net/en_US/sdk.js';
+    script.async       = true;
+    script.defer       = true;
+    script.crossOrigin = 'anonymous';
+
+    script.onerror = () => {
+      setDebugInfo('❌ Failed to load Facebook SDK');
+      console.error('[Activate] FB SDK load error');
     };
 
+    document.body.appendChild(script);
+
+    // Listen for Embedded Signup messages
     window.addEventListener('message', handleMessage);
   }
 
@@ -186,16 +187,20 @@ export default function ActivatePage() {
 
       if (data.type === 'WA_EMBEDDED_SIGNUP') {
         if (data.event === 'FINISH') {
-          const { phone_number_id, waba_id } = data.data;
+          const {
+            phone_number_id,
+            waba_id,
+          } = data.data;
           handleSignupComplete(
             phone_number_id, waba_id
           );
         } else if (data.event === 'CANCEL') {
           setConnecting(false);
+          setDebugInfo('Signup cancelled');
         } else if (data.event === 'ERROR') {
           setConnecting(false);
           setError(
-            `Error: ${
+            `Setup error: ${
               data.data?.error_message ??
               'Unknown error'
             }`
@@ -203,7 +208,7 @@ export default function ActivatePage() {
         }
       }
     } catch {
-      // Not a JSON message — ignore
+      // Not relevant message
     }
   }
 
@@ -214,9 +219,16 @@ export default function ActivatePage() {
   ) {
     if (!school) return;
 
-    console.log('[Activate] Signup complete:', {
-      phoneNumberId, wabaId
-    });
+    setDebugInfo(
+      `Got phone_number_id: ${phoneNumberId}`
+    );
+
+    // For test mode — just show success
+    if (token === 'test') {
+      setConnected(true);
+      setConnecting(false);
+      return;
+    }
 
     try {
       const res = await fetch(
@@ -245,7 +257,6 @@ export default function ActivatePage() {
       setConnected(true);
       setConnecting(false);
     } catch (err) {
-      console.error('[Activate] Error:', err);
       setError(`Activation failed: ${String(err)}`);
       setConnecting(false);
     }
@@ -264,18 +275,32 @@ export default function ActivatePage() {
 
     if (!fb) {
       setError(
-        'Facebook not loaded. Please refresh and try again.'
+        'Facebook not loaded yet.\n' +
+        'Please wait a moment and try again.'
+      );
+      return;
+    }
+
+    if (!META_CONFIG_ID) {
+      setError(
+        'Configuration error.\n' +
+        'Please contact support.'
       );
       return;
     }
 
     setConnecting(true);
+    setDebugInfo('Opening Facebook login...');
 
     fb.login(
       (response: Record<string, unknown>) => {
         console.log('[Activate] FB login:', response);
+
         if (response.status !== 'connected') {
           setConnecting(false);
+          setDebugInfo(
+            `Login status: ${response.status}`
+          );
         }
       },
       {
@@ -298,7 +323,7 @@ export default function ActivatePage() {
         <div className="max-w-md w-full px-4 space-y-4">
           <Skeleton className="h-16 w-16 rounded-2xl mx-auto" />
           <Skeleton className="h-8 w-48 mx-auto" />
-          <Skeleton className="h-48 rounded-xl" />
+          <Skeleton className="h-64 rounded-2xl" />
         </div>
       </div>
     );
@@ -318,11 +343,7 @@ export default function ActivatePage() {
               {error}
             </p>
             <a
-              href={`https://wa.me/${
-                process.env
-                  .NEXT_PUBLIC_SUPPORT_WHATSAPP ??
-                '2348184774884'
-              }`}
+              href="https://wa.me/2348184774884"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-block px-6 py-3 bg-green-600 text-white rounded-xl font-medium hover:bg-green-700"
@@ -418,9 +439,7 @@ export default function ActivatePage() {
               </div>
               <div className="flex items-start gap-2">
                 <span>2️⃣</span>
-                <span>
-                  Login with your Facebook account
-                </span>
+                <span>Login with Facebook account</span>
               </div>
               <div className="flex items-start gap-2">
                 <span>3️⃣</span>
@@ -441,66 +460,80 @@ export default function ActivatePage() {
             </div>
           </div>
 
-          {/* Connect Button */}
-          {META_APP_ID && META_CONFIG_ID ? (
-            <Button
-              onClick={launchEmbeddedSignup}
-              disabled={connecting}
-              className="w-full h-14 text-base bg-[#1877F2] hover:bg-[#166FE5] text-white rounded-xl"
-            >
-              {connecting ? (
-                <span className="flex items-center gap-2">
-                  <svg
-                    className="animate-spin h-5 w-5"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12" cy="12" r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                    />
-                  </svg>
-                  Connecting...
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  <svg
-                    className="h-6 w-6"
-                    fill="white"
-                    viewBox="0 0 24 24"
-                  >
-                    <path d="M12 2C6.477 2 2 6.477 2 12c0 4.991 3.657 9.128 8.438 9.879V14.89h-2.54V12h2.54V9.797c0-2.506 1.492-3.89 3.777-3.89 1.094 0 2.238.195 2.238.195v2.46h-1.26c-1.243 0-1.63.771-1.63 1.562V12h2.773l-.443 2.89h-2.33v6.989C18.343 21.129 22 16.99 22 12c0-5.523-4.477-10-10-10z"/>
-                  </svg>
-                  Connect WhatsApp via Facebook
-                </span>
-              )}
-            </Button>
-          ) : (
-            // Fallback if env vars not set
-            <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-center">
-              <p className="text-yellow-700 text-sm font-medium">
-                ⚠️ Setup in progress
-              </p>
-              <p className="text-yellow-600 text-xs mt-1">
-                Please contact support to complete
-                your WhatsApp connection.
-              </p>
-              <a
-                href={`https://wa.me/2348184774884`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-block mt-3 px-4 py-2 bg-green-600 text-white rounded-lg text-sm"
-              >
-                💬 Contact Support
-              </a>
+          {/* Debug info - remove in production */}
+          {debugInfo && (
+            <div className="bg-gray-100 rounded-lg p-2 text-xs text-gray-500 font-mono">
+              {debugInfo}
             </div>
+          )}
+
+          {/* Connect Button */}
+          <Button
+            onClick={launchEmbeddedSignup}
+            disabled={connecting || !fbReady}
+            className="w-full h-14 text-base bg-[#1877F2] hover:bg-[#166FE5] text-white rounded-xl disabled:opacity-50"
+          >
+            {connecting ? (
+              <span className="flex items-center gap-2">
+                <svg
+                  className="animate-spin h-5 w-5"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12" cy="12" r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
+                </svg>
+                Connecting...
+              </span>
+            ) : !fbReady ? (
+              <span className="flex items-center gap-2">
+                <svg
+                  className="animate-spin h-5 w-5"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12" cy="12" r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
+                </svg>
+                Loading...
+              </span>
+            ) : (
+              <span className="flex items-center gap-2">
+                <svg
+                  className="h-6 w-6"
+                  fill="white"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="M12 2C6.477 2 2 6.477 2 12c0 4.991 3.657 9.128 8.438 9.879V14.89h-2.54V12h2.54V9.797c0-2.506 1.492-3.89 3.777-3.89 1.094 0 2.238.195 2.238.195v2.46h-1.26c-1.243 0-1.63.771-1.63 1.562V12h2.773l-.443 2.89h-2.33v6.989C18.343 21.129 22 16.99 22 12c0-5.523-4.477-10-10-10z"/>
+                </svg>
+                Connect WhatsApp via Facebook
+              </span>
+            )}
+          </Button>
+
+          {/* Not ready message */}
+          {!fbReady && !connecting && (
+            <p className="text-center text-xs text-gray-400">
+              Loading Facebook SDK...
+            </p>
           )}
 
           <p className="text-center text-xs text-gray-400">
