@@ -1,8 +1,8 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
-// ✅ Multi-school support + onboarding status guidance
-// ✅ Fixed: School owners no longer routed to marketing bot
+// ✅ Fixed: School selector works correctly
+// ✅ School ownership check only on reset, not every message
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -235,71 +235,6 @@ export async function handleMessage(
     if (handled) return;
   }
 
-  // ✅ KEY FIX: Check owned schools BEFORE marketing check
-  // School owners should NEVER be routed to marketing bot
-  // This runs for platform number AND school numbers
-  const ownedSchools = await getSchoolsByPhone(phone);
-
-  if (ownedSchools.length > 0) {
-    console.log(
-      `[Bot] ✅ School owner detected — ` +
-      `${ownedSchools.length} school(s)`
-    );
-
-    // Clear any stale marketing demo session
-    try {
-      await db
-        .from('demo_sessions')
-        .delete()
-        .eq('phone', formatPhone(phone));
-    } catch {
-      // Non-critical
-    }
-
-    if (ownedSchools.length === 1) {
-      await checkAndGuideOnboarding(
-        phone,
-        ownedSchools[0],
-        await parentSvc.getWaAccount(
-          ownedSchools[0].id
-        ),
-        wa
-      );
-    } else {
-      await showSchoolSelector(
-        phone, ownedSchools, wa
-      );
-    }
-    return;
-  }
-
-  // ── Marketing session check ─────────────────────────────
-  // Only reaches here if phone owns NO schools
-  if (isPlatformNumber) {
-    const isMarketingUser =
-      await hasActiveMarketingSession(
-        formatPhone(phone)
-      );
-
-    if (isMarketingUser) {
-      const existingSession =
-        await sessions.get(phone);
-
-      if (
-        existingSession &&
-        existingSession.role !== 'parent' &&
-        existingSession.school_id !== null
-      ) {
-        console.log(
-          `[Bot] Has admin session, skip marketing`
-        );
-      } else {
-        await handleMarketingMessage(message);
-        return;
-      }
-    }
-  }
-
   // ── Document uploads ────────────────────────────────────
   if (message.type === 'document') {
     const session = await sessions.get(phone);
@@ -347,6 +282,9 @@ export async function handleMessage(
   }
 
   // ── Reset keywords ──────────────────────────────────────
+  // ✅ School ownership check happens INSIDE handleReset
+  // NOT here — so it doesn't re-run on every message
+  // This is the key fix for the school selector loop
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
       phone, message, wa, waAccount, isPlatformNumber
@@ -358,13 +296,57 @@ export async function handleMessage(
   const session = await sessions.get(phone);
 
   if (!session) {
-    if (isPlatformNumber) {
-      await handleMarketingMessage(message);
-    } else {
-      await handleReset(
-        phone, message, wa, waAccount, isPlatformNumber
+    // ✅ No session — check if school owner first
+    // This handles the case where session expired
+    const ownedSchools =
+      await getSchoolsByPhone(phone);
+
+    if (ownedSchools.length > 0) {
+      console.log(
+        `[Bot] No session but school owner — ` +
+        `${ownedSchools.length} school(s)`
       );
+
+      // Clear stale marketing sessions
+      try {
+        await db
+          .from('demo_sessions')
+          .delete()
+          .eq('phone', formatPhone(phone));
+      } catch { /* Non-critical */ }
+
+      if (ownedSchools.length === 1) {
+        await checkAndGuideOnboarding(
+          phone,
+          ownedSchools[0],
+          await parentSvc.getWaAccount(
+            ownedSchools[0].id
+          ),
+          wa
+        );
+      } else {
+        await showSchoolSelector(
+          phone, ownedSchools, wa
+        );
+      }
+      return;
     }
+
+    // Not a school owner
+    if (isPlatformNumber) {
+      const isMarketingUser =
+        await hasActiveMarketingSession(
+          formatPhone(phone)
+        );
+      if (isMarketingUser) {
+        await handleMarketingMessage(message);
+        return;
+      }
+    }
+
+    await handleReset(
+      phone, message, wa, waAccount, isPlatformNumber
+    );
     return;
   }
 
@@ -549,6 +531,8 @@ async function handleSuperAdminFlow(
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
+// ✅ School ownership check lives HERE
+// Only runs on reset keywords, not every message
 // ============================================================
 
 async function handleReset(
@@ -590,7 +574,40 @@ async function handleReset(
     return;
   }
 
-  // 2. Check registered staff / admin
+  // ✅ 2. Check ALL schools this phone owns
+  const ownedSchools = await getSchoolsByPhone(phone);
+
+  if (ownedSchools.length > 0) {
+    console.log(
+      `[Bot] ✅ School owner — ${ownedSchools.length} school(s)`
+    );
+
+    // Clear stale marketing demo session
+    try {
+      await db
+        .from('demo_sessions')
+        .delete()
+        .eq('phone', formatPhone(phone));
+    } catch { /* Non-critical */ }
+
+    if (ownedSchools.length === 1) {
+      await checkAndGuideOnboarding(
+        phone,
+        ownedSchools[0],
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
+        wa
+      );
+    } else {
+      await showSchoolSelector(
+        phone, ownedSchools, wa
+      );
+    }
+    return;
+  }
+
+  // 3. Check registered staff / admin
   const schoolUser =
     await adminSvc.findStaffByPhone(phone);
 
@@ -626,7 +643,7 @@ async function handleReset(
     return;
   }
 
-  // 3. Unknown user
+  // 4. Unknown user
   if (isPlatformNumber) {
     await handleMarketingMessage(message);
   } else {
@@ -670,6 +687,8 @@ async function getSchoolsByPhone(
 }
 
 // ─── Check onboarding status and guide accordingly ────────
+// ✅ Uses school NAME not ID
+// ✅ Guides to correct next step
 async function checkAndGuideOnboarding(
   phone:           string,
   school:          SchoolInfo,
@@ -870,6 +889,7 @@ async function showSchoolSelector(
   schools: SchoolInfo[],
   wa:      WhatsApp
 ): Promise<void> {
+  // Save SELECT_SCHOOL state
   await db
     .from('bot_sessions')
     .upsert(
@@ -1165,7 +1185,7 @@ async function handleParentMainMenu(
 
 // ============================================================
 // ADMIN ROUTING
-// ✅ Added SELECT_SCHOOL, AWAITING states
+// ✅ Handles SELECT_SCHOOL, AWAITING states correctly
 // ============================================================
 
 async function routeAdmin(
@@ -1178,6 +1198,8 @@ async function routeAdmin(
 ): Promise<void> {
 
   // ── School selector state ───────────────────────────────
+  // ✅ This state persists — user selects school here
+  // and it switches WITHOUT re-showing selector
   if (session.state === 'SELECT_SCHOOL') {
     if (input.startsWith('select_school_')) {
       const schoolId =
@@ -1197,6 +1219,7 @@ async function routeAdmin(
       return;
     }
 
+    // Unknown input — show selector again
     const ownedSchools = await getSchoolsByPhone(phone);
     await showSchoolSelector(phone, ownedSchools, wa);
     return;
