@@ -89,6 +89,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return json(await getLeads(url.searchParams.get('status')));
     }
 
+    // Verify bank account (resolve account name via Paystack)
+    if (path === '/verify-account' && req.method === 'GET') {
+      const account = url.searchParams.get('account');
+      const bank = url.searchParams.get('bank');
+      if (!account || !bank) {
+        return json({ error: 'account and bank are required' }, 400);
+      }
+      const resolved = await paystack.resolveAccount(account, bank);
+      if (!resolved) {
+        return json({ message: 'Could not verify account' }, 200);
+      }
+      return json({ account_name: resolved.accountName });
+    }
+
     // Plans
     if (path === '/plans' && req.method === 'GET') {
       const { data } = await db.from('setup_fee_tiers')
