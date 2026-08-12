@@ -45,7 +45,8 @@ const RESET_KEYWORDS = new Set([
 ]);
 
 // ─── Trial code pattern ───────────────────────────────────
-const TRIAL_CODE_PATTERN =
+// Matches: TRIAL-XXXX-XXXX (case insensitive)
+const TRIAL_CODE_REGEX =
   /^TRIAL-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
 
 // ─── Currency formatter ───────────────────────────────────
@@ -102,8 +103,18 @@ export async function handleMarketingMessage(
   const input =
     buttonId || listId || rawText.toLowerCase().trim();
 
-  // ── Staff invite token ──────────────────────────────────
-  if (/^[A-Z0-9]{8}$/i.test(rawText.trim())) {
+  console.log(
+    `[Marketing] from=${phone} | ` +
+    `input="${input.substring(0, 40)}" | ` +
+    `rawText="${rawText.substring(0, 40)}"`
+  );
+
+  // ── 1. Staff invite token (8 alphanumeric) ─────────────
+  if (
+    message.type === 'text' &&
+    /^[A-Z0-9]{8}$/i.test(rawText.trim()) &&
+    !TRIAL_CODE_REGEX.test(rawText.trim())
+  ) {
     await handleInvitationToken(
       phone,
       rawText.trim().toUpperCase(),
@@ -112,8 +123,15 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ✅ Trial code check
-  if (TRIAL_CODE_PATTERN.test(rawText.trim())) {
+  // ── 2. Trial code check ─────────────────────────────────
+  // Check BEFORE onboarding and demo session
+  if (
+    message.type === 'text' &&
+    TRIAL_CODE_REGEX.test(rawText.trim())
+  ) {
+    console.log(
+      `[Marketing] ✅ Trial code detected: ${rawText.trim()}`
+    );
     await handleTrialCode(
       phone,
       rawText.trim().toUpperCase(),
@@ -122,12 +140,11 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── Check onboarding session FIRST ─────────────────────
+  // ── 3. Active onboarding session ───────────────────────
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
     console.log(
-      `[Marketing] Onboarding session | ` +
-      `step: ${obSession.step}`
+      `[Marketing] Onboarding session | step: ${obSession.step}`
     );
     const handled = await handleOnboardingInput(
       phone, input, rawText, wa, obSession.source
@@ -135,12 +152,12 @@ export async function handleMarketingMessage(
     if (handled) return;
   }
 
-  // ── Get demo session from DB ────────────────────────────
+  // ── 4. Get demo session from DB ─────────────────────────
   let session = await getMarketingSession(
     formatPhone(phone)
   );
 
-  // Reset or new user — show welcome
+  // Reset or new user
   if (!input || RESET_KEYWORDS.has(input) || !session) {
     session = await createMarketingSession(
       formatPhone(phone)
@@ -149,7 +166,7 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── Registration triggers ───────────────────────────────
+  // ── 5. Registration triggers ────────────────────────────
   if ([
     'register_now',
     'start_onboarding',
@@ -159,13 +176,13 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── Button or list selection ────────────────────────────
+  // ── 6. Button or list selection ─────────────────────────
   if (buttonId || listId) {
     await handleMenuSelection(phone, session, input, wa);
     return;
   }
 
-  // ── Text input ──────────────────────────────────────────
+  // ── 7. Text input ───────────────────────────────────────
   await handleTextInput(
     phone, session, rawText, input, wa
   );
@@ -181,38 +198,43 @@ async function handleTrialCode(
   wa:    WhatsApp
 ): Promise<void> {
   console.log(
-    `[Marketing] Trial code attempt: ${code} from ${phone}`
+    `[Marketing] Processing trial code: ${code}`
   );
 
-  // Look up the code
+  // Look up code in DB
   const { data, error } = await db
     .from('trial_codes')
     .select('*')
     .eq('code', code)
     .maybeSingle();
 
+  console.log(
+    `[Marketing] Trial code DB result:`,
+    JSON.stringify({ data, error })
+  );
+
   // Code not found
   if (error || !data) {
+    console.log(`[Marketing] Trial code not found: ${code}`);
     await wa.text(
       phone,
       `❌ *Invalid Code*\n\n` +
       `The code *${code}* is not valid.\n\n` +
       `Please check the code and try again.\n\n` +
-      `Type *hi* to see our demo or\n` +
-      `contact us for help.`
+      `Type *hi* to see our demo.`
     );
     return;
   }
 
   // Already used
   if (data.used) {
+    console.log(`[Marketing] Trial code already used: ${code}`);
     await wa.text(
       phone,
       `❌ *Code Already Used*\n\n` +
       `This trial code has already been used.\n\n` +
       `Each code is for one school only.\n\n` +
-      `Type *hi* to see our demo or\n` +
-      `contact us for a new code:\n` +
+      `Contact us for a new code:\n` +
       `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
     );
     return;
@@ -220,18 +242,22 @@ async function handleTrialCode(
 
   // Expired
   if (new Date(data.expires_at) < new Date()) {
+    console.log(`[Marketing] Trial code expired: ${code}`);
     await wa.text(
       phone,
       `❌ *Code Expired*\n\n` +
       `This trial code has expired.\n\n` +
-      `Please contact us for a new code:\n` +
-      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*\n\n` +
-      `Type *hi* to see our demo.`
+      `Contact us for a new code:\n` +
+      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
     );
     return;
   }
 
-  // ✅ Valid! Mark as used immediately
+  console.log(
+    `[Marketing] ✅ Valid trial code! Activating...`
+  );
+
+  // ✅ Mark as used immediately
   await db
     .from('trial_codes')
     .update({
@@ -241,7 +267,7 @@ async function handleTrialCode(
     })
     .eq('id', data.id);
 
-  // Save trial session to DB
+  // Save trial session
   await db
     .from('trial_sessions')
     .upsert(
@@ -273,24 +299,28 @@ async function handleTrialCode(
   const superPhone =
     Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
   if (superPhone) {
-    const notifyWa = new WhatsApp({
-      phone_number_id:
-        Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
-      access_token:
-        Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
-      status: 'active',
-    });
-    await notifyWa.text(
-      superPhone,
-      `🎁 *Trial Code Used!*\n\n` +
-      `Code: *${code}*\n` +
-      `School: ${data.school_name ?? 'Unknown'}\n` +
-      `Phone: ${formatPhone(phone)}\n` +
-      `⏰ ${new Date().toLocaleString('en-NG')}`
-    ).catch(() => {});
+    try {
+      const notifyWa = new WhatsApp({
+        phone_number_id:
+          Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+        access_token:
+          Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+        status: 'active',
+      });
+      await notifyWa.text(
+        superPhone,
+        `🎁 *Trial Code Used!*\n\n` +
+        `Code: *${code}*\n` +
+        `School: ${data.school_name ?? 'Unknown'}\n` +
+        `Phone: ${formatPhone(phone)}\n` +
+        `⏰ ${new Date().toLocaleString('en-NG')}`
+      );
+    } catch {
+      // Non-critical
+    }
   }
 
-  // Send success message to school
+  // Send success message
   await wa.text(
     phone,
     `🎉 *Free Trial Activated!*\n` +
@@ -397,7 +427,6 @@ async function handleTextInput(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
-  // Guard — user is in registration flow
   if (
     session.state === 'REGISTERING' ||
     session.state === 'WELCOME'     ||
@@ -407,7 +436,6 @@ async function handleTextInput(
     return;
   }
 
-  // Collecting name
   if (session.state === 'COLLECTING_NAME') {
     if (rawText.trim().length >= 2) {
       session.contactName = rawText.trim();
@@ -422,15 +450,11 @@ async function handleTextInput(
       await delay(800);
       await showDemoMainMenu(phone, session, wa);
     } else {
-      await wa.text(
-        phone,
-        `Please enter your full name:`
-      );
+      await wa.text(phone, `Please enter your full name:`);
     }
     return;
   }
 
-  // Everything else → AI
   await handleAI(phone, session, rawText, wa);
 }
 
@@ -468,10 +492,7 @@ async function handleAI(
     intent,
   });
 
-  history.push({
-    role:    'assistant',
-    content: aiResponse,
-  });
+  history.push({ role: 'assistant', content: aiResponse });
   session.aiHistory = history.slice(-20);
   await saveMarketingSession(session);
 
@@ -482,7 +503,6 @@ async function handleAI(
   );
 }
 
-// ─── Intent follow-up ─────────────────────────────────────
 async function handleIntentFollowUp(
   phone:   string,
   session: DemoSession,
@@ -674,7 +694,6 @@ async function showAttendanceDemo(
   );
 }
 
-// ─── Parent attendance view ───────────────────────────────
 async function showParentAttView(
   phone:   string,
   session: DemoSession,
@@ -718,7 +737,6 @@ async function showParentAttView(
   );
 }
 
-// ─── Admin attendance view ────────────────────────────────
 async function showAdminAttView(
   phone:   string,
   session: DemoSession,
@@ -767,9 +785,7 @@ async function showFeesDemo(
 ): Promise<void> {
   session.state = 'DEMO_FEES';
   await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'fees_demo'
-  );
+  await logDemoInteraction(formatPhone(phone), 'fees_demo');
 
   await wa.text(
     phone,
@@ -804,7 +820,6 @@ async function showFeesDemo(
   );
 }
 
-// ─── Parent fees view ─────────────────────────────────────
 async function showParentFeesView(
   phone:   string,
   session: DemoSession,
@@ -848,7 +863,6 @@ async function showParentFeesView(
   );
 }
 
-// ─── Payment flow demo ────────────────────────────────────
 async function showPaymentDemo(
   phone:   string,
   session: DemoSession,
@@ -1017,9 +1031,7 @@ async function showPricing(
 ): Promise<void> {
   session.state = 'DEMO_PRICING';
   await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'pricing'
-  );
+  await logDemoInteraction(formatPhone(phone), 'pricing');
 
   await wa.text(
     phone,
@@ -1043,7 +1055,7 @@ async function showPricing(
     phone,
     `💵 Setup Fee Tiers`,
     `One-time setup fee based on\nyour student count:`,
-    `Commission: 1.5% per payment (charged to parent)`,
+    `Commission: 1.5% per payment (to parent)`,
     `📋 View Tiers`,
     [
       {
@@ -1093,7 +1105,7 @@ async function startRegistration(
     schoolType:        session.schoolType   ?? undefined,
   };
 
-  // ✅ await so session is in DB before user replies
+  // ✅ await so session is saved to DB before user replies
   const obSession = await startOnboardingSession(
     phone, 'marketing', prefill
   );
@@ -1118,9 +1130,7 @@ async function startRegistration(
     await wa.text(
       phone,
       `🚀 *Register Your School!*\n\n` +
-      `Hi *${
-        session.contactName.split(' ')[0]
-      }!* 👋\n\n` +
+      `Hi *${session.contactName.split(' ')[0]}!* 👋\n\n` +
       `What is the name of your school?`
     );
   } else {
