@@ -1,7 +1,7 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
-// ✅ Multi-school support added
+// ✅ Multi-school support + onboarding status guidance
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -130,6 +130,8 @@ import {
   handleOnboardingInput,
   startOnboardingSession,
   handleInvitationToken,
+  setOnboardingSession,
+  showSetupFeeInfo,
 } from '../onboarding/engine.ts';
 
 import type {
@@ -236,7 +238,6 @@ export async function handleMessage(
         existingSession.role !== 'parent' &&
         existingSession.school_id !== null
       ) {
-        // Has admin session — skip marketing
         console.log(
           `[Bot] Has admin session, skip marketing`
         );
@@ -334,7 +335,7 @@ export async function handleMessage(
     );
   } else {
     await routeAdmin(
-      phone, session, input, rawText, wa
+      phone, session, input, rawText, wa, waAccount
     );
   }
 }
@@ -395,7 +396,7 @@ async function handleSuperAdminFlow(
         );
       } else {
         await routeAdmin(
-          phone, testSession, input, rawText, testWa
+          phone, testSession, input, rawText, testWa, waAccount
         );
       }
       return;
@@ -495,7 +496,7 @@ async function handleSuperAdminFlow(
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
-// ✅ Multi-school support added
+// ✅ Multi-school + onboarding status support
 // ============================================================
 
 async function handleReset(
@@ -541,27 +542,23 @@ async function handleReset(
   const ownedSchools = await getSchoolsByPhone(phone);
 
   if (ownedSchools.length === 1) {
-    // One school — go straight to admin panel
     console.log(
-      `[Bot] One school found — logging in directly`
+      `[Bot] One school found — checking status`
     );
-    await loginToSchool(
+    await checkAndGuideOnboarding(
       phone,
       ownedSchools[0],
-      wa,
-      waAccount
+      await parentSvc.getWaAccount(ownedSchools[0].id),
+      wa
     );
     return;
   }
 
   if (ownedSchools.length > 1) {
-    // Multiple schools — show selector
     console.log(
-      `[Bot] ${ownedSchools.length} schools found — showing selector`
+      `[Bot] ${ownedSchools.length} schools — selector`
     );
-    await showSchoolSelector(
-      phone, ownedSchools, wa
-    );
+    await showSchoolSelector(phone, ownedSchools, wa);
     return;
   }
 
@@ -613,15 +610,19 @@ async function handleReset(
 // ✅ MULTI-SCHOOL HELPERS
 // ============================================================
 
-// Get all schools registered by this phone number
-async function getSchoolsByPhone(
-  phone: string
-): Promise<Array<{
+// ─── School type with setup fee status ────────────────────
+type SchoolInfo = {
   id:                string;
   name:              string;
   is_active:         boolean;
   onboarding_status: string;
-}>> {
+  setup_fee_paid:    boolean;
+};
+
+// ─── Get all schools owned by this phone ──────────────────
+async function getSchoolsByPhone(
+  phone: string
+): Promise<SchoolInfo[]> {
   const formatted = formatPhone(phone);
 
   const { data } = await db
@@ -632,7 +633,8 @@ async function getSchoolsByPhone(
         id,
         name,
         is_active,
-        onboarding_status
+        onboarding_status,
+        setup_fee_paid
       )
     `)
     .eq('admin_phone', formatted);
@@ -641,31 +643,178 @@ async function getSchoolsByPhone(
 
   return data
     .map((r) =>
-      r.schools as unknown as {
-        id:                string;
-        name:              string;
-        is_active:         boolean;
-        onboarding_status: string;
-      }
+      r.schools as unknown as SchoolInfo
     )
-    .filter((s) => s !== null && s.id !== undefined);
+    .filter(
+      (s) => s !== null && s.id !== undefined
+    );
 }
 
-// Login to a specific school
-async function loginToSchool(
-  phone:     string,
-  school:    {
-    id:                string;
-    name:              string;
-    is_active:         boolean;
-    onboarding_status: string;
-  },
-  wa:        WhatsApp,
-  waAccount: WhatsAppAccount | null
+// ─── Check onboarding status and guide accordingly ────────
+// ✅ Fixed: Uses school NAME not ID, guides to next step
+async function checkAndGuideOnboarding(
+  phone:          string,
+  school:         SchoolInfo,
+  schoolWaAccount: unknown,
+  wa:              WhatsApp
 ): Promise<void> {
-  const schoolWaAccount =
-    await parentSvc.getWaAccount(school.id);
+  // Get WhatsApp connection status
+  const { data: waAcc } = await db
+    .from('whatsapp_accounts')
+    .select('status, display_number')
+    .eq('school_id', school.id)
+    .maybeSingle();
 
+  const waConnected = waAcc?.status === 'active';
+
+  console.log(
+    `[Bot] Checking ${school.name} | ` +
+    `fee_paid=${school.setup_fee_paid} | ` +
+    `status=${school.onboarding_status} | ` +
+    `wa=${waConnected}`
+  );
+
+  // ── Setup fee NOT paid ────────────────────────────────
+  if (!school.setup_fee_paid) {
+    await wa.text(
+      phone,
+      `👋 *Welcome back!*\n\n` +
+      `🏫 *${school.name}*\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `⏳ *Setup Not Complete*\n\n` +
+      `Your one-time setup fee has not\n` +
+      `been paid yet.\n\n` +
+      `*To activate your school:*\n` +
+      `1️⃣ Pay the setup fee\n` +
+      `2️⃣ Connect your WhatsApp number\n` +
+      `3️⃣ Start managing your school!\n\n` +
+      `━━━━━━━━━━━━━━━━`
+    );
+
+    await delay(500);
+
+    await wa.buttons(
+      phone,
+      `Would you like to complete your setup?`,
+      [
+        {
+          id:    'RESUME_SETUP_FEE',
+          title: '💳 Pay Setup Fee',
+        },
+        {
+          id:    'CONTACT_SUPPORT',
+          title: '📞 Contact Support',
+        },
+      ]
+    );
+
+    // Save session
+    await db.from('bot_sessions').upsert(
+      {
+        phone:               formatPhone(phone),
+        parent_id:           null,
+        school_user_id:      null,
+        school_id:           school.id,
+        role:                'admin',
+        state:               'AWAITING_SETUP_FEE',
+        sub_state:           null,
+        selected_student_id: null,
+        data: {
+          school_name:       school.name,
+          pending_setup_fee: true,
+        },
+        last_activity: new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
+    return;
+  }
+
+  // ── Setup fee paid but WhatsApp not connected ─────────
+  if (school.setup_fee_paid && !waConnected) {
+    const appUrl = Deno.env.get('APP_URL') ?? '';
+
+    // Get or create activation token
+    const { data: existingToken } = await db
+      .from('school_activation_tokens')
+      .select('token, expires_at')
+      .eq('school_id', school.id)
+      .eq('used', false)
+      .gte('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let activationLink = `${appUrl}/activate`;
+
+    if (existingToken) {
+      activationLink =
+        `${appUrl}/activate/${existingToken.token}`;
+    } else {
+      const token = Array.from(
+        { length: 32 },
+        () =>
+          'abcdefghijklmnopqrstuvwxyz0123456789'[
+            Math.floor(Math.random() * 36)
+          ]
+      ).join('');
+
+      await db
+        .from('school_activation_tokens')
+        .insert({
+          school_id:  school.id,
+          token,
+          expires_at: new Date(
+            Date.now() + 7 * 24 * 60 * 60 * 1000
+          ).toISOString(),
+          used:       false,
+          created_at: new Date().toISOString(),
+        });
+
+      activationLink = `${appUrl}/activate/${token}`;
+    }
+
+    await wa.text(
+      phone,
+      `👋 *Welcome back!*\n\n` +
+      `🏫 *${school.name}*\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `✅ Setup fee paid!\n\n` +
+      `🔌 *WhatsApp Not Connected Yet*\n\n` +
+      `You need to connect your school's\n` +
+      `WhatsApp Business number to go LIVE.\n\n` +
+      `👇 *Tap this link to connect:*\n` +
+      `${activationLink}\n\n` +
+      `⏰ Valid for 7 days\n` +
+      `Takes less than 2 minutes! ✅\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `After connecting, type *menu* to\n` +
+      `access your admin panel! 🚀`
+    );
+
+    // Save session
+    await db.from('bot_sessions').upsert(
+      {
+        phone:               formatPhone(phone),
+        parent_id:           null,
+        school_user_id:      null,
+        school_id:           school.id,
+        role:                'admin',
+        state:               'AWAITING_WA_CONNECTION',
+        sub_state:           null,
+        selected_student_id: null,
+        data: {
+          school_name:     school.name,
+          activation_link: activationLink,
+        },
+        last_activity: new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
+    return;
+  }
+
+  // ── Fully set up — go to admin panel ──────────────────
   const adminUser = {
     id:        `admin-${school.id}`,
     school_id: school.id,
@@ -687,26 +836,22 @@ async function loginToSchool(
   const session = await sessions.createAdminSession(
     phone,
     adminUser as never,
-    schoolWaAccount,
+    schoolWaAccount as never,
     'admin'
   );
 
-  const schoolWa = new WhatsApp(schoolWaAccount);
+  const schoolWa = new WhatsApp(
+    schoolWaAccount as never
+  );
   await showAdminMenu(phone, session, schoolWa);
 }
 
-// Show school selector for multi-school owners
+// ─── Show school selector for multi-school owners ─────────
 async function showSchoolSelector(
   phone:   string,
-  schools: Array<{
-    id:                string;
-    name:              string;
-    is_active:         boolean;
-    onboarding_status: string;
-  }>,
-  wa: WhatsApp
+  schools: SchoolInfo[],
+  wa:      WhatsApp
 ): Promise<void> {
-  // Save state
   await db
     .from('bot_sessions')
     .upsert(
@@ -727,16 +872,26 @@ async function showSchoolSelector(
       { onConflict: 'phone' }
     );
 
-  // Build rows (max 9 schools + register new)
-  const rows = schools.slice(0, 9).map((s) => ({
-    id:          `SELECT_SCHOOL_${s.id}`,
-    title:       s.name.substring(0, 24),
-    description: s.is_active
-      ? '🟢 Active — tap to manage'
-      : `⏳ ${s.onboarding_status}`,
-  }));
+  // Build rows with clear status icons
+  const rows = schools.slice(0, 9).map((s) => {
+    let icon        = '🟢';
+    let description = 'Active — tap to manage';
 
-  // Add register new school option
+    if (!s.setup_fee_paid) {
+      icon        = '💳';
+      description = 'Setup fee pending';
+    } else if (s.onboarding_status !== 'active') {
+      icon        = '🔌';
+      description = 'WhatsApp not connected';
+    }
+
+    return {
+      id:          `SELECT_SCHOOL_${s.id}`,
+      title:       `${icon} ${s.name}`.substring(0, 24),
+      description,
+    };
+  });
+
   rows.push({
     id:          'REGISTER_NEW_SCHOOL',
     title:       '➕ Register New School',
@@ -747,19 +902,15 @@ async function showSchoolSelector(
     phone,
     `🏫 Your Schools`,
     `You have *${schools.length}* school(s).\n\n` +
-    `Select which school to manage:`,
-    `Tap a school to open its admin panel`,
+    `Select which school to manage:\n\n` +
+    `🟢 Active  💳 Fee pending  🔌 WA pending`,
+    `Tap a school to continue`,
     `🏫 Select School`,
-    [
-      {
-        title: 'Your Schools',
-        rows,
-      },
-    ]
+    [{ title: 'Your Schools', rows }]
   );
 }
 
-// Switch to a different school
+// ─── Switch to a different school ─────────────────────────
 async function switchToSchool(
   phone:    string,
   schoolId: string,
@@ -767,7 +918,10 @@ async function switchToSchool(
 ): Promise<void> {
   const { data: school } = await db
     .from('schools')
-    .select('id, name, is_active, onboarding_status')
+    .select(
+      'id, name, is_active, onboarding_status, ' +
+      'setup_fee_paid'
+    )
     .eq('id', schoolId)
     .single();
 
@@ -782,41 +936,12 @@ async function switchToSchool(
   const schoolWaAccount =
     await parentSvc.getWaAccount(schoolId);
 
-  const adminUser = {
-    id:        `admin-${schoolId}`,
-    school_id: schoolId,
-    user_id:   `admin-${schoolId}`,
-    role_id:   'admin',
-    status:    'active',
-    roles: {
-      id:   'admin',
-      name: 'admin',
-    },
-    profiles: {
-      id:         `admin-${schoolId}`,
-      full_name:  'School Admin',
-      phone:      phone,
-      avatar_url: null,
-    },
-  };
-
-  const newSession = await sessions.createAdminSession(
+  await checkAndGuideOnboarding(
     phone,
-    adminUser as never,
+    school as SchoolInfo,
     schoolWaAccount,
-    'admin'
+    wa
   );
-
-  const schoolWa = new WhatsApp(schoolWaAccount);
-
-  await wa.text(
-    phone,
-    `✅ *Switched to ${school.name}*\n\n` +
-    `Loading admin panel...`
-  );
-
-  await delay(500);
-  await showAdminMenu(phone, newSession, schoolWa);
 }
 
 // ============================================================
@@ -1023,18 +1148,19 @@ async function handleParentMainMenu(
 
 // ============================================================
 // ADMIN ROUTING
-// ✅ Added SELECT_SCHOOL and SWITCH_SCHOOL handling
+// ✅ Added SELECT_SCHOOL, AWAITING states
 // ============================================================
 
 async function routeAdmin(
-  phone:   string,
-  session: BotSession,
-  input:   string,
-  rawText: string,
-  wa:      WhatsApp
+  phone:    string,
+  session:  BotSession,
+  input:    string,
+  rawText:  string,
+  wa:       WhatsApp,
+  waAccount?: WhatsAppAccount | null
 ): Promise<void> {
 
-  // ✅ School selector state
+  // ── School selector state ───────────────────────────────
   if (session.state === 'SELECT_SCHOOL') {
     if (input.startsWith('select_school_')) {
       const schoolId =
@@ -1054,9 +1180,108 @@ async function routeAdmin(
       return;
     }
 
-    // Unknown — show selector again
     const ownedSchools = await getSchoolsByPhone(phone);
     await showSchoolSelector(phone, ownedSchools, wa);
+    return;
+  }
+
+  // ── Awaiting setup fee state ────────────────────────────
+  if (session.state === 'AWAITING_SETUP_FEE') {
+    if (input === 'resume_setup_fee') {
+      // Resume onboarding from setup fee step
+      const { data: schoolData } = await db
+        .from('schools')
+        .select('name, student_count')
+        .eq('id', session.school_id ?? '')
+        .single();
+
+      const { data: onboarding } = await db
+        .from('school_onboarding')
+        .select('admin_name, admin_email')
+        .eq('school_id', session.school_id ?? '')
+        .maybeSingle();
+
+      const obSession = {
+        phone:             formatPhone(phone),
+        step:              'SHOW_SETUP_FEE' as const,
+        source:            'main' as const,
+        contactName:       onboarding?.admin_name   ?? null,
+        schoolName:        schoolData?.name         ?? null,
+        studentCount:      schoolData?.student_count ?? null,
+        studentCountRange: null,
+        schoolType:        null,
+        location:          null,
+        email:             onboarding?.admin_email  ?? null,
+        schoolId:          session.school_id         ?? null,
+        setupFeePaid:      false,
+        tempData:          {},
+        lastActivity:      Date.now(),
+      };
+
+      await setOnboardingSession(phone, obSession);
+      await showSetupFeeInfo(phone, obSession, wa);
+      return;
+    }
+
+    if (input === 'contact_support') {
+      const superPhone =
+        Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+      await wa.text(
+        phone,
+        `📞 *Contact Support*\n\n` +
+        `WhatsApp us directly:\n` +
+        `*${superPhone}*\n\n` +
+        `⏰ Available: Mon-Fri, 8AM-6PM\n\n` +
+        `We'll help you complete your setup! 🚀`
+      );
+      return;
+    }
+
+    // Any other input — show status again
+    const ownedSchools = await getSchoolsByPhone(phone);
+    if (ownedSchools.length === 1) {
+      await checkAndGuideOnboarding(
+        phone,
+        ownedSchools[0],
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
+        wa
+      );
+    } else if (ownedSchools.length > 1) {
+      await showSchoolSelector(phone, ownedSchools, wa);
+    }
+    return;
+  }
+
+  // ── Awaiting WhatsApp connection state ──────────────────
+  if (session.state === 'AWAITING_WA_CONNECTION') {
+    if (input === 'contact_support') {
+      const superPhone =
+        Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+      await wa.text(
+        phone,
+        `📞 *Contact Support*\n\n` +
+        `WhatsApp us directly:\n` +
+        `*${superPhone}*\n\n` +
+        `We'll help you connect your\n` +
+        `WhatsApp number! 🚀`
+      );
+      return;
+    }
+
+    // Check if WA has been connected since last time
+    const ownedSchools = await getSchoolsByPhone(phone);
+    if (ownedSchools.length >= 1) {
+      await checkAndGuideOnboarding(
+        phone,
+        ownedSchools[0],
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
+        wa
+      );
+    }
     return;
   }
 
@@ -1345,7 +1570,6 @@ async function handleAdminMainMenu(
       await showAdminHelp(phone, wa);
       break;
 
-    // ✅ Switch between schools
     case 'switch_school': {
       const ownedSchools =
         await getSchoolsByPhone(phone);
@@ -1357,7 +1581,8 @@ async function handleAdminMainMenu(
         await wa.text(
           phone,
           `ℹ️ You only have one school registered.\n\n` +
-          `To add another school, contact support.`
+          `To add another school, go to More Features\n` +
+          `→ or contact support.`
         );
         await showAdminMenu(phone, session, wa);
       }
