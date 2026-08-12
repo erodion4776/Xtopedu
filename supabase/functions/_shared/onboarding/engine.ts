@@ -1,9 +1,6 @@
 // ============================================================
 // SCHOOLBOT - ONBOARDING ENGINE
 // supabase/functions/_shared/onboarding/engine.ts
-//
-// DB-backed sessions — survives Edge Function restarts.
-// Includes trial code support — waives setup fee.
 // ============================================================
 
 import { getSupabase }    from '../supabase.ts';
@@ -304,7 +301,6 @@ export async function handleOnboardingInput(
 // STEP HANDLERS
 // ============================================================
 
-// ─── Step 1: Collect name ─────────────────────────────────
 async function handleCollectName(
   phone:   string,
   session: OnboardingState,
@@ -333,7 +329,6 @@ async function handleCollectName(
   );
 }
 
-// ─── Step 2: Collect school name ──────────────────────────
 async function handleCollectSchoolName(
   phone:   string,
   session: OnboardingState,
@@ -401,7 +396,6 @@ async function handleCollectSchoolName(
   );
 }
 
-// ─── Step 3: Collect student count ────────────────────────
 async function handleCollectStudentCount(
   phone:   string,
   session: OnboardingState,
@@ -476,7 +470,6 @@ async function handleCollectStudentCount(
   );
 }
 
-// ─── Step 4: Collect school type ──────────────────────────
 async function handleCollectSchoolType(
   phone:   string,
   session: OnboardingState,
@@ -513,7 +506,6 @@ async function handleCollectSchoolType(
   );
 }
 
-// ─── Step 5: Collect location ─────────────────────────────
 async function handleCollectLocation(
   phone:   string,
   session: OnboardingState,
@@ -541,7 +533,6 @@ async function handleCollectLocation(
   );
 }
 
-// ─── Step 6: Collect email ────────────────────────────────
 async function handleCollectEmail(
   phone:   string,
   session: OnboardingState,
@@ -560,20 +551,17 @@ async function handleCollectEmail(
   await showSetupFeeInfo(phone, session, wa);
 }
 
-// ─── Step 7: Show setup fee ───────────────────────────────
 export async function showSetupFeeInfo(
   phone:   string,
   session: OnboardingState,
   wa:      WhatsApp
 ): Promise<void> {
-  // Create school record if not done yet
   if (!session.schoolId) {
     const schoolId   = await createSchoolRecord(session);
     session.schoolId = schoolId;
     await setOnboardingSession(phone, session);
   }
 
-  // Check if fee already paid
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -582,7 +570,7 @@ export async function showSetupFeeInfo(
     return;
   }
 
-  // ✅ Check for active trial session
+  // Check for active trial
   const hasTrial = await checkActiveTrial(
     formatPhone(phone)
   );
@@ -592,7 +580,6 @@ export async function showSetupFeeInfo(
     return;
   }
 
-  // Normal paid flow
   const feeInfo = await calculateSetupFee(
     session.studentCount ?? 100
   );
@@ -661,8 +648,6 @@ export async function showSetupFeeInfo(
   await setOnboardingSession(phone, session);
 }
 
-// ─── Step 7b: Handle setup fee actions ────────────────────
-// ✅ Now accepts rawText to check trial code pattern
 async function handleSetupFeeStep(
   phone:   string,
   session: OnboardingState,
@@ -670,11 +655,10 @@ async function handleSetupFeeStep(
   rawText: string,
   wa:      WhatsApp
 ): Promise<void> {
-  // ✅ TRIAL CODE CHECK — runs first
-  // User can type trial code at this step
+  // ✅ Trial code check first
   if (TRIAL_CODE_PATTERN.test(rawText.trim())) {
     console.log(
-      `[Onboarding] Trial code at setup fee step: ` +
+      `[Onboarding] Trial code at setup fee: ` +
       `${rawText.trim()}`
     );
     await handleTrialCodeInOnboarding(
@@ -686,7 +670,6 @@ async function handleSetupFeeStep(
     return;
   }
 
-  // Check if payment was completed
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -780,11 +763,9 @@ async function handleSetupFeeStep(
     return;
   }
 
-  // Default — show setup fee again
   await showSetupFeeInfo(phone, session, wa);
 }
 
-// ─── Generate Paystack setup fee link ─────────────────────
 async function generateAndSendSetupFeeLink(
   phone:   string,
   session: OnboardingState,
@@ -848,10 +829,9 @@ async function generateAndSendSetupFeeLink(
 }
 
 // ============================================================
-// ✅ TRIAL CODE HELPERS
+// TRIAL CODE HELPERS
 // ============================================================
 
-// ─── Check if phone has an active trial ───────────────────
 async function checkActiveTrial(
   phone: string
 ): Promise<boolean> {
@@ -864,7 +844,6 @@ async function checkActiveTrial(
 
   if (!data) return false;
 
-  // Check if expired
   if (new Date(data.expires_at) < new Date()) {
     await db
       .from('trial_sessions')
@@ -876,8 +855,6 @@ async function checkActiveTrial(
   return true;
 }
 
-// ─── Handle trial code typed during onboarding ────────────
-// Called when user types TRIAL-XXXX-XXXX at setup fee step
 async function handleTrialCodeInOnboarding(
   phone:   string,
   code:    string,
@@ -885,11 +862,9 @@ async function handleTrialCodeInOnboarding(
   wa:      WhatsApp
 ): Promise<void> {
   console.log(
-    `[Onboarding] Checking trial code: ${code} ` +
-    `for phone: ${phone}`
+    `[Onboarding] Checking trial code: ${code}`
   );
 
-  // Look up code in DB
   const { data, error } = await db
     .from('trial_codes')
     .select('*')
@@ -897,17 +872,16 @@ async function handleTrialCodeInOnboarding(
     .maybeSingle();
 
   console.log(
-    `[Onboarding] Trial code DB result:`,
+    `[Onboarding] Trial code result:`,
     JSON.stringify({ data, error })
   );
 
-  // Code not found
   if (error || !data) {
     await wa.text(
       phone,
       `❌ *Invalid Code*\n\n` +
       `The code *${code}* is not valid.\n\n` +
-      `Please check the code and try again.\n\n` +
+      `Please check and try again.\n\n` +
       `Or proceed with normal payment:`
     );
     await delay(500);
@@ -928,13 +902,11 @@ async function handleTrialCodeInOnboarding(
     return;
   }
 
-  // Already used
   if (data.used) {
     await wa.text(
       phone,
       `❌ *Code Already Used*\n\n` +
       `This trial code has already been used.\n\n` +
-      `Each code is for one school only.\n\n` +
       `Contact us for a new code:\n` +
       `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
     );
@@ -952,7 +924,6 @@ async function handleTrialCodeInOnboarding(
     return;
   }
 
-  // Expired
   if (new Date(data.expires_at) < new Date()) {
     await wa.text(
       phone,
@@ -975,14 +946,8 @@ async function handleTrialCodeInOnboarding(
     return;
   }
 
-  // ✅ Valid code! Apply trial
-  console.log(
-    `[Onboarding] ✅ Valid trial code! ` +
-    `Applying for ${phone}...`
-  );
-
-  // Mark code as used
-  const { error: updateError } = await db
+  // ✅ Valid! Mark as used
+  await db
     .from('trial_codes')
     .update({
       used:          true,
@@ -991,15 +956,7 @@ async function handleTrialCodeInOnboarding(
     })
     .eq('id', data.id);
 
-  if (updateError) {
-    console.error(
-      '[Onboarding] Trial code update error:',
-      updateError
-    );
-  }
-
-  // Save trial session
-  const { error: sessionError } = await db
+  await db
     .from('trial_sessions')
     .upsert(
       {
@@ -1014,14 +971,6 @@ async function handleTrialCodeInOnboarding(
       { onConflict: 'phone' }
     );
 
-  if (sessionError) {
-    console.error(
-      '[Onboarding] Trial session error:',
-      sessionError
-    );
-  }
-
-  // Notify super admin
   const superPhone =
     Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
   if (superPhone) {
@@ -1040,11 +989,9 @@ async function handleTrialCodeInOnboarding(
     }
   }
 
-  // Apply trial — skip payment
   await handleTrialOnboarding(phone, session, wa);
 }
 
-// ─── Apply trial — skip setup fee payment ─────────────────
 async function handleTrialOnboarding(
   phone:   string,
   session: OnboardingState,
@@ -1054,7 +1001,6 @@ async function handleTrialOnboarding(
     `[Onboarding] ✅ Applying trial for ${phone}`
   );
 
-  // Mark school setup fee as paid (FREE)
   await db
     .from('schools')
     .update({
@@ -1067,7 +1013,6 @@ async function handleTrialOnboarding(
     })
     .eq('id', session.schoolId);
 
-  // Update onboarding record
   await db
     .from('school_onboarding')
     .update({
@@ -1077,18 +1022,15 @@ async function handleTrialOnboarding(
     })
     .eq('school_id', session.schoolId);
 
-  // Deactivate trial session
   await db
     .from('trial_sessions')
     .update({ active: false })
     .eq('phone', formatPhone(phone));
 
-  // Update onboarding session
   session.setupFeePaid = true;
   session.step         = 'BANK_SELECT';
   await setOnboardingSession(phone, session);
 
-  // Tell school the good news
   await wa.text(
     phone,
     `🎉 *Free Trial Applied!*\n` +
@@ -1101,8 +1043,6 @@ async function handleTrialOnboarding(
   );
 
   await delay(1000);
-
-  // Continue to bank setup
   await startBankSetup(phone, session, wa);
 }
 
@@ -1127,6 +1067,7 @@ async function startBankSetup(
   await showBankList(phone, session, wa);
 }
 
+// ✅ Fixed: Max 9 rows
 async function showBankList(
   phone:   string,
   session: OnboardingState,
@@ -1135,9 +1076,9 @@ async function showBankList(
   await wa.list(
     phone,
     `🏦 Select Your Bank`,
-    `Choose your school's bank where fee\n` +
-    `payments will be deposited:`,
-    `Parents pay → Paystack → Your account`,
+    `Choose your school's bank where\n` +
+    `fee payments will be deposited:`,
+    `Tap your bank to select`,
     `🏦 Select Bank`,
     [
       {
@@ -1183,8 +1124,33 @@ async function showBankList(
             title:       'Fidelity Bank',
             description: 'Code: 070',
           },
+          {
+            id:          'MORE_BANKS',
+            title:       '➡️ See More Banks',
+            description: 'Kuda, OPay, PalmPay & more',
+          },
         ],
       },
+    ]
+  );
+
+  session.step = 'BANK_SELECT';
+  await setOnboardingSession(phone, session);
+}
+
+// ✅ New: Digital banks page (7 rows)
+async function showMoreBanks(
+  phone:   string,
+  session: OnboardingState,
+  wa:      WhatsApp
+): Promise<void> {
+  await wa.list(
+    phone,
+    `🏦 More Banks`,
+    `Digital banks and others:`,
+    `Tap your bank to select`,
+    `🏦 Select Bank`,
+    [
       {
         title: 'Digital Banks & Others',
         rows: [
@@ -1218,21 +1184,34 @@ async function showBankList(
             title:       'Wema Bank',
             description: 'Code: 035',
           },
+          {
+            id:          'BACK_TO_BANKS',
+            title:       '↩️ Back to Main Banks',
+            description: 'See commercial banks',
+          },
         ],
       },
     ]
   );
-
-  session.step = 'BANK_SELECT';
-  await setOnboardingSession(phone, session);
 }
 
+// ✅ Updated: Handles more_banks and back_to_banks
 async function handleBankSelect(
   phone:   string,
   session: OnboardingState,
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
+  if (input === 'more_banks') {
+    await showMoreBanks(phone, session, wa);
+    return;
+  }
+
+  if (input === 'back_to_banks') {
+    await showBankList(phone, session, wa);
+    return;
+  }
+
   if (!input.startsWith('bank_')) {
     await showBankList(phone, session, wa);
     return;
@@ -1308,7 +1287,7 @@ async function handleBankAccountNumber(
       `Please check and try again.`,
       [
         { id: `BANK_${bankCode}`, title: '🔄 Try Again' },
-        { id: 'BANK_CHANGE',      title: '🏦 Change Bank' },
+        { id: 'BACK_TO_BANKS',   title: '🏦 Change Bank' },
       ]
     );
     return;
@@ -1346,7 +1325,8 @@ async function handleBankConfirm(
 ): Promise<void> {
   if (
     input === 'bank_confirm_no' ||
-    input === 'bank_change'
+    input === 'bank_change'     ||
+    input === 'back_to_banks'
   ) {
     await showBankList(phone, session, wa);
     return;
@@ -1409,7 +1389,6 @@ async function handleBankConfirm(
   }
 }
 
-// ─── Step 9: Class setup ──────────────────────────────────
 async function showClassSetup(
   phone:   string,
   session: OnboardingState,
@@ -1542,10 +1521,7 @@ async function handleClassAddName(
   const name = rawText.trim();
 
   if (name.length < 2) {
-    await wa.text(
-      phone,
-      `Please enter a valid class name:`
-    );
+    await wa.text(phone, `Please enter a valid class name:`);
     return;
   }
 
@@ -1729,8 +1705,7 @@ async function applyClassTemplate(
     phone,
     `🎉 *${toAdd.length} Classes Added!*\n\n` +
     toAdd.map((c) => `✅ ${c.name}`).join('\n') +
-    `\n\nEach class has Arms A and B.\n` +
-    `You can add more arms later.`,
+    `\n\nEach class has Arms A and B.`,
     [
       { id: 'ADD_CLASS_MANUAL', title: '➕ Add More' },
       { id: 'CLASSES_DONE',     title: '✅ Done' },
@@ -1741,7 +1716,6 @@ async function applyClassTemplate(
   await setOnboardingSession(phone, session);
 }
 
-// ─── Step 10: Staff setup ─────────────────────────────────
 async function showStaffSetup(
   phone:   string,
   session: OnboardingState,
@@ -1867,10 +1841,7 @@ async function handleStaffAddName(
   const name = rawText.trim();
 
   if (name.length < 3) {
-    await wa.text(
-      phone,
-      `Please enter a valid full name:`
-    );
+    await wa.text(phone, `Please enter a valid full name:`);
     return;
   }
 
@@ -2086,7 +2057,11 @@ async function handleStaffAddRole(
   }
 }
 
-// ─── Step 11: Complete ────────────────────────────────────
+// ============================================================
+// ✅ STEP 11: COMPLETE
+// Fixed: Clears demo session, sends activation link
+// ============================================================
+
 async function showComplete(
   phone:   string,
   session: OnboardingState,
@@ -2102,23 +2077,31 @@ async function showComplete(
       .eq('employment_status', 'active'),
   ]);
 
+  // ✅ Generate WhatsApp activation link
+  const activationLink =
+    await generateActivationLink(session.schoolId);
+
+  // Send completion + activation link message
   await wa.text(
     phone,
     `🎉 *Setup Complete!*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
-    `🏫 *${session.schoolName}* is now\n` +
-    `LIVE on SchoolBot! 🚀\n\n` +
+    `🏫 *${session.schoolName}* is\n` +
+    `registered on SchoolBot! 🚀\n\n` +
     `📊 *Your Setup:*\n` +
     `📚 Classes: *${classCount.count ?? 0}*\n` +
     `👨‍🏫 Staff:   *${staffCount.count ?? 0}*\n\n` +
-    `*What to do next:*\n` +
-    `1️⃣ Add students — send a CSV file here\n` +
-    `2️⃣ Add parent WhatsApp numbers\n` +
-    `3️⃣ Start marking attendance\n` +
-    `4️⃣ Collect fees online!\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `Type *menu* to access your\n` +
-    `admin dashboard! 🚀`
+    `🔌 *Final Step — Connect WhatsApp*\n\n` +
+    `Connect your school's WhatsApp\n` +
+    `Business number to go LIVE:\n\n` +
+    `👇 *Tap this link:*\n` +
+    `${activationLink}\n\n` +
+    `⏰ Valid for *7 days*\n` +
+    `Takes less than 2 minutes! ✅\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `After connecting, type *menu*\n` +
+    `to access your admin panel! 🚀`
   );
 
   // Notify super admin
@@ -2138,14 +2121,15 @@ async function showComplete(
         `📱 Admin: ${phone}\n` +
         `🔗 Source: ${session.source} bot\n` +
         `━━━━━━━━━━━━━━━━\n` +
-        `⏰ ${new Date().toLocaleString('en-NG')}`
+        `⏰ ${new Date().toLocaleString('en-NG')}\n\n` +
+        `✅ Activation link sent to school`
       );
     } catch {
       // Non-critical
     }
   }
 
-  // Create bot session for admin
+  // Create admin bot session
   await db.from('bot_sessions').upsert(
     {
       phone:               formatPhone(phone),
@@ -2162,8 +2146,67 @@ async function showComplete(
     { onConflict: 'phone' }
   );
 
-  // Clear onboarding session
+  // ✅ Clear marketing demo session
+  // so "menu" goes to admin panel not demo bot
+  try {
+    await db
+      .from('demo_sessions')
+      .delete()
+      .eq('phone', formatPhone(phone));
+    console.log(
+      `[Onboarding] ✅ Demo session cleared for ${phone}`
+    );
+  } catch {
+    // Non-critical
+  }
+
+  // ✅ Clear onboarding session
   await clearOnboardingSession(phone);
+}
+
+// ─── Generate WhatsApp activation link ────────────────────
+async function generateActivationLink(
+  schoolId: string | null
+): Promise<string> {
+  const appUrl =
+    Deno.env.get('APP_URL') ?? '';
+
+  if (!schoolId) return `${appUrl}/activate`;
+
+  try {
+    // Generate unique 32-char token
+    const token = Array.from(
+      { length: 32 },
+      () =>
+        'abcdefghijklmnopqrstuvwxyz0123456789'[
+          Math.floor(Math.random() * 36)
+        ]
+    ).join('');
+
+    await db
+      .from('school_activation_tokens')
+      .insert({
+        school_id:  schoolId,
+        token,
+        expires_at: new Date(
+          Date.now() + 7 * 24 * 60 * 60 * 1000
+        ).toISOString(),
+        used:       false,
+        created_at: new Date().toISOString(),
+      });
+
+    console.log(
+      `[Onboarding] ✅ Activation link created: ` +
+      `${appUrl}/activate/${token}`
+    );
+
+    return `${appUrl}/activate/${token}`;
+  } catch (err) {
+    console.error(
+      '[Onboarding] generateActivationLink error:', err
+    );
+    return `${appUrl}/activate`;
+  }
 }
 
 // ============================================================
