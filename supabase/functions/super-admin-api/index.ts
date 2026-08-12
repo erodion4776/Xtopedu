@@ -97,8 +97,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
         return json({ error: 'account and bank are required' }, 400);
       }
       const resolved = await paystack.resolveAccount(account, bank);
-      if (!resolved) {
-        return json({ message: 'Could not verify account' }, 200);
+      if (!resolved.ok) {
+        // Log it too so `supabase functions logs super-admin-api` shows the cause
+        console.error('[verify-account] Paystack rejected:', resolved.message);
+        return json({ message: resolved.message }, 200);
       }
       return json({ account_name: resolved.accountName });
     }
