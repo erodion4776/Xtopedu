@@ -1,7 +1,7 @@
 // ============================================================
 // SCHOOLBOT - ADMIN MAIN MENU
 // supabase/functions/_shared/bot/admin/admin.menu.ts
-// ✅ Fixed: Max 8 rows per menu (WhatsApp limit is 10)
+// ✅ Switch School button added for multi-school owners
 // ============================================================
 
 import { WhatsApp }       from '../../whatsapp.ts';
@@ -39,7 +39,7 @@ export async function showAdminMenu(
   );
 
   if (isAdmin) {
-    // ✅ 8 rows — within WhatsApp 10 row limit
+    // ✅ 8 rows max
     await wa.list(
       phone,
       `🏫 ${schoolName} — Admin`,
@@ -107,7 +107,7 @@ export async function showAdminMenu(
       ]
     );
   } else {
-    // ✅ Teacher — 4 rows only
+    // Teacher — 4 rows
     await wa.list(
       phone,
       `🏫 ${schoolName}`,
@@ -154,13 +154,67 @@ export async function showAdminMenu(
   await sessions.setState(phone, 'ADMIN_MAIN_MENU');
 }
 
-// ─── More features menu (admin page 2) ────────────────────
-// ✅ 6 rows — within 10 limit
+// ─── More features menu ────────────────────────────────────
+// ✅ Shows Switch School if admin owns multiple schools
 export async function showAdminMoreMenu(
   phone:   string,
   session: BotSession,
   wa:      WhatsApp
 ): Promise<void> {
+  // Check how many schools this phone owns
+  const schoolCount =
+    await getSchoolCountForPhone(
+      session.school_id
+    );
+
+  const rows: Array<{
+    id:          string;
+    title:       string;
+    description: string;
+  }> = [];
+
+  // ✅ Add Switch School if multiple schools
+  if (schoolCount > 1) {
+    rows.push({
+      id:          'SWITCH_SCHOOL',
+      title:       '🔄 Switch School',
+      description: `You have ${schoolCount} schools`,
+    });
+  }
+
+  rows.push(
+    {
+      id:          'ADMIN_UPLOAD',
+      title:       '📤 Upload Students',
+      description: 'Bulk import via CSV',
+    },
+    {
+      id:          'ADMIN_UPLOAD_SCORES',
+      title:       '🎓 Upload Scores',
+      description: 'Bulk import exam scores',
+    },
+    {
+      id:          'ADMIN_REPORTS',
+      title:       '📊 Term Reports',
+      description: 'Attendance & fee reports',
+    },
+    {
+      id:          'ADMIN_TODAY_REPORT',
+      title:       '📈 Today\'s Report',
+      description: 'Quick daily overview',
+    },
+    {
+      id:          'ADMIN_HELP',
+      title:       '❓ Help',
+      description: 'How to use admin features',
+    },
+    {
+      id:          'MAIN_MENU',
+      title:       '↩️ Back to Main Menu',
+      description: 'Return to admin menu',
+    }
+  );
+
   await wa.list(
     phone,
     `⚙️ More Features`,
@@ -169,44 +223,9 @@ export async function showAdminMoreMenu(
     `📋 Open Menu`,
     [
       {
-        title: '📊 Data & Reports',
-        rows: [
-          {
-            id:          'ADMIN_UPLOAD',
-            title:       '📤 Upload Students',
-            description: 'Bulk import via CSV',
-          },
-          {
-            id:          'ADMIN_UPLOAD_SCORES',
-            title:       '🎓 Upload Scores',
-            description: 'Bulk import exam scores',
-          },
-          {
-            id:          'ADMIN_REPORTS',
-            title:       '📊 Term Reports',
-            description: 'Attendance & fee reports',
-          },
-        ],
-      },
-      {
-        title: '📈 Quick Actions',
-        rows: [
-          {
-            id:          'ADMIN_TODAY_REPORT',
-            title:       '📈 Today\'s Report',
-            description: 'Quick daily overview',
-          },
-          {
-            id:          'ADMIN_HELP',
-            title:       '❓ Help',
-            description: 'How to use admin features',
-          },
-          {
-            id:          'MAIN_MENU',
-            title:       '↩️ Back to Main Menu',
-            description: 'Return to admin menu',
-          },
-        ],
+        title: 'Features',
+        // ✅ WhatsApp max 10 rows — already enforced
+        rows:  rows.slice(0, 10),
       },
     ]
   );
@@ -241,11 +260,10 @@ export async function showAdminHelp(
     `• Send to all parents\n` +
     `• Send to specific class\n` +
     `• Send to fee defaulters\n\n` +
-    `📌 *More Features:*\n` +
-    `• Tap ➡️ More Features in main menu\n` +
-    `• Upload students (CSV)\n` +
-    `• Upload exam scores\n` +
-    `• View term reports`
+    `📌 *Multiple Schools:*\n` +
+    `• Tap ➡️ More Features\n` +
+    `• Tap 🔄 Switch School\n` +
+    `• Select which school to manage`
   );
 }
 
@@ -386,6 +404,35 @@ async function getSchoolName(
     .eq('id', schoolId)
     .single();
   return data?.name ?? 'School';
+}
+
+// ✅ Count schools owned by the same phone as this school
+async function getSchoolCountForPhone(
+  schoolId: string
+): Promise<number> {
+  try {
+    const { getSupabase } = await import(
+      '../../supabase.ts'
+    );
+    const db = getSupabase();
+
+    const { data: onboarding } = await db
+      .from('school_onboarding')
+      .select('admin_phone')
+      .eq('school_id', schoolId)
+      .maybeSingle();
+
+    if (!onboarding?.admin_phone) return 1;
+
+    const { data: schools } = await db
+      .from('school_onboarding')
+      .select('school_id')
+      .eq('admin_phone', onboarding.admin_phone);
+
+    return schools?.length ?? 1;
+  } catch {
+    return 1;
+  }
 }
 
 function formatRole(role: string): string {
