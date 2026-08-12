@@ -1,8 +1,6 @@
 // ============================================================
 // SCHOOLBOT - MARKETING SESSION SERVICE
 // _shared/bot/marketing/marketing.session.ts
-// ✅ Fixed: hasActiveMarketingSession returns false
-//    for REGISTERING state so admin panel works after setup
 // ============================================================
 
 import { getSupabase } from '../../supabase.ts';
@@ -24,7 +22,6 @@ export type DemoSession = {
   registered:   boolean;
 };
 
-// ─── Get session from DB ───────────────────────────────────
 export async function getMarketingSession(
   phone: string
 ): Promise<DemoSession | null> {
@@ -58,7 +55,6 @@ export async function getMarketingSession(
   };
 }
 
-// ─── Save session to DB ────────────────────────────────────
 export async function saveMarketingSession(
   session: DemoSession
 ): Promise<void> {
@@ -83,7 +79,6 @@ export async function saveMarketingSession(
     );
 }
 
-// ─── Create new session ────────────────────────────────────
 export async function createMarketingSession(
   phone: string
 ): Promise<DemoSession> {
@@ -104,10 +99,8 @@ export async function createMarketingSession(
   return session;
 }
 
-// ─── Check if active marketing session exists ──────────────
-// ✅ Returns false for states that indicate the user
-// has moved past the marketing demo into onboarding
-// or has completed setup and is now an admin.
+// ✅ Returns false for states where user should NOT
+// be routed to marketing bot
 export async function hasActiveMarketingSession(
   phone: string
 ): Promise<boolean> {
@@ -124,22 +117,22 @@ export async function hasActiveMarketingSession(
 
   if (!data) return false;
 
-  // ✅ Do NOT route to marketing bot for these states:
+  // ✅ These states should NOT route to marketing:
   //
-  // WELCOME — brand new user, let reset check DB first
-  //           so registered parents/staff are found
+  // WELCOME — new visitor, check DB identity first
   //
-  // REGISTERING — user clicked "Register Now" and is
-  //               going through onboarding engine
-  //               (engine.ts handles their messages)
+  // REGISTERING — in onboarding flow
   //
-  // NOT_INTERESTED — user said no, session inactive
+  // TRIAL_ACTIVE — activated trial, registering
   //
-  // After showComplete() clears demo_sessions,
+  // NOT_INTERESTED — ended conversation
+  //
+  // Note: After showComplete() deletes demo_sessions,
   // this function returns false automatically ✅
   if (
     data.state === 'WELCOME'       ||
     data.state === 'REGISTERING'   ||
+    data.state === 'TRIAL_ACTIVE'  ||
     data.state === 'NOT_INTERESTED'
   ) {
     return false;
@@ -148,7 +141,6 @@ export async function hasActiveMarketingSession(
   return true;
 }
 
-// ─── Log demo interaction ──────────────────────────────────
 export async function logDemoInteraction(
   phone:   string,
   feature: string
