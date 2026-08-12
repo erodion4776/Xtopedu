@@ -13,7 +13,6 @@ import type {
 
 const db = getSupabase();
 
-// Your platform WhatsApp phone_number_id
 const PLATFORM_PHONE_NUMBER_ID =
   Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
 
@@ -39,7 +38,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const rawBody = await req.text();
 
     processWebhook(rawBody).catch((err) => {
-      console.error('[Webhook] Error:', err);
+      console.error('[Webhook] Processing error:', err);
     });
 
     return new Response('OK', { status: 200 });
@@ -48,7 +47,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   return new Response('Method Not Allowed', { status: 405 });
 });
 
-async function processWebhook(rawBody: string): Promise<void> {
+async function processWebhook(
+  rawBody: string
+): Promise<void> {
   let body: WebhookBody;
 
   try {
@@ -70,7 +71,8 @@ async function processWebhook(rawBody: string): Promise<void> {
   if (value.statuses?.length)  return;
   if (!value.messages?.length) return;
 
-  const message = value.messages[0] as IncomingMessage;
+  const message =
+    value.messages[0] as IncomingMessage;
 
   const incomingPhoneNumberId =
     value.metadata?.phone_number_id ?? '';
@@ -108,7 +110,9 @@ async function processWebhook(rawBody: string): Promise<void> {
     `Type: ${message.type}`
   );
 
-  await handleMessage(message, waAccount, isPlatformNumber);
+  await handleMessage(
+    message, waAccount, isPlatformNumber
+  );
 }
 
 async function getSchoolWaAccount(
