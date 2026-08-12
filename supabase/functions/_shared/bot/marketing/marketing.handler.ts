@@ -1,14 +1,11 @@
 // ============================================================
 // SCHOOLBOT - MARKETING BOT HANDLER
 // _shared/bot/marketing/marketing.handler.ts
-//
-// Handles ALL unknown users on YOUR platform number.
-// Uses DB-backed sessions so state persists across
-// Edge Function instances.
 // ============================================================
 
 import { WhatsApp }    from '../../whatsapp.ts';
 import { AIService }   from '../../ai.service.ts';
+import { getSupabase } from '../../supabase.ts';
 import { formatPhone } from '../../utils.ts';
 import {
   getOnboardingSession,
@@ -33,7 +30,6 @@ import {
   type DemoSession,
 } from './marketing.session.ts';
 
-// Re-export so handler.ts can import from here
 export {
   hasActiveMarketingSession,
 } from './marketing.session.ts';
@@ -41,11 +37,16 @@ export {
 import type { IncomingMessage } from '../../types.ts';
 
 const ai = new AIService();
+const db = getSupabase();
 
 // ─── Reset keywords ───────────────────────────────────────
 const RESET_KEYWORDS = new Set([
   'hi', 'hello', 'hey', 'start', 'menu',
 ]);
+
+// ─── Trial code pattern ───────────────────────────────────
+const TRIAL_CODE_PATTERN =
+  /^TRIAL-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
 
 // ─── Currency formatter ───────────────────────────────────
 const fmt = (n: number) =>
@@ -111,13 +112,21 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ✅ Check onboarding session FIRST
-  // Before anything else so registration flow
-  // is never interrupted by the marketing bot
+  // ✅ Trial code check
+  if (TRIAL_CODE_PATTERN.test(rawText.trim())) {
+    await handleTrialCode(
+      phone,
+      rawText.trim().toUpperCase(),
+      wa
+    );
+    return;
+  }
+
+  // ── Check onboarding session FIRST ─────────────────────
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
     console.log(
-      `[Marketing] Onboarding session found | ` +
+      `[Marketing] Onboarding session | ` +
       `step: ${obSession.step}`
     );
     const handled = await handleOnboardingInput(
@@ -131,8 +140,7 @@ export async function handleMarketingMessage(
     formatPhone(phone)
   );
 
-  // ✅ Reset, new user, or no session → show welcome
-  // session is guaranteed non-null after this block
+  // Reset or new user — show welcome
   if (!input || RESET_KEYWORDS.has(input) || !session) {
     session = await createMarketingSession(
       formatPhone(phone)
@@ -157,9 +165,165 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ✅ session is guaranteed non-null here
+  // ── Text input ──────────────────────────────────────────
   await handleTextInput(
     phone, session, rawText, input, wa
+  );
+}
+
+// ============================================================
+// ✅ TRIAL CODE HANDLER
+// ============================================================
+
+async function handleTrialCode(
+  phone: string,
+  code:  string,
+  wa:    WhatsApp
+): Promise<void> {
+  console.log(
+    `[Marketing] Trial code attempt: ${code} from ${phone}`
+  );
+
+  // Look up the code
+  const { data, error } = await db
+    .from('trial_codes')
+    .select('*')
+    .eq('code', code)
+    .maybeSingle();
+
+  // Code not found
+  if (error || !data) {
+    await wa.text(
+      phone,
+      `❌ *Invalid Code*\n\n` +
+      `The code *${code}* is not valid.\n\n` +
+      `Please check the code and try again.\n\n` +
+      `Type *hi* to see our demo or\n` +
+      `contact us for help.`
+    );
+    return;
+  }
+
+  // Already used
+  if (data.used) {
+    await wa.text(
+      phone,
+      `❌ *Code Already Used*\n\n` +
+      `This trial code has already been used.\n\n` +
+      `Each code is for one school only.\n\n` +
+      `Type *hi* to see our demo or\n` +
+      `contact us for a new code:\n` +
+      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
+    );
+    return;
+  }
+
+  // Expired
+  if (new Date(data.expires_at) < new Date()) {
+    await wa.text(
+      phone,
+      `❌ *Code Expired*\n\n` +
+      `This trial code has expired.\n\n` +
+      `Please contact us for a new code:\n` +
+      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*\n\n` +
+      `Type *hi* to see our demo.`
+    );
+    return;
+  }
+
+  // ✅ Valid! Mark as used immediately
+  await db
+    .from('trial_codes')
+    .update({
+      used:          true,
+      used_at:       new Date().toISOString(),
+      used_by_phone: formatPhone(phone),
+    })
+    .eq('id', data.id);
+
+  // Save trial session to DB
+  await db
+    .from('trial_sessions')
+    .upsert(
+      {
+        phone:      formatPhone(phone),
+        code,
+        active:     true,
+        expires_at: new Date(
+          Date.now() + 24 * 60 * 60 * 1000
+        ).toISOString(),
+        created_at: new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
+
+  // Update demo session state
+  let session = await getMarketingSession(
+    formatPhone(phone)
+  );
+  if (!session) {
+    session = await createMarketingSession(
+      formatPhone(phone)
+    );
+  }
+  session.state = 'TRIAL_ACTIVE';
+  await saveMarketingSession(session);
+
+  // Notify super admin
+  const superPhone =
+    Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+  if (superPhone) {
+    const notifyWa = new WhatsApp({
+      phone_number_id:
+        Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+      access_token:
+        Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+      status: 'active',
+    });
+    await notifyWa.text(
+      superPhone,
+      `🎁 *Trial Code Used!*\n\n` +
+      `Code: *${code}*\n` +
+      `School: ${data.school_name ?? 'Unknown'}\n` +
+      `Phone: ${formatPhone(phone)}\n` +
+      `⏰ ${new Date().toLocaleString('en-NG')}`
+    ).catch(() => {});
+  }
+
+  // Send success message to school
+  await wa.text(
+    phone,
+    `🎉 *Free Trial Activated!*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `✅ Your trial code is valid!\n\n` +
+    `*What you get FREE:*\n` +
+    `🆓 Setup fee — *WAIVED*\n` +
+    `✅ WhatsApp bot for parents\n` +
+    `✅ Attendance management\n` +
+    `✅ Fee collection system\n` +
+    `✅ Student pickup security\n` +
+    `✅ School reports & analytics\n` +
+    `✅ Lifetime access\n\n` +
+    `⏰ *Valid for 24 hours only!*\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `Ready to register your school? 🚀`
+  );
+
+  await delay(1000);
+
+  await wa.buttons(
+    phone,
+    `Register now and get started for FREE!`,
+    [
+      {
+        id:    'register_now',
+        title: '🚀 Register Now FREE',
+      },
+      {
+        id:    'demo_attendance',
+        title: '👀 See Demo First',
+      },
+    ]
   );
 }
 
@@ -174,61 +338,47 @@ async function handleMenuSelection(
   wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
-
     case 'demo_attendance':
       await showAttendanceDemo(phone, session, wa);
       break;
-
     case 'demo_fees':
       await showFeesDemo(phone, session, wa);
       break;
-
     case 'demo_pickup':
       await showPickupDemo(phone, session, wa);
       break;
-
     case 'demo_reports':
       await showReportsDemo(phone, session, wa);
       break;
-
     case 'att_parent_view':
       await showParentAttView(phone, session, wa);
       break;
-
     case 'att_admin_view':
       await showAdminAttView(phone, session, wa);
       break;
-
     case 'fees_parent_view':
       await showParentFeesView(phone, session, wa);
       break;
-
     case 'fees_payment_demo':
       await showPaymentDemo(phone, session, wa);
       break;
-
     case 'see_pricing':
       await showPricing(phone, session, wa);
       break;
-
     case 'register_now':
     case 'start_onboarding':
     case 'start_trial':
       await startRegistration(phone, session, wa);
       break;
-
     case 'talk_to_us':
       await showContactOptions(phone, session, wa);
       break;
-
     case 'main_menu':
     case 'back_to_menu':
       await showDemoMainMenu(phone, session, wa);
       break;
-
     default:
       if (input.startsWith('tier_')) {
-        // Pricing tier tap → go to registration
         await startRegistration(phone, session, wa);
       } else {
         await handleAI(phone, session, input, wa);
@@ -247,11 +397,11 @@ async function handleTextInput(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
-  // ✅ Guard: user is in registration flow
-  // but somehow fell through — redirect to menu
+  // Guard — user is in registration flow
   if (
     session.state === 'REGISTERING' ||
-    session.state === 'WELCOME'
+    session.state === 'WELCOME'     ||
+    session.state === 'TRIAL_ACTIVE'
   ) {
     await showDemoMainMenu(phone, session, wa);
     return;
@@ -272,7 +422,10 @@ async function handleTextInput(
       await delay(800);
       await showDemoMainMenu(phone, session, wa);
     } else {
-      await wa.text(phone, `Please enter your full name:`);
+      await wa.text(
+        phone,
+        `Please enter your full name:`
+      );
     }
     return;
   }
@@ -301,7 +454,6 @@ async function handleAI(
   const { intent, entities } =
     await ai.detectIntent(input);
 
-  // ✅ Safe access with optional chaining
   if (entities?.school_name && !session.schoolName) {
     session.schoolName = entities.school_name;
   }
@@ -316,7 +468,10 @@ async function handleAI(
     intent,
   });
 
-  history.push({ role: 'assistant', content: aiResponse });
+  history.push({
+    role:    'assistant',
+    content: aiResponse,
+  });
   session.aiHistory = history.slice(-20);
   await saveMarketingSession(session);
 
@@ -832,9 +987,9 @@ async function showReportsDemo(
     `Outstanding: *${fmt(r.feeCollection.outstanding)}*\n` +
     `Rate:        *${r.feeCollection.collectionRate}*\n\n` +
     `📱 *WhatsApp Activity:*\n` +
-    `Messages Sent:  *${r.whatsappStats.messagesSent.toLocaleString()}*\n` +
-    `Delivery Rate:  *${r.whatsappStats.deliveryRate}*\n` +
-    `Parents Active: *${r.whatsappStats.parentsEngaged}*\n` +
+    `Messages:  *${r.whatsappStats.messagesSent.toLocaleString()}*\n` +
+    `Delivery:  *${r.whatsappStats.deliveryRate}*\n` +
+    `Parents:   *${r.whatsappStats.parentsEngaged}*\n` +
     `━━━━━━━━━━━━━━━━`
   );
 
@@ -862,7 +1017,9 @@ async function showPricing(
 ): Promise<void> {
   session.state = 'DEMO_PRICING';
   await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'pricing');
+  await logDemoInteraction(
+    formatPhone(phone), 'pricing'
+  );
 
   await wa.text(
     phone,
@@ -915,8 +1072,6 @@ async function showPricing(
 
 // ============================================================
 // REGISTRATION
-// ✅ KEY FUNCTION — await ensures session is in DB
-// before user's next message arrives
 // ============================================================
 
 async function startRegistration(
@@ -938,8 +1093,7 @@ async function startRegistration(
     schoolType:        session.schoolType   ?? undefined,
   };
 
-  // ✅ await so session is saved to DB BEFORE
-  // the user sends their next message
+  // ✅ await so session is in DB before user replies
   const obSession = await startOnboardingSession(
     phone, 'marketing', prefill
   );
@@ -950,7 +1104,6 @@ async function startRegistration(
   );
 
   if (session.contactName && session.schoolName) {
-    // Already have enough info → jump to fee
     await wa.text(
       phone,
       `🚀 *Let's register your school!*\n\n` +
@@ -962,15 +1115,15 @@ async function startRegistration(
     await delay(1000);
     await showSetupFeeInfo(phone, obSession, wa);
   } else if (session.contactName) {
-    // Have name, need school name
     await wa.text(
       phone,
       `🚀 *Register Your School!*\n\n` +
-      `Hi *${session.contactName.split(' ')[0]}!* 👋\n\n` +
+      `Hi *${
+        session.contactName.split(' ')[0]
+      }!* 👋\n\n` +
       `What is the name of your school?`
     );
   } else {
-    // Need name first
     await wa.text(
       phone,
       `🚀 *Register Your School!*\n\n` +
