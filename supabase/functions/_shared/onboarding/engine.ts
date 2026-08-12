@@ -2,8 +2,8 @@
 // SCHOOLBOT - ONBOARDING ENGINE
 // supabase/functions/_shared/onboarding/engine.ts
 //
-// DB-backed sessions — survives Edge Function restarts
-// and multiple instances.
+// DB-backed sessions — survives Edge Function restarts.
+// Includes trial code support — waives setup fee.
 // ============================================================
 
 import { getSupabase }    from '../supabase.ts';
@@ -53,17 +53,17 @@ export async function getOnboardingSession(
 
   return {
     phone:             data.phone,
-    step:              data.step as OnboardingStep,
-    source:            data.source as 'marketing' | 'main',
-    contactName:       data.contact_name        ?? null,
-    schoolName:        data.school_name         ?? null,
-    studentCount:      data.student_count       ?? null,
+    step:              data.step              as OnboardingStep,
+    source:            data.source            as 'marketing' | 'main',
+    contactName:       data.contact_name      ?? null,
+    schoolName:        data.school_name       ?? null,
+    studentCount:      data.student_count     ?? null,
     studentCountRange: data.student_count_range ?? null,
-    schoolType:        data.school_type         ?? null,
-    location:          data.location            ?? null,
-    email:             data.email               ?? null,
-    schoolId:          data.school_id           ?? null,
-    setupFeePaid:      data.setup_fee_paid      ?? false,
+    schoolType:        data.school_type       ?? null,
+    location:          data.location          ?? null,
+    email:             data.email             ?? null,
+    schoolId:          data.school_id         ?? null,
+    setupFeePaid:      data.setup_fee_paid    ?? false,
     tempData: (
       data.temp_data as Record<string, unknown>
     ) ?? {},
@@ -103,7 +103,8 @@ export async function setOnboardingSession(
 
   if (error) {
     console.error(
-      '[Onboarding] setSession error:', error.message
+      '[Onboarding] setSession error:',
+      error.message
     );
   }
 }
@@ -118,10 +119,10 @@ export async function clearOnboardingSession(
     .eq('phone', formatted);
 }
 
-// ✅ Now async — awaits DB save before returning
+// ✅ Async — awaits DB save before returning
 export async function startOnboardingSession(
-  phone:   string,
-  source:  'marketing' | 'main',
+  phone:    string,
+  source:   'marketing' | 'main',
   prefill?: Partial<OnboardingState>
 ): Promise<OnboardingState> {
   let startStep: OnboardingStep = 'COLLECT_NAME';
@@ -149,8 +150,6 @@ export async function startOnboardingSession(
     lastActivity:      Date.now(),
   };
 
-  // ✅ Await DB save so session exists before
-  // user's next message arrives
   await setOnboardingSession(phone, session);
 
   console.log(
@@ -175,7 +174,6 @@ export async function handleOnboardingInput(
   let session = await getOnboardingSession(phone);
   if (!session) return false;
 
-  // Update activity
   session.lastActivity = Date.now();
   await setOnboardingSession(phone, session);
 
@@ -560,17 +558,20 @@ async function handleCollectEmail(
 }
 
 // ─── Step 7: Show setup fee ───────────────────────────────
+// ✅ Updated — checks for active trial code first
 export async function showSetupFeeInfo(
   phone:   string,
   session: OnboardingState,
   wa:      WhatsApp
 ): Promise<void> {
+  // Create school record if not done yet
   if (!session.schoolId) {
     const schoolId   = await createSchoolRecord(session);
     session.schoolId = schoolId;
     await setOnboardingSession(phone, session);
   }
 
+  // Check if fee already paid
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -579,6 +580,18 @@ export async function showSetupFeeInfo(
     return;
   }
 
+  // ✅ Check if school has active trial code
+  // If yes — skip payment completely!
+  const hasTrial = await checkActiveTrial(
+    formatPhone(phone)
+  );
+
+  if (hasTrial) {
+    await handleTrialOnboarding(phone, session, wa);
+    return;
+  }
+
+  // Normal paid flow
   const feeInfo = await calculateSetupFee(
     session.studentCount ?? 100
   );
@@ -652,6 +665,7 @@ async function handleSetupFeeStep(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
+  // Check if payment was completed
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -670,7 +684,9 @@ async function handleSetupFeeStep(
     input === 'pay_setup_fee'     ||
     input === 'retry_payment'
   ) {
-    await generateAndSendSetupFeeLink(phone, session, wa);
+    await generateAndSendSetupFeeLink(
+      phone, session, wa
+    );
     return;
   }
 
@@ -686,7 +702,7 @@ async function handleSetupFeeStep(
       `*Q: Can I pay in installments?*\n` +
       `A: Contact us to discuss.\n\n` +
       `📞 *Talk to us:*\n` +
-      `${Deno.env.get('SUPER_ADMIN_PHONE') ?? 'Contact support'}`
+      `${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}`
     );
     await delay(1000);
     await wa.buttons(
@@ -715,7 +731,8 @@ async function handleSetupFeeStep(
     input === 'check_payment' ||
     input === 'check_setup_payment'
   ) {
-    const paid = await checkSetupFeePaid(session.schoolId);
+    const paid =
+      await checkSetupFeePaid(session.schoolId);
     if (paid) {
       session.setupFeePaid = true;
       session.step         = 'BANK_SELECT';
@@ -806,6 +823,119 @@ async function generateAndSendSetupFeeLink(
       { id: 'RETRY_PAYMENT', title: '🔄 New Link' },
     ]
   );
+}
+
+// ============================================================
+// ✅ TRIAL CODE HELPERS
+// ============================================================
+
+// Check if phone has an active trial session
+async function checkActiveTrial(
+  phone: string
+): Promise<boolean> {
+  const { data } = await db
+    .from('trial_sessions')
+    .select('id, expires_at, active')
+    .eq('phone', phone)
+    .eq('active', true)
+    .maybeSingle();
+
+  if (!data) return false;
+
+  // Check if expired
+  if (new Date(data.expires_at) < new Date()) {
+    // Mark as inactive
+    await db
+      .from('trial_sessions')
+      .update({ active: false })
+      .eq('phone', phone);
+    return false;
+  }
+
+  return true;
+}
+
+// Handle trial onboarding — skip setup fee payment
+async function handleTrialOnboarding(
+  phone:   string,
+  session: OnboardingState,
+  wa:      WhatsApp
+): Promise<void> {
+  console.log(
+    `[Onboarding] ✅ Trial active for ${phone} — ` +
+    `skipping setup fee`
+  );
+
+  // Mark school setup fee as paid (FREE trial)
+  await db
+    .from('schools')
+    .update({
+      setup_fee_paid:    true,
+      setup_fee_amount:  0,
+      setup_fee_paid_at: new Date().toISOString(),
+      onboarding_status: 'setup_fee_paid',
+      is_active:         true,
+      updated_at:        new Date().toISOString(),
+    })
+    .eq('id', session.schoolId);
+
+  // Update onboarding record
+  await db
+    .from('school_onboarding')
+    .update({
+      step_setup_fee_paid: true,
+      current_step:        'bank',
+      updated_at:          new Date().toISOString(),
+    })
+    .eq('school_id', session.schoolId);
+
+  // Deactivate trial session
+  await db
+    .from('trial_sessions')
+    .update({ active: false })
+    .eq('phone', phone);
+
+  // Update onboarding session
+  session.setupFeePaid = true;
+  session.step         = 'BANK_SELECT';
+  await setOnboardingSession(phone, session);
+
+  // Notify super admin
+  const superPhone =
+    Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+  if (superPhone) {
+    try {
+      const notifyWa = new WhatsApp();
+      await notifyWa.text(
+        superPhone,
+        `🎁 *Trial Used for Onboarding!*\n\n` +
+        `🏫 School: *${session.schoolName}*\n` +
+        `📍 Location: ${session.location}\n` +
+        `👥 Students: ${session.studentCountRange}\n` +
+        `📱 Phone: ${phone}\n` +
+        `⏰ ${new Date().toLocaleString('en-NG')}`
+      );
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // Tell school the good news
+  await wa.text(
+    phone,
+    `🎉 *Free Trial Applied!*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `✅ Setup fee — *WAIVED!*\n\n` +
+    `*${session.schoolName}* is now\n` +
+    `registered for *FREE*! 🚀\n\n` +
+    `Let's continue your setup...\n` +
+    `━━━━━━━━━━━━━━━━`
+  );
+
+  await delay(1000);
+
+  // Continue to bank setup
+  await startBankSetup(phone, session, wa);
 }
 
 // ─── Step 8: Bank setup ───────────────────────────────────
@@ -1745,7 +1875,8 @@ async function handleStaffAddRole(
 
     const inviteWa     = new WhatsApp();
     const mainBotPhone =
-      Deno.env.get('WHATSAPP_DISPLAY_NUMBER') ?? 'our bot';
+      Deno.env.get('WHATSAPP_DISPLAY_NUMBER') ??
+      'our bot';
 
     await inviteWa.text(
       pendingStaffPhone,
@@ -1826,20 +1957,24 @@ async function showComplete(
   const superPhone =
     Deno.env.get('SUPER_ADMIN_PHONE');
   if (superPhone) {
-    const notifyWa = new WhatsApp();
-    await notifyWa.text(
-      superPhone,
-      `🏫 *New School Onboarded!*\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `🏫 *${session.schoolName}*\n` +
-      `📍 ${session.location}\n` +
-      `👥 ${session.studentCountRange} students\n` +
-      `🏫 ${session.schoolType}\n` +
-      `📱 Admin: ${phone}\n` +
-      `🔗 Source: ${session.source} bot\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `⏰ ${new Date().toLocaleString('en-NG')}`
-    );
+    try {
+      const notifyWa = new WhatsApp();
+      await notifyWa.text(
+        superPhone,
+        `🏫 *New School Onboarded!*\n` +
+        `━━━━━━━━━━━━━━━━\n` +
+        `🏫 *${session.schoolName}*\n` +
+        `📍 ${session.location}\n` +
+        `👥 ${session.studentCountRange} students\n` +
+        `🏫 ${session.schoolType}\n` +
+        `📱 Admin: ${phone}\n` +
+        `🔗 Source: ${session.source} bot\n` +
+        `━━━━━━━━━━━━━━━━\n` +
+        `⏰ ${new Date().toLocaleString('en-NG')}`
+      );
+    } catch {
+      // Non-critical
+    }
   }
 
   // Create bot session for admin
