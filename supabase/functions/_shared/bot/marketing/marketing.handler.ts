@@ -1,6 +1,7 @@
 // ============================================================
 // SCHOOLBOT - MARKETING BOT HANDLER
 // _shared/bot/marketing/marketing.handler.ts
+// ✅ Checks existing schools before registration
 // ============================================================
 
 import { WhatsApp }    from '../../whatsapp.ts';
@@ -39,17 +40,14 @@ import type { IncomingMessage } from '../../types.ts';
 const ai = new AIService();
 const db = getSupabase();
 
-// ─── Reset keywords ───────────────────────────────────────
 const RESET_KEYWORDS = new Set([
   'hi', 'hello', 'hey', 'start', 'menu',
 ]);
 
-// ─── Trial code pattern ───────────────────────────────────
-// Matches: TRIAL-XXXX-XXXX (case insensitive)
+// ✅ Trial code pattern: TRIAL-XXXX-XXXX
 const TRIAL_CODE_REGEX =
   /^TRIAL-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
 
-// ─── Currency formatter ───────────────────────────────────
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-NG', {
     style:                 'currency',
@@ -57,12 +55,10 @@ const fmt = (n: number) =>
     minimumFractionDigits: 0,
   }).format(n);
 
-// ─── Delay helper ─────────────────────────────────────────
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ─── Get platform WhatsApp client ─────────────────────────
 function getPlatformWa(): WhatsApp {
   return new WhatsApp({
     phone_number_id:
@@ -106,7 +102,7 @@ export async function handleMarketingMessage(
   console.log(
     `[Marketing] from=${phone} | ` +
     `input="${input.substring(0, 40)}" | ` +
-    `rawText="${rawText.substring(0, 40)}"`
+    `raw="${rawText.substring(0, 40)}"`
   );
 
   // ── 1. Staff invite token (8 alphanumeric) ─────────────
@@ -123,14 +119,13 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── 2. Trial code check ─────────────────────────────────
-  // Check BEFORE onboarding and demo session
+  // ── 2. Trial code ───────────────────────────────────────
   if (
     message.type === 'text' &&
     TRIAL_CODE_REGEX.test(rawText.trim())
   ) {
     console.log(
-      `[Marketing] ✅ Trial code detected: ${rawText.trim()}`
+      `[Marketing] ✅ Trial code: ${rawText.trim()}`
     );
     await handleTrialCode(
       phone,
@@ -144,7 +139,7 @@ export async function handleMarketingMessage(
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
     console.log(
-      `[Marketing] Onboarding session | step: ${obSession.step}`
+      `[Marketing] Onboarding | step: ${obSession.step}`
     );
     const handled = await handleOnboardingInput(
       phone, input, rawText, wa, obSession.source
@@ -152,12 +147,11 @@ export async function handleMarketingMessage(
     if (handled) return;
   }
 
-  // ── 4. Get demo session from DB ─────────────────────────
+  // ── 4. Get demo session ─────────────────────────────────
   let session = await getMarketingSession(
     formatPhone(phone)
   );
 
-  // Reset or new user
   if (!input || RESET_KEYWORDS.has(input) || !session) {
     session = await createMarketingSession(
       formatPhone(phone)
@@ -166,7 +160,49 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── 5. Registration triggers ────────────────────────────
+  // ── 5. Handle existing school buttons ──────────────────
+  if (input === 'add_another_school') {
+    session.state       = 'REGISTERING';
+    session.schoolName  = null;
+    session.contactName = session.contactName;
+    await saveMarketingSession(session);
+
+    const obSess = await startOnboardingSession(
+      phone, 'marketing',
+      {
+        contactName: session.contactName ?? undefined,
+      }
+    );
+
+    await wa.text(
+      phone,
+      `🏫 *Register New School*\n\n` +
+      `Let's add another school! 😊\n\n` +
+      `What is the name of your new school?`
+    );
+    return;
+  }
+
+  if (input === 'manage_existing') {
+    // Clear demo session and route to admin
+    try {
+      await db
+        .from('demo_sessions')
+        .delete()
+        .eq('phone', formatPhone(phone));
+    } catch {
+      // Non-critical
+    }
+
+    await wa.text(
+      phone,
+      `✅ Type *hi* to access your\n` +
+      `school admin panel!`
+    );
+    return;
+  }
+
+  // ── 6. Registration triggers ────────────────────────────
   if ([
     'register_now',
     'start_onboarding',
@@ -176,20 +212,20 @@ export async function handleMarketingMessage(
     return;
   }
 
-  // ── 6. Button or list selection ─────────────────────────
+  // ── 7. Button or list ───────────────────────────────────
   if (buttonId || listId) {
     await handleMenuSelection(phone, session, input, wa);
     return;
   }
 
-  // ── 7. Text input ───────────────────────────────────────
+  // ── 8. Text input ───────────────────────────────────────
   await handleTextInput(
     phone, session, rawText, input, wa
   );
 }
 
 // ============================================================
-// ✅ TRIAL CODE HANDLER
+// TRIAL CODE HANDLER
 // ============================================================
 
 async function handleTrialCode(
@@ -201,7 +237,6 @@ async function handleTrialCode(
     `[Marketing] Processing trial code: ${code}`
   );
 
-  // Look up code in DB
   const { data, error } = await db
     .from('trial_codes')
     .select('*')
@@ -209,26 +244,22 @@ async function handleTrialCode(
     .maybeSingle();
 
   console.log(
-    `[Marketing] Trial code DB result:`,
+    `[Marketing] Trial code DB:`,
     JSON.stringify({ data, error })
   );
 
-  // Code not found
   if (error || !data) {
-    console.log(`[Marketing] Trial code not found: ${code}`);
     await wa.text(
       phone,
       `❌ *Invalid Code*\n\n` +
       `The code *${code}* is not valid.\n\n` +
-      `Please check the code and try again.\n\n` +
+      `Please check and try again.\n\n` +
       `Type *hi* to see our demo.`
     );
     return;
   }
 
-  // Already used
   if (data.used) {
-    console.log(`[Marketing] Trial code already used: ${code}`);
     await wa.text(
       phone,
       `❌ *Code Already Used*\n\n` +
@@ -240,9 +271,7 @@ async function handleTrialCode(
     return;
   }
 
-  // Expired
   if (new Date(data.expires_at) < new Date()) {
-    console.log(`[Marketing] Trial code expired: ${code}`);
     await wa.text(
       phone,
       `❌ *Code Expired*\n\n` +
@@ -253,11 +282,9 @@ async function handleTrialCode(
     return;
   }
 
-  console.log(
-    `[Marketing] ✅ Valid trial code! Activating...`
-  );
+  console.log(`[Marketing] ✅ Valid trial code!`);
 
-  // ✅ Mark as used immediately
+  // Mark as used
   await db
     .from('trial_codes')
     .update({
@@ -283,7 +310,7 @@ async function handleTrialCode(
       { onConflict: 'phone' }
     );
 
-  // Update demo session state
+  // Update demo session
   let session = await getMarketingSession(
     formatPhone(phone)
   );
@@ -320,7 +347,6 @@ async function handleTrialCode(
     }
   }
 
-  // Send success message
   await wa.text(
     phone,
     `🎉 *Free Trial Activated!*\n` +
@@ -345,14 +371,8 @@ async function handleTrialCode(
     phone,
     `Register now and get started for FREE!`,
     [
-      {
-        id:    'register_now',
-        title: '🚀 Register Now FREE',
-      },
-      {
-        id:    'demo_attendance',
-        title: '👀 See Demo First',
-      },
+      { id: 'register_now',      title: '🚀 Register Now FREE' },
+      { id: 'demo_attendance',   title: '👀 See Demo First' },
     ]
   );
 }
@@ -428,8 +448,8 @@ async function handleTextInput(
   wa:      WhatsApp
 ): Promise<void> {
   if (
-    session.state === 'REGISTERING' ||
-    session.state === 'WELCOME'     ||
+    session.state === 'REGISTERING'   ||
+    session.state === 'WELCOME'       ||
     session.state === 'TRIAL_ACTIVE'
   ) {
     await showDemoMainMenu(phone, session, wa);
@@ -785,7 +805,9 @@ async function showFeesDemo(
 ): Promise<void> {
   session.state = 'DEMO_FEES';
   await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'fees_demo');
+  await logDemoInteraction(
+    formatPhone(phone), 'fees_demo'
+  );
 
   await wa.text(
     phone,
@@ -1083,7 +1105,7 @@ async function showPricing(
 }
 
 // ============================================================
-// REGISTRATION
+// ✅ REGISTRATION — Checks existing schools first
 // ============================================================
 
 async function startRegistration(
@@ -1091,6 +1113,55 @@ async function startRegistration(
   session: DemoSession,
   wa:      WhatsApp
 ): Promise<void> {
+  // ✅ Check if phone already owns schools
+  const { data: existingSchools } = await db
+    .from('school_onboarding')
+    .select(`
+      school_id,
+      schools ( id, name, is_active, onboarding_status )
+    `)
+    .eq('admin_phone', formatPhone(phone));
+
+  if (
+    existingSchools &&
+    existingSchools.length > 0
+  ) {
+    // They already have schools
+    const schoolList = existingSchools
+      .map((s, i) => {
+        const school = s.schools as
+          Record<string, unknown> | null;
+        const isActive = school?.is_active as boolean;
+        const status   = school?.onboarding_status as string;
+        return (
+          `${i + 1}. *${school?.name ?? 'Unknown'}*\n` +
+          `   ${isActive ? '🟢 Active' : `⏳ ${status}`}`
+        );
+      })
+      .join('\n\n');
+
+    await wa.buttons(
+      phone,
+      `🏫 *You Already Have ` +
+      `${existingSchools.length} School(s)*\n\n` +
+      `${schoolList}\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `What would you like to do?`,
+      [
+        {
+          id:    'add_another_school',
+          title: '➕ Add Another School',
+        },
+        {
+          id:    'manage_existing',
+          title: '🏫 Manage Existing',
+        },
+      ]
+    );
+    return;
+  }
+
+  // No existing schools — proceed normally
   session.state = 'REGISTERING';
   await saveMarketingSession(session);
   await logDemoInteraction(
@@ -1105,7 +1176,7 @@ async function startRegistration(
     schoolType:        session.schoolType   ?? undefined,
   };
 
-  // ✅ await so session is saved to DB before user replies
+  // ✅ await so session is saved before user replies
   const obSession = await startOnboardingSession(
     phone, 'marketing', prefill
   );
@@ -1130,7 +1201,9 @@ async function startRegistration(
     await wa.text(
       phone,
       `🚀 *Register Your School!*\n\n` +
-      `Hi *${session.contactName.split(' ')[0]}!* 👋\n\n` +
+      `Hi *${
+        session.contactName.split(' ')[0]
+      }!* 👋\n\n` +
       `What is the name of your school?`
     );
   } else {
