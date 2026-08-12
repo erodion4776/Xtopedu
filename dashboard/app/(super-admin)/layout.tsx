@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import Link from 'next/link';
 import {
@@ -10,6 +11,7 @@ import {
   DollarSign,
   Users,
   FileText,
+  Gift,
   Menu,
   X,
   LogOut,
@@ -19,29 +21,34 @@ import { cn } from '@/lib/utils';
 
 const navItems = [
   {
-    href: '/dashboard',
+    href:  '/dashboard',
     label: 'Dashboard',
-    icon: LayoutDashboard,
+    icon:  LayoutDashboard,
   },
   {
-    href: '/schools',
+    href:  '/schools',
     label: 'Schools',
-    icon: School,
+    icon:  School,
   },
   {
-    href: '/revenue',
+    href:  '/revenue',
     label: 'Revenue',
-    icon: DollarSign,
+    icon:  DollarSign,
   },
   {
-    href: '/leads',
+    href:  '/leads',
     label: 'Leads',
-    icon: Users,
+    icon:  Users,
   },
   {
-    href: '/logs',
+    href:  '/trial-codes',
+    label: 'Trial Codes',
+    icon:  Gift,
+  },
+  {
+    href:  '/logs',
     label: 'System Logs',
-    icon: FileText,
+    icon:  FileText,
   },
 ];
 
@@ -50,11 +57,11 @@ export default function SuperAdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const router = useRouter();
+  const router   = useRouter();
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [adminName, setAdminName] = useState('Admin');
-  const [checking, setChecking] = useState(true);
+  const [adminName, setAdminName]     = useState('Admin');
+  const [checking, setChecking]       = useState(true);
 
   useEffect(() => {
     checkAuth();
@@ -102,7 +109,9 @@ export default function SuperAdminLayout({
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
           <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-r-transparent mb-4" />
-          <p className="text-gray-500 text-sm">Loading...</p>
+          <p className="text-gray-500 text-sm">
+            Loading...
+          </p>
         </div>
       </div>
     );
@@ -117,7 +126,9 @@ export default function SuperAdminLayout({
           'fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg',
           'transform transition-transform duration-200',
           'lg:translate-x-0 lg:static lg:inset-auto',
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          sidebarOpen
+            ? 'translate-x-0'
+            : '-translate-x-full'
         )}
       >
         {/* Logo */}
@@ -126,7 +137,9 @@ export default function SuperAdminLayout({
             <h1 className="text-xl font-bold text-blue-600">
               XtopEdu
             </h1>
-            <p className="text-xs text-gray-500">Super Admin</p>
+            <p className="text-xs text-gray-500">
+              Super Admin
+            </p>
           </div>
           <Button
             variant="ghost"
@@ -141,7 +154,7 @@ export default function SuperAdminLayout({
         {/* Nav */}
         <nav className="p-4 space-y-1">
           {navItems.map((item) => {
-            const Icon = item.icon;
+            const Icon     = item.icon;
             const isActive = pathname === item.href;
             return (
               <Link
@@ -158,6 +171,11 @@ export default function SuperAdminLayout({
               >
                 <Icon className="h-4 w-4" />
                 {item.label}
+                {item.href === '/trial-codes' && (
+                  <span className="ml-auto text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full">
+                    NEW
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -172,14 +190,18 @@ export default function SuperAdminLayout({
               </span>
             </div>
             <div>
-              <p className="text-sm font-medium">{adminName}</p>
-              <p className="text-xs text-gray-500">Super Admin</p>
+              <p className="text-sm font-medium">
+                {adminName}
+              </p>
+              <p className="text-xs text-gray-500">
+                Super Admin
+              </p>
             </div>
           </div>
           <Button
             variant="ghost"
             size="sm"
-            className="w-full justify-start text-red-500"
+            className="w-full justify-start text-red-500 hover:text-red-600 hover:bg-red-50"
             onClick={handleLogout}
           >
             <LogOut className="h-4 w-4 mr-2" />
@@ -196,8 +218,9 @@ export default function SuperAdminLayout({
         />
       )}
 
-      {/* Main */}
+      {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+
         {/* Topbar */}
         <header className="bg-white shadow-sm px-4 py-3 flex items-center justify-between shrink-0">
           <Button
@@ -208,17 +231,18 @@ export default function SuperAdminLayout({
           >
             <Menu className="h-5 w-5" />
           </Button>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-3">
             <span className="text-sm text-gray-500">
               Welcome, {adminName}!
             </span>
           </div>
         </header>
 
-        {/* Content */}
+        {/* Page content */}
         <main className="flex-1 overflow-auto p-4 lg:p-6">
           {children}
         </main>
+
       </div>
     </div>
   );
