@@ -518,15 +518,24 @@ export class PaystackService {
   async resolveAccount(
     accountNumber: string,
     bankCode: string
-  ): Promise<{ accountName: string; accountNumber: string } | null> {
+  ): Promise<
+    | { ok: true; accountName: string; accountNumber: string }
+    | { ok: false; message: string }
+  > {
     const res = await this.request(
       `/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
       'GET'
     );
 
-    if (!res.status) return null;
+    if (!res.status) {
+      // Surface Paystack's actual reason instead of swallowing it —
+      // e.g. "Invalid bank code", "Could not resolve account name",
+      // or an auth error if the secret key can't be used for this call.
+      return { ok: false, message: res.message ?? 'Unknown Paystack error' };
+    }
 
     return {
+      ok: true,
       accountName: res.data.account_name,
       accountNumber: res.data.account_number,
     };
