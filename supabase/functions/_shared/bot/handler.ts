@@ -14,7 +14,6 @@ import {
   delay,
 } from '../utils.ts';
 
-// ── Parent flows ──────────────────────────────────────────
 import {
   showMainMenu,
   showInviteCodePrompt,
@@ -43,9 +42,9 @@ import {
   handleStudentSelect as pickupStudentSelect,
 } from './pickup.ts';
 
-// ── Admin flows ───────────────────────────────────────────
 import {
   showAdminMenu,
+  showAdminMoreMenu,
   showAdminHelp,
   showTodayReport,
   showFeeStats,
@@ -112,7 +111,6 @@ import {
   handleSendReceipt,
 } from './admin/admin.receipts.ts';
 
-// ── Super admin bot ───────────────────────────────────────
 import {
   showSuperAdminMenu,
   handleSuperAdminMenu,
@@ -121,13 +119,11 @@ import {
   clearTestMode,
 } from './superadmin/superadmin.menu.ts';
 
-// ── Marketing bot ─────────────────────────────────────────
 import {
   handleMarketingMessage,
   hasActiveMarketingSession,
 } from './marketing/marketing.handler.ts';
 
-// ── Onboarding ────────────────────────────────────────────
 import {
   getOnboardingSession,
   handleOnboardingInput,
@@ -190,7 +186,10 @@ export async function handleMessage(
   const wa = new WhatsApp(waAccount);
 
   // ── Staff invite token ──────────────────────────────────
-  if (message.type === 'text' && isInviteToken(rawText)) {
+  if (
+    message.type === 'text' &&
+    isInviteToken(rawText)
+  ) {
     await handleInvitationToken(
       phone,
       rawText.trim().toUpperCase(),
@@ -208,16 +207,11 @@ export async function handleMessage(
     return;
   }
 
-  // ✅ KEY FIX: await getOnboardingSession (DB call)
-  // Check onboarding BEFORE marketing session check
-  // so the registration flow is not interrupted.
-  // Previous code called this synchronously which
-  // always returned null (no await = no DB query).
+  // ── Onboarding session check ────────────────────────────
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
     console.log(
-      `[Bot] ✅ Onboarding session found | ` +
-      `step: ${obSession.step}`
+      `[Bot] ✅ Onboarding session | step: ${obSession.step}`
     );
     const handled = await handleOnboardingInput(
       phone, input, rawText, wa, obSession.source
@@ -228,7 +222,9 @@ export async function handleMessage(
   // ── Marketing session check ─────────────────────────────
   if (isPlatformNumber) {
     const isMarketingUser =
-      await hasActiveMarketingSession(formatPhone(phone));
+      await hasActiveMarketingSession(
+        formatPhone(phone)
+      );
 
     if (isMarketingUser) {
       await handleMarketingMessage(message);
@@ -267,7 +263,6 @@ export async function handleMessage(
 
   // ── Onboarding triggers ─────────────────────────────────
   if (input === 'start_school_onboarding') {
-    // ✅ await so session is in DB before user replies
     await startOnboardingSession(phone, 'main');
     await wa.text(
       phone,
@@ -421,8 +416,7 @@ async function handleSuperAdminFlow(
 
     if (error) {
       console.error(
-        '[SuperAdmin] Session error:',
-        error.message
+        '[SuperAdmin] Session error:', error.message
       );
     }
 
@@ -432,7 +426,6 @@ async function handleSuperAdminFlow(
     await sessions.touch(phone);
   }
 
-  // Build full session with runtime data
   const session: BotSession = {
     ...(dbSession ?? {
       id:                  'sa-temp',
@@ -468,19 +461,16 @@ async function handleSuperAdminFlow(
     waAccount: waAccount,
   } as BotSession;
 
-  // Reset keywords → show super admin menu
   if (!input || RESET_KEYWORDS.has(input)) {
     await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
-  // Global back shortcut
   if (['0', 'back', 'main_menu'].includes(input)) {
     await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
-  // Broadcast compose state
   if (session.sub_state === 'SA_BROADCAST_COMPOSE') {
     await handleSuperAdminBroadcast(
       phone, session, rawText, wa
@@ -488,7 +478,6 @@ async function handleSuperAdminFlow(
     return;
   }
 
-  // Route to super admin menu handler
   await handleSuperAdminMenu(
     phone, session, input, rawText, wa
   );
@@ -510,10 +499,11 @@ async function handleReset(
   const parent = await parentSvc.findByPhone(phone);
 
   if (parent) {
-    const [students, schoolWaAccount] = await Promise.all([
-      parentSvc.getStudents(parent.id),
-      parentSvc.getWaAccount(parent.school_id),
-    ]);
+    const [students, schoolWaAccount] =
+      await Promise.all([
+        parentSvc.getStudents(parent.id),
+        parentSvc.getWaAccount(parent.school_id),
+      ]);
 
     const contactId =
       await parentSvc.ensureContact(parent, phone);
@@ -542,7 +532,9 @@ async function handleReset(
 
   if (schoolUser) {
     const schoolWaAccount =
-      await parentSvc.getWaAccount(schoolUser.school_id);
+      await parentSvc.getWaAccount(
+        schoolUser.school_id
+      );
 
     const isAdmin   = adminSvc.isAdmin(schoolUser);
     const isTeacher = adminSvc.isTeacher(schoolUser);
@@ -580,7 +572,7 @@ async function handleReset(
 }
 
 // ============================================================
-// UNKNOWN USER ON SCHOOL NUMBER (Option B)
+// UNKNOWN USER ON SCHOOL NUMBER
 // ============================================================
 
 async function showSchoolUnknownUser(
@@ -662,7 +654,9 @@ async function routeParent(
       break;
 
     case 'FEES_SELECT_INVOICE':
-      await handleInvoiceSelect(phone, session, input, wa);
+      await handleInvoiceSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'FEES_CONFIRM_PAY':
@@ -674,7 +668,9 @@ async function routeParent(
       break;
 
     case 'PICKUP_SELECT_STUDENT':
-      await pickupStudentSelect(phone, session, input, wa);
+      await pickupStudentSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'PICKUP_VIEW':
@@ -700,8 +696,9 @@ async function showParentNotRegistered(
   session: BotSession
 ): Promise<void> {
   const schoolName =
-    (session.parent?.schools?.name as string | undefined)
-    ?? 'the school';
+    (session.parent?.schools?.name as
+      string | undefined) ??
+    'the school';
 
   await wa.text(
     phone,
@@ -709,8 +706,6 @@ async function showParentNotRegistered(
     `To access *${schoolName}* bot,\n` +
     `please contact the school office\n` +
     `to register your WhatsApp number.\n\n` +
-    `The school admin will add you and\n` +
-    `link your children to your account.\n\n` +
     `Once registered, send *hi* to access:\n\n` +
     `✅ Daily attendance records\n` +
     `💰 Fee balance & payments\n` +
@@ -752,7 +747,9 @@ async function handleParentMainMenu(
     case 'plan':
     case 'upgrade':
       await showAlertPlans(phone, session, wa);
-      await sessions.setState(phone, 'ALERT_PLAN_SELECT');
+      await sessions.setState(
+        phone, 'ALERT_PLAN_SELECT'
+      );
       break;
 
     case 'menu_help':
@@ -796,7 +793,9 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_ATTENDANCE_MENU':
-      await handleAdminAttMenu(phone, session, input, wa);
+      await handleAdminAttMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_ATTENDANCE_SELECT_CLASS':
@@ -808,7 +807,9 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_FEES_MENU':
-      await handleAdminFeesMenu(phone, session, input, wa);
+      await handleAdminFeesMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_STUDENTS_SEARCH':
@@ -870,7 +871,9 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_ADDING_STAFF_ROLE':
-      await handleAddStaffRole(phone, session, input, wa);
+      await handleAddStaffRole(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_BROADCAST_MENU':
@@ -911,7 +914,9 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_CONFIRM_UPLOAD':
-      await handleConfirmUpload(phone, session, input, wa);
+      await handleConfirmUpload(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_SCORE_UPLOAD_TERM_SELECT':
@@ -996,6 +1001,7 @@ async function routeAdmin(
   }
 }
 
+// ─── Admin main menu handler ──────────────────────────────
 async function handleAdminMainMenu(
   phone:   string,
   session: BotSession,
@@ -1029,6 +1035,11 @@ async function handleAdminMainMenu(
 
     case 'admin_broadcast':
       await startBroadcast(phone, session, wa);
+      break;
+
+    // ✅ Opens more features page
+    case 'admin_more':
+      await showAdminMoreMenu(phone, session, wa);
       break;
 
     case 'admin_upload':
@@ -1086,7 +1097,7 @@ async function handleDocumentUpload(
     await wa.text(
       phone,
       `📤 To upload students go to:\n\n` +
-      `*Admin Menu → Upload Students*\n\n` +
+      `*Admin Menu → More Features → Upload Students*\n\n` +
       `Then send your CSV file here.`
     );
   }
