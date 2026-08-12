@@ -2,6 +2,7 @@
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
 // ✅ Multi-school support + onboarding status guidance
+// ✅ Fixed: School owners no longer routed to marketing bot
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -167,6 +168,18 @@ function isSuperAdminPhone(phone: string): boolean {
 }
 
 // ============================================================
+// SCHOOL INFO TYPE
+// ============================================================
+
+type SchoolInfo = {
+  id:                string;
+  name:              string;
+  is_active:         boolean;
+  onboarding_status: string;
+  setup_fee_paid:    boolean;
+};
+
+// ============================================================
 // MAIN ENTRY POINT
 // ============================================================
 
@@ -222,7 +235,46 @@ export async function handleMessage(
     if (handled) return;
   }
 
+  // ✅ KEY FIX: Check owned schools BEFORE marketing check
+  // School owners should NEVER be routed to marketing bot
+  // This runs for platform number AND school numbers
+  const ownedSchools = await getSchoolsByPhone(phone);
+
+  if (ownedSchools.length > 0) {
+    console.log(
+      `[Bot] ✅ School owner detected — ` +
+      `${ownedSchools.length} school(s)`
+    );
+
+    // Clear any stale marketing demo session
+    try {
+      await db
+        .from('demo_sessions')
+        .delete()
+        .eq('phone', formatPhone(phone));
+    } catch {
+      // Non-critical
+    }
+
+    if (ownedSchools.length === 1) {
+      await checkAndGuideOnboarding(
+        phone,
+        ownedSchools[0],
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
+        wa
+      );
+    } else {
+      await showSchoolSelector(
+        phone, ownedSchools, wa
+      );
+    }
+    return;
+  }
+
   // ── Marketing session check ─────────────────────────────
+  // Only reaches here if phone owns NO schools
   if (isPlatformNumber) {
     const isMarketingUser =
       await hasActiveMarketingSession(
@@ -396,7 +448,8 @@ async function handleSuperAdminFlow(
         );
       } else {
         await routeAdmin(
-          phone, testSession, input, rawText, testWa, waAccount
+          phone, testSession, input, rawText,
+          testWa, waAccount
         );
       }
       return;
@@ -496,7 +549,6 @@ async function handleSuperAdminFlow(
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
-// ✅ Multi-school + onboarding status support
 // ============================================================
 
 async function handleReset(
@@ -538,31 +590,7 @@ async function handleReset(
     return;
   }
 
-  // ✅ 2. Check ALL schools this phone owns
-  const ownedSchools = await getSchoolsByPhone(phone);
-
-  if (ownedSchools.length === 1) {
-    console.log(
-      `[Bot] One school found — checking status`
-    );
-    await checkAndGuideOnboarding(
-      phone,
-      ownedSchools[0],
-      await parentSvc.getWaAccount(ownedSchools[0].id),
-      wa
-    );
-    return;
-  }
-
-  if (ownedSchools.length > 1) {
-    console.log(
-      `[Bot] ${ownedSchools.length} schools — selector`
-    );
-    await showSchoolSelector(phone, ownedSchools, wa);
-    return;
-  }
-
-  // 3. Check registered staff / admin
+  // 2. Check registered staff / admin
   const schoolUser =
     await adminSvc.findStaffByPhone(phone);
 
@@ -598,7 +626,7 @@ async function handleReset(
     return;
   }
 
-  // 4. Unknown user
+  // 3. Unknown user
   if (isPlatformNumber) {
     await handleMarketingMessage(message);
   } else {
@@ -607,17 +635,8 @@ async function handleReset(
 }
 
 // ============================================================
-// ✅ MULTI-SCHOOL HELPERS
+// MULTI-SCHOOL HELPERS
 // ============================================================
-
-// ─── School type with setup fee status ────────────────────
-type SchoolInfo = {
-  id:                string;
-  name:              string;
-  is_active:         boolean;
-  onboarding_status: string;
-  setup_fee_paid:    boolean;
-};
 
 // ─── Get all schools owned by this phone ──────────────────
 async function getSchoolsByPhone(
@@ -651,10 +670,9 @@ async function getSchoolsByPhone(
 }
 
 // ─── Check onboarding status and guide accordingly ────────
-// ✅ Fixed: Uses school NAME not ID, guides to next step
 async function checkAndGuideOnboarding(
-  phone:          string,
-  school:         SchoolInfo,
+  phone:           string,
+  school:          SchoolInfo,
   schoolWaAccount: unknown,
   wa:              WhatsApp
 ): Promise<void> {
@@ -668,10 +686,10 @@ async function checkAndGuideOnboarding(
   const waConnected = waAcc?.status === 'active';
 
   console.log(
-    `[Bot] Checking ${school.name} | ` +
+    `[Bot] ${school.name} | ` +
     `fee_paid=${school.setup_fee_paid} | ` +
     `status=${school.onboarding_status} | ` +
-    `wa=${waConnected}`
+    `wa_connected=${waConnected}`
   );
 
   // ── Setup fee NOT paid ────────────────────────────────
@@ -708,7 +726,7 @@ async function checkAndGuideOnboarding(
       ]
     );
 
-    // Save session
+    // Save session with school context
     await db.from('bot_sessions').upsert(
       {
         phone:               formatPhone(phone),
@@ -730,7 +748,7 @@ async function checkAndGuideOnboarding(
     return;
   }
 
-  // ── Setup fee paid but WhatsApp not connected ─────────
+  // ── Fee paid but WhatsApp not connected ───────────────
   if (school.setup_fee_paid && !waConnected) {
     const appUrl = Deno.env.get('APP_URL') ?? '';
 
@@ -872,7 +890,6 @@ async function showSchoolSelector(
       { onConflict: 'phone' }
     );
 
-  // Build rows with clear status icons
   const rows = schools.slice(0, 9).map((s) => {
     let icon        = '🟢';
     let description = 'Active — tap to manage';
@@ -1185,10 +1202,9 @@ async function routeAdmin(
     return;
   }
 
-  // ── Awaiting setup fee state ────────────────────────────
+  // ── Awaiting setup fee ──────────────────────────────────
   if (session.state === 'AWAITING_SETUP_FEE') {
     if (input === 'resume_setup_fee') {
-      // Resume onboarding from setup fee step
       const { data: schoolData } = await db
         .from('schools')
         .select('name, student_count')
@@ -1204,15 +1220,15 @@ async function routeAdmin(
       const obSession = {
         phone:             formatPhone(phone),
         step:              'SHOW_SETUP_FEE' as const,
-        source:            'main' as const,
-        contactName:       onboarding?.admin_name   ?? null,
-        schoolName:        schoolData?.name         ?? null,
+        source:            'main'            as const,
+        contactName:       onboarding?.admin_name    ?? null,
+        schoolName:        schoolData?.name          ?? null,
         studentCount:      schoolData?.student_count ?? null,
         studentCountRange: null,
         schoolType:        null,
         location:          null,
-        email:             onboarding?.admin_email  ?? null,
-        schoolId:          session.school_id         ?? null,
+        email:             onboarding?.admin_email   ?? null,
+        schoolId:          session.school_id          ?? null,
         setupFeePaid:      false,
         tempData:          {},
         lastActivity:      Date.now(),
@@ -1237,9 +1253,9 @@ async function routeAdmin(
       return;
     }
 
-    // Any other input — show status again
+    // Any other input — recheck and show status
     const ownedSchools = await getSchoolsByPhone(phone);
-    if (ownedSchools.length === 1) {
+    if (ownedSchools.length >= 1) {
       await checkAndGuideOnboarding(
         phone,
         ownedSchools[0],
@@ -1248,13 +1264,11 @@ async function routeAdmin(
         ),
         wa
       );
-    } else if (ownedSchools.length > 1) {
-      await showSchoolSelector(phone, ownedSchools, wa);
     }
     return;
   }
 
-  // ── Awaiting WhatsApp connection state ──────────────────
+  // ── Awaiting WhatsApp connection ────────────────────────
   if (session.state === 'AWAITING_WA_CONNECTION') {
     if (input === 'contact_support') {
       const superPhone =
@@ -1270,7 +1284,7 @@ async function routeAdmin(
       return;
     }
 
-    // Check if WA has been connected since last time
+    // Recheck connection status
     const ownedSchools = await getSchoolsByPhone(phone);
     if (ownedSchools.length >= 1) {
       await checkAndGuideOnboarding(
@@ -1581,8 +1595,7 @@ async function handleAdminMainMenu(
         await wa.text(
           phone,
           `ℹ️ You only have one school registered.\n\n` +
-          `To add another school, go to More Features\n` +
-          `→ or contact support.`
+          `Type *menu* to continue.`
         );
         await showAdminMenu(phone, session, wa);
       }
