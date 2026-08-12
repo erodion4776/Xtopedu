@@ -1,6 +1,7 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
+// ✅ Multi-school support added
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -148,7 +149,7 @@ const RESET_KEYWORDS = new Set([
 ]);
 
 // ============================================================
-// SUPER ADMIN DETECTION VIA ENV
+// SUPER ADMIN DETECTION
 // ============================================================
 
 function getSuperAdminPhone(): string {
@@ -200,7 +201,7 @@ export async function handleMessage(
 
   // ── Super admin check FIRST ─────────────────────────────
   if (isSuperAdminPhone(phone)) {
-    console.log('[Bot] ✅ Super admin detected via env');
+    console.log('[Bot] ✅ Super admin detected');
     await handleSuperAdminFlow(
       phone, message, rawText, input, waAccount, wa
     );
@@ -211,7 +212,7 @@ export async function handleMessage(
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
     console.log(
-      `[Bot] ✅ Onboarding session | step: ${obSession.step}`
+      `[Bot] Onboarding | step: ${obSession.step}`
     );
     const handled = await handleOnboardingInput(
       phone, input, rawText, wa, obSession.source
@@ -227,8 +228,22 @@ export async function handleMessage(
       );
 
     if (isMarketingUser) {
-      await handleMarketingMessage(message);
-      return;
+      const existingSession =
+        await sessions.get(phone);
+
+      if (
+        existingSession &&
+        existingSession.role !== 'parent' &&
+        existingSession.school_id !== null
+      ) {
+        // Has admin session — skip marketing
+        console.log(
+          `[Bot] Has admin session, skip marketing`
+        );
+      } else {
+        await handleMarketingMessage(message);
+        return;
+      }
     }
   }
 
@@ -336,8 +351,6 @@ async function handleSuperAdminFlow(
   waAccount: WhatsAppAccount | null,
   wa:        WhatsApp
 ): Promise<void> {
-
-  // EXIT test mode
   if (rawText.trim().toUpperCase() === 'EXIT') {
     const testMode = await isSuperAdminTestMode(phone);
     if (testMode.active) {
@@ -352,7 +365,6 @@ async function handleSuperAdminFlow(
     }
   }
 
-  // Check test mode
   const testMode = await isSuperAdminTestMode(phone);
 
   if (testMode.active) {
@@ -390,7 +402,6 @@ async function handleSuperAdminFlow(
     }
   }
 
-  // Get or create super admin session
   let dbSession = await sessions.get(phone);
 
   if (!dbSession) {
@@ -421,7 +432,6 @@ async function handleSuperAdminFlow(
     }
 
     dbSession = data as BotSession | null;
-    console.log('[Bot] ✅ Super admin session created');
   } else {
     await sessions.touch(phone);
   }
@@ -485,6 +495,7 @@ async function handleSuperAdminFlow(
 
 // ============================================================
 // IDENTIFY USER — RESET HANDLER
+// ✅ Multi-school support added
 // ============================================================
 
 async function handleReset(
@@ -526,7 +537,35 @@ async function handleReset(
     return;
   }
 
-  // 2. Check registered staff / admin
+  // ✅ 2. Check ALL schools this phone owns
+  const ownedSchools = await getSchoolsByPhone(phone);
+
+  if (ownedSchools.length === 1) {
+    // One school — go straight to admin panel
+    console.log(
+      `[Bot] One school found — logging in directly`
+    );
+    await loginToSchool(
+      phone,
+      ownedSchools[0],
+      wa,
+      waAccount
+    );
+    return;
+  }
+
+  if (ownedSchools.length > 1) {
+    // Multiple schools — show selector
+    console.log(
+      `[Bot] ${ownedSchools.length} schools found — showing selector`
+    );
+    await showSchoolSelector(
+      phone, ownedSchools, wa
+    );
+    return;
+  }
+
+  // 3. Check registered staff / admin
   const schoolUser =
     await adminSvc.findStaffByPhone(phone);
 
@@ -543,7 +582,6 @@ async function handleReset(
       await wa.text(
         phone,
         `❌ *Access Denied*\n\n` +
-        `Your account does not have bot access.\n\n` +
         `Contact your school administrator.`
       );
       return;
@@ -563,12 +601,222 @@ async function handleReset(
     return;
   }
 
-  // 3. Unknown user
+  // 4. Unknown user
   if (isPlatformNumber) {
     await handleMarketingMessage(message);
   } else {
     await showSchoolUnknownUser(phone, wa, waAccount);
   }
+}
+
+// ============================================================
+// ✅ MULTI-SCHOOL HELPERS
+// ============================================================
+
+// Get all schools registered by this phone number
+async function getSchoolsByPhone(
+  phone: string
+): Promise<Array<{
+  id:                string;
+  name:              string;
+  is_active:         boolean;
+  onboarding_status: string;
+}>> {
+  const formatted = formatPhone(phone);
+
+  const { data } = await db
+    .from('school_onboarding')
+    .select(`
+      school_id,
+      schools (
+        id,
+        name,
+        is_active,
+        onboarding_status
+      )
+    `)
+    .eq('admin_phone', formatted);
+
+  if (!data?.length) return [];
+
+  return data
+    .map((r) =>
+      r.schools as unknown as {
+        id:                string;
+        name:              string;
+        is_active:         boolean;
+        onboarding_status: string;
+      }
+    )
+    .filter((s) => s !== null && s.id !== undefined);
+}
+
+// Login to a specific school
+async function loginToSchool(
+  phone:     string,
+  school:    {
+    id:                string;
+    name:              string;
+    is_active:         boolean;
+    onboarding_status: string;
+  },
+  wa:        WhatsApp,
+  waAccount: WhatsAppAccount | null
+): Promise<void> {
+  const schoolWaAccount =
+    await parentSvc.getWaAccount(school.id);
+
+  const adminUser = {
+    id:        `admin-${school.id}`,
+    school_id: school.id,
+    user_id:   `admin-${school.id}`,
+    role_id:   'admin',
+    status:    'active',
+    roles: {
+      id:   'admin',
+      name: 'admin',
+    },
+    profiles: {
+      id:         `admin-${school.id}`,
+      full_name:  'School Admin',
+      phone:      phone,
+      avatar_url: null,
+    },
+  };
+
+  const session = await sessions.createAdminSession(
+    phone,
+    adminUser as never,
+    schoolWaAccount,
+    'admin'
+  );
+
+  const schoolWa = new WhatsApp(schoolWaAccount);
+  await showAdminMenu(phone, session, schoolWa);
+}
+
+// Show school selector for multi-school owners
+async function showSchoolSelector(
+  phone:   string,
+  schools: Array<{
+    id:                string;
+    name:              string;
+    is_active:         boolean;
+    onboarding_status: string;
+  }>,
+  wa: WhatsApp
+): Promise<void> {
+  // Save state
+  await db
+    .from('bot_sessions')
+    .upsert(
+      {
+        phone:               formatPhone(phone),
+        parent_id:           null,
+        school_user_id:      null,
+        school_id:           null,
+        role:                'admin',
+        state:               'SELECT_SCHOOL',
+        sub_state:           null,
+        selected_student_id: null,
+        data: {
+          owned_school_ids: schools.map((s) => s.id),
+        },
+        last_activity: new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
+
+  // Build rows (max 9 schools + register new)
+  const rows = schools.slice(0, 9).map((s) => ({
+    id:          `SELECT_SCHOOL_${s.id}`,
+    title:       s.name.substring(0, 24),
+    description: s.is_active
+      ? '🟢 Active — tap to manage'
+      : `⏳ ${s.onboarding_status}`,
+  }));
+
+  // Add register new school option
+  rows.push({
+    id:          'REGISTER_NEW_SCHOOL',
+    title:       '➕ Register New School',
+    description: 'Add another school',
+  });
+
+  await wa.list(
+    phone,
+    `🏫 Your Schools`,
+    `You have *${schools.length}* school(s).\n\n` +
+    `Select which school to manage:`,
+    `Tap a school to open its admin panel`,
+    `🏫 Select School`,
+    [
+      {
+        title: 'Your Schools',
+        rows,
+      },
+    ]
+  );
+}
+
+// Switch to a different school
+async function switchToSchool(
+  phone:    string,
+  schoolId: string,
+  wa:       WhatsApp
+): Promise<void> {
+  const { data: school } = await db
+    .from('schools')
+    .select('id, name, is_active, onboarding_status')
+    .eq('id', schoolId)
+    .single();
+
+  if (!school) {
+    await wa.text(
+      phone,
+      `❌ School not found. Please try again.`
+    );
+    return;
+  }
+
+  const schoolWaAccount =
+    await parentSvc.getWaAccount(schoolId);
+
+  const adminUser = {
+    id:        `admin-${schoolId}`,
+    school_id: schoolId,
+    user_id:   `admin-${schoolId}`,
+    role_id:   'admin',
+    status:    'active',
+    roles: {
+      id:   'admin',
+      name: 'admin',
+    },
+    profiles: {
+      id:         `admin-${schoolId}`,
+      full_name:  'School Admin',
+      phone:      phone,
+      avatar_url: null,
+    },
+  };
+
+  const newSession = await sessions.createAdminSession(
+    phone,
+    adminUser as never,
+    schoolWaAccount,
+    'admin'
+  );
+
+  const schoolWa = new WhatsApp(schoolWaAccount);
+
+  await wa.text(
+    phone,
+    `✅ *Switched to ${school.name}*\n\n` +
+    `Loading admin panel...`
+  );
+
+  await delay(500);
+  await showAdminMenu(phone, newSession, schoolWa);
 }
 
 // ============================================================
@@ -775,6 +1023,7 @@ async function handleParentMainMenu(
 
 // ============================================================
 // ADMIN ROUTING
+// ✅ Added SELECT_SCHOOL and SWITCH_SCHOOL handling
 // ============================================================
 
 async function routeAdmin(
@@ -784,6 +1033,33 @@ async function routeAdmin(
   rawText: string,
   wa:      WhatsApp
 ): Promise<void> {
+
+  // ✅ School selector state
+  if (session.state === 'SELECT_SCHOOL') {
+    if (input.startsWith('select_school_')) {
+      const schoolId =
+        input.replace('select_school_', '');
+      await switchToSchool(phone, schoolId, wa);
+      return;
+    }
+
+    if (input === 'register_new_school') {
+      await startOnboardingSession(phone, 'main');
+      await wa.text(
+        phone,
+        `🏫 *Register New School*\n\n` +
+        `Let's add another school!\n\n` +
+        `What is the name of your new school?`
+      );
+      return;
+    }
+
+    // Unknown — show selector again
+    const ownedSchools = await getSchoolsByPhone(phone);
+    await showSchoolSelector(phone, ownedSchools, wa);
+    return;
+  }
+
   switch (session.state) {
 
     case 'ADMIN_MAIN_MENU':
@@ -1037,7 +1313,6 @@ async function handleAdminMainMenu(
       await startBroadcast(phone, session, wa);
       break;
 
-    // ✅ Opens more features page
     case 'admin_more':
       await showAdminMoreMenu(phone, session, wa);
       break;
@@ -1069,6 +1344,25 @@ async function handleAdminMainMenu(
     case 'admin_help':
       await showAdminHelp(phone, wa);
       break;
+
+    // ✅ Switch between schools
+    case 'switch_school': {
+      const ownedSchools =
+        await getSchoolsByPhone(phone);
+      if (ownedSchools.length > 1) {
+        await showSchoolSelector(
+          phone, ownedSchools, wa
+        );
+      } else {
+        await wa.text(
+          phone,
+          `ℹ️ You only have one school registered.\n\n` +
+          `To add another school, contact support.`
+        );
+        await showAdminMenu(phone, session, wa);
+      }
+      break;
+    }
 
     default:
       await showAdminMenu(phone, session, wa);
