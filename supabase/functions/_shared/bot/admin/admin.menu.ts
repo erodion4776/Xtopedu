@@ -1,6 +1,7 @@
 // ============================================================
 // SCHOOLBOT - ADMIN MAIN MENU
 // supabase/functions/_shared/bot/admin/admin.menu.ts
+// ✅ Fixed: Max 8 rows per menu (WhatsApp limit is 10)
 // ============================================================
 
 import { WhatsApp }       from '../../whatsapp.ts';
@@ -38,7 +39,7 @@ export async function showAdminMenu(
   );
 
   if (isAdmin) {
-    // ✅ Admin menu — max 8 rows (within 10 limit)
+    // ✅ 8 rows — within WhatsApp 10 row limit
     await wa.list(
       phone,
       `🏫 ${schoolName} — Admin`,
@@ -59,7 +60,7 @@ export async function showAdminMenu(
             {
               id:          'ADMIN_STUDENTS',
               title:       '👨‍🎓 Students',
-              description: 'Search & view student info',
+              description: 'Search & view students',
             },
           ],
         },
@@ -106,7 +107,7 @@ export async function showAdminMenu(
       ]
     );
   } else {
-    // ✅ Teacher menu — simpler (4 rows)
+    // ✅ Teacher — 4 rows only
     await wa.list(
       phone,
       `🏫 ${schoolName}`,
@@ -127,7 +128,7 @@ export async function showAdminMenu(
             {
               id:          'ADMIN_STUDENTS',
               title:       '👨‍🎓 Students',
-              description: 'Search & view student info',
+              description: 'Search & view students',
             },
           ],
         },
@@ -153,14 +154,13 @@ export async function showAdminMenu(
   await sessions.setState(phone, 'ADMIN_MAIN_MENU');
 }
 
-// ─── Show more features menu ───────────────────────────────
-// Called when admin taps "➡️ More Features"
+// ─── More features menu (admin page 2) ────────────────────
+// ✅ 6 rows — within 10 limit
 export async function showAdminMoreMenu(
   phone:   string,
   session: BotSession,
   wa:      WhatsApp
 ): Promise<void> {
-  // ✅ 6 rows — within 10 limit
   await wa.list(
     phone,
     `⚙️ More Features`,
@@ -241,11 +241,11 @@ export async function showAdminHelp(
     `• Send to all parents\n` +
     `• Send to specific class\n` +
     `• Send to fee defaulters\n\n` +
-    `📌 *Bulk Upload:*\n` +
-    `• Download CSV template\n` +
-    `• Fill in student details\n` +
-    `• Send CSV file to this chat\n` +
-    `• Students imported automatically`
+    `📌 *More Features:*\n` +
+    `• Tap ➡️ More Features in main menu\n` +
+    `• Upload students (CSV)\n` +
+    `• Upload exam scores\n` +
+    `• View term reports`
   );
 }
 
@@ -265,12 +265,15 @@ export async function showTodayReport(
   const feeStats =
     await reportSvc.getFeeStats(session.school_id);
 
-  const today = new Date().toLocaleDateString('en-NG', {
-    weekday: 'long',
-    day:     'numeric',
-    month:   'long',
-    year:    'numeric',
-  });
+  const today = new Date().toLocaleDateString(
+    'en-NG',
+    {
+      weekday: 'long',
+      day:     'numeric',
+      month:   'long',
+      year:    'numeric',
+    }
+  );
 
   await wa.buttons(
     phone,
@@ -356,9 +359,7 @@ export async function showSettings(
     `Present Alert: ${
       settings.notify_present ? '✅ ON' : '❌ OFF'
     }\n\n` +
-    `⏰ *Auto-close Session:* ${
-      settings.auto_close_hour
-    }:00\n\n` +
+    `⏰ *Auto-close:* ${settings.auto_close_hour}:00\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
     `_To change settings, contact\n` +
     `your system administrator_`,
