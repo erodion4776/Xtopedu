@@ -30,6 +30,10 @@ const fmt = (n: number) =>
 
 const SESSION_TTL_HOURS = 6;
 
+// ─── Trial code pattern ───────────────────────────────────
+const TRIAL_CODE_PATTERN =
+  /^trial-[a-z0-9]{4}-[a-z0-9]{4}$/i;
+
 // ============================================================
 // DB-BACKED SESSION HELPERS
 // ============================================================
@@ -119,7 +123,6 @@ export async function clearOnboardingSession(
     .eq('phone', formatted);
 }
 
-// ✅ Async — awaits DB save before returning
 export async function startOnboardingSession(
   phone:    string,
   source:   'marketing' | 'main',
@@ -231,7 +234,7 @@ export async function handleOnboardingInput(
     case 'SHOW_SETUP_FEE':
     case 'AWAITING_SETUP_FEE':
       await handleSetupFeeStep(
-        phone, session, input, wa
+        phone, session, input, rawText, wa
       );
       break;
     case 'BANK_SELECT':
@@ -301,7 +304,7 @@ export async function handleOnboardingInput(
 // STEP HANDLERS
 // ============================================================
 
-// ─── Step 1: Collect name ──────────────────────────────────
+// ─── Step 1: Collect name ─────────────────────────────────
 async function handleCollectName(
   phone:   string,
   session: OnboardingState,
@@ -558,7 +561,6 @@ async function handleCollectEmail(
 }
 
 // ─── Step 7: Show setup fee ───────────────────────────────
-// ✅ Updated — checks for active trial code first
 export async function showSetupFeeInfo(
   phone:   string,
   session: OnboardingState,
@@ -580,8 +582,7 @@ export async function showSetupFeeInfo(
     return;
   }
 
-  // ✅ Check if school has active trial code
-  // If yes — skip payment completely!
+  // ✅ Check for active trial session
   const hasTrial = await checkActiveTrial(
     formatPhone(phone)
   );
@@ -634,7 +635,9 @@ export async function showSetupFeeInfo(
     `Only *1.5% per fee payment*\n` +
     `added on parent's bill.\n` +
     `Your school gets *100%*! 💪\n` +
-    `━━━━━━━━━━━━━━━━`
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `💡 *Have a trial code?*\n` +
+    `Type it now to get started FREE!`
   );
 
   await delay(1000);
@@ -659,12 +662,30 @@ export async function showSetupFeeInfo(
 }
 
 // ─── Step 7b: Handle setup fee actions ────────────────────
+// ✅ Now accepts rawText to check trial code pattern
 async function handleSetupFeeStep(
   phone:   string,
   session: OnboardingState,
   input:   string,
+  rawText: string,
   wa:      WhatsApp
 ): Promise<void> {
+  // ✅ TRIAL CODE CHECK — runs first
+  // User can type trial code at this step
+  if (TRIAL_CODE_PATTERN.test(rawText.trim())) {
+    console.log(
+      `[Onboarding] Trial code at setup fee step: ` +
+      `${rawText.trim()}`
+    );
+    await handleTrialCodeInOnboarding(
+      phone,
+      rawText.trim().toUpperCase(),
+      session,
+      wa
+    );
+    return;
+  }
+
   // Check if payment was completed
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
@@ -759,6 +780,7 @@ async function handleSetupFeeStep(
     return;
   }
 
+  // Default — show setup fee again
   await showSetupFeeInfo(phone, session, wa);
 }
 
@@ -829,7 +851,7 @@ async function generateAndSendSetupFeeLink(
 // ✅ TRIAL CODE HELPERS
 // ============================================================
 
-// Check if phone has an active trial session
+// ─── Check if phone has an active trial ───────────────────
 async function checkActiveTrial(
   phone: string
 ): Promise<boolean> {
@@ -844,7 +866,6 @@ async function checkActiveTrial(
 
   // Check if expired
   if (new Date(data.expires_at) < new Date()) {
-    // Mark as inactive
     await db
       .from('trial_sessions')
       .update({ active: false })
@@ -855,18 +876,185 @@ async function checkActiveTrial(
   return true;
 }
 
-// Handle trial onboarding — skip setup fee payment
+// ─── Handle trial code typed during onboarding ────────────
+// Called when user types TRIAL-XXXX-XXXX at setup fee step
+async function handleTrialCodeInOnboarding(
+  phone:   string,
+  code:    string,
+  session: OnboardingState,
+  wa:      WhatsApp
+): Promise<void> {
+  console.log(
+    `[Onboarding] Checking trial code: ${code} ` +
+    `for phone: ${phone}`
+  );
+
+  // Look up code in DB
+  const { data, error } = await db
+    .from('trial_codes')
+    .select('*')
+    .eq('code', code)
+    .maybeSingle();
+
+  console.log(
+    `[Onboarding] Trial code DB result:`,
+    JSON.stringify({ data, error })
+  );
+
+  // Code not found
+  if (error || !data) {
+    await wa.text(
+      phone,
+      `❌ *Invalid Code*\n\n` +
+      `The code *${code}* is not valid.\n\n` +
+      `Please check the code and try again.\n\n` +
+      `Or proceed with normal payment:`
+    );
+    await delay(500);
+    await wa.buttons(
+      phone,
+      `What would you like to do?`,
+      [
+        {
+          id:    'PROCEED_SETUP_FEE',
+          title: '💳 Pay Setup Fee',
+        },
+        {
+          id:    'SETUP_FEE_QUESTION',
+          title: '❓ Questions',
+        },
+      ]
+    );
+    return;
+  }
+
+  // Already used
+  if (data.used) {
+    await wa.text(
+      phone,
+      `❌ *Code Already Used*\n\n` +
+      `This trial code has already been used.\n\n` +
+      `Each code is for one school only.\n\n` +
+      `Contact us for a new code:\n` +
+      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
+    );
+    await delay(500);
+    await wa.buttons(
+      phone,
+      `Or proceed with normal payment:`,
+      [
+        {
+          id:    'PROCEED_SETUP_FEE',
+          title: '💳 Pay Setup Fee',
+        },
+      ]
+    );
+    return;
+  }
+
+  // Expired
+  if (new Date(data.expires_at) < new Date()) {
+    await wa.text(
+      phone,
+      `❌ *Code Expired*\n\n` +
+      `This trial code has expired.\n\n` +
+      `Contact us for a new code:\n` +
+      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
+    );
+    await delay(500);
+    await wa.buttons(
+      phone,
+      `Or proceed with normal payment:`,
+      [
+        {
+          id:    'PROCEED_SETUP_FEE',
+          title: '💳 Pay Setup Fee',
+        },
+      ]
+    );
+    return;
+  }
+
+  // ✅ Valid code! Apply trial
+  console.log(
+    `[Onboarding] ✅ Valid trial code! ` +
+    `Applying for ${phone}...`
+  );
+
+  // Mark code as used
+  const { error: updateError } = await db
+    .from('trial_codes')
+    .update({
+      used:          true,
+      used_at:       new Date().toISOString(),
+      used_by_phone: formatPhone(phone),
+    })
+    .eq('id', data.id);
+
+  if (updateError) {
+    console.error(
+      '[Onboarding] Trial code update error:',
+      updateError
+    );
+  }
+
+  // Save trial session
+  const { error: sessionError } = await db
+    .from('trial_sessions')
+    .upsert(
+      {
+        phone:      formatPhone(phone),
+        code,
+        active:     true,
+        expires_at: new Date(
+          Date.now() + 24 * 60 * 60 * 1000
+        ).toISOString(),
+        created_at: new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
+
+  if (sessionError) {
+    console.error(
+      '[Onboarding] Trial session error:',
+      sessionError
+    );
+  }
+
+  // Notify super admin
+  const superPhone =
+    Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+  if (superPhone) {
+    try {
+      const notifyWa = new WhatsApp();
+      await notifyWa.text(
+        superPhone,
+        `🎁 *Trial Code Used!*\n\n` +
+        `Code: *${code}*\n` +
+        `School: ${data.school_name ?? 'Unknown'}\n` +
+        `Phone: ${formatPhone(phone)}\n` +
+        `⏰ ${new Date().toLocaleString('en-NG')}`
+      );
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // Apply trial — skip payment
+  await handleTrialOnboarding(phone, session, wa);
+}
+
+// ─── Apply trial — skip setup fee payment ─────────────────
 async function handleTrialOnboarding(
   phone:   string,
   session: OnboardingState,
   wa:      WhatsApp
 ): Promise<void> {
   console.log(
-    `[Onboarding] ✅ Trial active for ${phone} — ` +
-    `skipping setup fee`
+    `[Onboarding] ✅ Applying trial for ${phone}`
   );
 
-  // Mark school setup fee as paid (FREE trial)
+  // Mark school setup fee as paid (FREE)
   await db
     .from('schools')
     .update({
@@ -893,32 +1081,12 @@ async function handleTrialOnboarding(
   await db
     .from('trial_sessions')
     .update({ active: false })
-    .eq('phone', phone);
+    .eq('phone', formatPhone(phone));
 
   // Update onboarding session
   session.setupFeePaid = true;
   session.step         = 'BANK_SELECT';
   await setOnboardingSession(phone, session);
-
-  // Notify super admin
-  const superPhone =
-    Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
-  if (superPhone) {
-    try {
-      const notifyWa = new WhatsApp();
-      await notifyWa.text(
-        superPhone,
-        `🎁 *Trial Used for Onboarding!*\n\n` +
-        `🏫 School: *${session.schoolName}*\n` +
-        `📍 Location: ${session.location}\n` +
-        `👥 Students: ${session.studentCountRange}\n` +
-        `📱 Phone: ${phone}\n` +
-        `⏰ ${new Date().toLocaleString('en-NG')}`
-      );
-    } catch {
-      // Non-critical
-    }
-  }
 
   // Tell school the good news
   await wa.text(
@@ -1241,7 +1409,7 @@ async function handleBankConfirm(
   }
 }
 
-// ─── Step 9: Class setup ───────────────────────────────────
+// ─── Step 9: Class setup ──────────────────────────────────
 async function showClassSetup(
   phone:   string,
   session: OnboardingState,
@@ -1573,7 +1741,7 @@ async function applyClassTemplate(
   await setOnboardingSession(phone, session);
 }
 
-// ─── Step 10: Staff setup ──────────────────────────────────
+// ─── Step 10: Staff setup ─────────────────────────────────
 async function showStaffSetup(
   phone:   string,
   session: OnboardingState,
