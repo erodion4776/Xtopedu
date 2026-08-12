@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import {
   Card,
@@ -9,10 +8,10 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
+import { Button }   from '@/components/ui/button';
+import { Input }    from '@/components/ui/input';
+import { Label }    from '@/components/ui/label';
+import { Badge }    from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Plus,
@@ -23,31 +22,36 @@ import {
   ToggleRight,
   Eye,
   Download,
+  CheckCircle,
+  Loader2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
+// ── Types ──────────────────────────────────────────────────
+
 interface FormField {
-  id?:          string;
-  field_key:    string;
-  field_label:  string;
-  field_type:   string;
-  required:     boolean;
-  order_index:  number;
+  id?:         string;
+  field_key:   string;
+  field_label: string;
+  field_type:  string;
+  required:    boolean;
+  order_index: number;
 }
 
 interface PaymentForm {
-  id:                  string;
-  command:             string;
-  title:               string;
-  description:         string | null;
-  amount:              number;
-  is_active:           boolean;
-  bank_name:           string | null;
-  account_number:      string | null;
-  account_name:        string | null;
-  completion_message:  string | null;
-  receipt_title:       string | null;
-  created_at:          string;
+  id:                 string;
+  command:            string;
+  title:              string;
+  description:        string | null;
+  amount:             number;
+  is_active:          boolean;
+  bank_name:          string | null;
+  bank_code:          string | null;
+  account_number:     string | null;
+  account_name:       string | null;
+  completion_message: string | null;
+  receipt_title:      string | null;
+  created_at:         string;
   payment_form_fields: FormField[];
 }
 
@@ -63,6 +67,36 @@ interface Payment {
   created_at:    string;
 }
 
+// ── Nigerian banks list — no more memorizing codes ────────
+const NIGERIAN_BANKS = [
+  { name: 'Access Bank',            code: '044' },
+  { name: 'Citibank Nigeria',       code: '023' },
+  { name: 'Ecobank Nigeria',        code: '050' },
+  { name: 'Fidelity Bank',          code: '070' },
+  { name: 'First Bank of Nigeria',  code: '011' },
+  { name: 'First City Monument Bank (FCMB)', code: '214' },
+  { name: 'Guaranty Trust Bank (GTBank)', code: '058' },
+  { name: 'Heritage Bank',          code: '030' },
+  { name: 'Keystone Bank',          code: '082' },
+  { name: 'Kuda Bank',              code: '090267' },
+  { name: 'Opay',                   code: '100004' },
+  { name: 'Palmpay',                code: '100033' },
+  { name: 'Polaris Bank',           code: '076' },
+  { name: 'Providus Bank',          code: '101' },
+  { name: 'Stanbic IBTC Bank',      code: '221' },
+  { name: 'Standard Chartered',     code: '068' },
+  { name: 'Sterling Bank',          code: '232' },
+  { name: 'Union Bank',             code: '032' },
+  { name: 'United Bank for Africa (UBA)', code: '033' },
+  { name: 'Unity Bank',             code: '215' },
+  { name: 'Wema Bank',              code: '035' },
+  { name: 'Zenith Bank',            code: '057' },
+  { name: 'Moniepoint MFB',         code: '50515' },
+  { name: 'VFD Microfinance Bank',  code: '566' },
+];
+
+// ── Helpers ────────────────────────────────────────────────
+
 const fmt = (n: number) =>
   new Intl.NumberFormat('en-NG', {
     style:                 'currency',
@@ -70,59 +104,54 @@ const fmt = (n: number) =>
     minimumFractionDigits: 0,
   }).format(n);
 
-export default function PaymentFormsPage() {
-  const router = useRouter();
+const DEFAULT_FIELDS: FormField[] = [
+  {
+    field_key:   'full_name',
+    field_label: 'Full Name',
+    field_type:  'text',
+    required:    true,
+    order_index: 0,
+  },
+  {
+    field_key:   'phone',
+    field_label: 'Phone Number',
+    field_type:  'phone',
+    required:    true,
+    order_index: 1,
+  },
+];
 
-  const [forms, setForms]           = useState<PaymentForm[]>([]);
-  const [loading, setLoading]       = useState(true);
+// ── Component ──────────────────────────────────────────────
+
+export default function PaymentFormsPage() {
+  const [forms, setForms]       = useState<PaymentForm[]>([]);
+  const [loading, setLoading]   = useState(true);
   const [showCreate, setShowCreate] = useState(false);
-  const [saving, setSaving]         = useState(false);
+  const [saving, setSaving]     = useState(false);
+
   const [viewingPayments, setViewingPayments] =
     useState<string | null>(null);
-  const [payments, setPayments]     = useState<Payment[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
   const [loadingPayments, setLoadingPayments] =
     useState(false);
 
-  // Form creation state
-  const [command, setCommand]             = useState('');
-  const [title, setTitle]                 = useState('');
-  const [description, setDescription]     = useState('');
-  const [amount, setAmount]               = useState('');
-  const [bankName, setBankName]           = useState('');
-  const [bankCode, setBankCode]           = useState('');
-  const [accountNumber, setAccountNumber] = useState('');
-  const [accountName, setAccountName]     = useState('');
-  const [completionMessage, setCompletionMessage] =
-    useState('');
-  const [receiptTitle, setReceiptTitle]   = useState('');
+  // ── Form state ───────────────────────────────────────────
+  const [command,           setCommand]           = useState('');
+  const [title,             setTitle]             = useState('');
+  const [description,       setDescription]       = useState('');
+  const [amount,            setAmount]            = useState('');
+  const [selectedBank,      setSelectedBank]      = useState('');
+  const [accountNumber,     setAccountNumber]     = useState('');
+  const [accountName,       setAccountName]       = useState('');
+  const [verifying,         setVerifying]         = useState(false);
+  const [completionMessage, setCompletionMessage] = useState('');
+  const [receiptTitle,      setReceiptTitle]      = useState('');
+  const [fields,            setFields]            =
+    useState<FormField[]>(DEFAULT_FIELDS);
 
-  const [fields, setFields] = useState<FormField[]>([
-    {
-      field_key:   'full_name',
-      field_label: 'Full Name',
-      field_type:  'text',
-      required:    true,
-      order_index: 0,
-    },
-    {
-      field_key:   'phone',
-      field_label: 'Phone Number',
-      field_type:  'phone',
-      required:    true,
-      order_index: 1,
-    },
-    {
-      field_key:   'email',
-      field_label: 'Email Address',
-      field_type:  'email',
-      required:    false,
-      order_index: 2,
-    },
-  ]);
+  useEffect(() => { loadForms(); }, []);
 
-  useEffect(() => {
-    loadForms();
-  }, []);
+  // ── Data loading ─────────────────────────────────────────
 
   async function loadForms() {
     setLoading(true);
@@ -145,7 +174,6 @@ export default function PaymentFormsPage() {
   async function loadPayments(formId: string) {
     setLoadingPayments(true);
     setViewingPayments(formId);
-
     try {
       const { data, error } = await supabase
         .from('payment_form_payments')
@@ -163,85 +191,69 @@ export default function PaymentFormsPage() {
     }
   }
 
-  // Export to CSV
-  function exportCSV(
-    form:     PaymentForm,
-    payments: Payment[]
-  ) {
-    if (!payments.length) {
-      toast.error('No payments to export');
+  // ── Account verification ─────────────────────────────────
+  // ✅ Uses bank dropdown — no manual code entry
+
+  async function verifyAccount() {
+    if (!accountNumber || accountNumber.length < 10) {
+      toast.error('Enter a valid 10-digit account number');
+      return;
+    }
+    if (!selectedBank) {
+      toast.error('Please select your bank first');
       return;
     }
 
-    const fields = form.payment_form_fields
-      .sort((a, b) => a.order_index - b.order_index);
+    const bank = NIGERIAN_BANKS.find(
+      (b) => b.name === selectedBank
+    );
+    if (!bank) {
+      toast.error('Bank not found');
+      return;
+    }
 
-    // Build headers
-    const headers = [
-      'Serial No',
-      'Phone',
-      ...fields.map((f) => f.field_label),
-      'Amount',
-      'Status',
-      'Paid At',
-      'Reference',
-    ];
+    setVerifying(true);
+    setAccountName('');
 
-    // Build rows
-    const rows = payments.map((p) => {
-      const data = p.data as Record<string, string>;
-      return [
-        p.serial_number ?? '',
-        p.phone,
-        ...fields.map((f) => data[f.field_key] ?? ''),
-        fmt(p.amount),
-        p.status,
-        p.paid_at
-          ? new Date(p.paid_at).toLocaleDateString(
-              'en-NG'
-            )
-          : 'Not paid',
-        p.gateway_ref,
-      ];
-    });
+    try {
+      const res = await fetch(
+        `/api/admin/verify-account?` +
+        `account=${accountNumber}&bank=${bank.code}`
+      );
+      const data = await res.json();
 
-    const csv = [
-      headers.join(','),
-      ...rows.map((r) =>
-        r.map((v) => `"${String(v).replace(/"/g, '""')}"`)
-          .join(',')
-      ),
-    ].join('\n');
-
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download =
-      `${form.command}-payments-${
-        new Date().toISOString().split('T')[0]
-      }.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    toast.success('✅ CSV downloaded!');
+      if (data.account_name) {
+        setAccountName(data.account_name);
+        toast.success(`✅ ${data.account_name}`);
+      } else {
+        toast.error(
+          data.message ?? 'Could not verify account'
+        );
+      }
+    } catch {
+      toast.error('Verification failed. Try again.');
+    } finally {
+      setVerifying(false);
+    }
   }
 
+  // ── Field management ─────────────────────────────────────
+
   function addField() {
-    setFields([
-      ...fields,
+    setFields((prev) => [
+      ...prev,
       {
-        field_key:   `field_${fields.length}`,
+        field_key:   `field_${prev.length}`,
         field_label: '',
         field_type:  'text',
         required:    true,
-        order_index: fields.length,
+        order_index: prev.length,
       },
     ]);
   }
 
   function removeField(index: number) {
-    setFields(fields.filter((_, i) => i !== index));
+    setFields((prev) => prev.filter((_, i) => i !== index));
   }
 
   function updateField(
@@ -249,46 +261,25 @@ export default function PaymentFormsPage() {
     key:   keyof FormField,
     value: string | boolean | number
   ) {
-    const updated = [...fields];
-    updated[index] = { ...updated[index], [key]: value };
-    setFields(updated);
+    setFields((prev) => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], [key]: value };
+      return updated;
+    });
   }
 
-  async function verifyAccount() {
-    if (!accountNumber || !bankCode) {
-      toast.error('Enter account number and bank code');
-      return;
-    }
-    toast.loading('Verifying...');
-    try {
-      const res = await fetch(
-        `/api/admin/verify-account?` +
-        `account=${accountNumber}&bank=${bankCode}`
-      );
-      const data = await res.json();
-      toast.dismiss();
-      if (data.account_name) {
-        setAccountName(data.account_name);
-        toast.success(`✅ ${data.account_name}`);
-      } else {
-        toast.error('Could not verify account');
-      }
-    } catch {
-      toast.dismiss();
-      toast.error('Verification failed');
-    }
-  }
+  // ── Save form ────────────────────────────────────────────
 
   async function handleSave() {
     if (!command.trim()) {
-      toast.error('Command is required');
+      toast.error('Bot command is required');
       return;
     }
     if (!title.trim()) {
-      toast.error('Title is required');
+      toast.error('Form title is required');
       return;
     }
-    if (!amount || isNaN(Number(amount))) {
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
       toast.error('Valid amount is required');
       return;
     }
@@ -297,8 +288,11 @@ export default function PaymentFormsPage() {
       return;
     }
 
-    setSaving(true);
+    const bank = NIGERIAN_BANKS.find(
+      (b) => b.name === selectedBank
+    );
 
+    setSaving(true);
     try {
       const { data: form, error: formError } =
         await supabase
@@ -308,8 +302,8 @@ export default function PaymentFormsPage() {
             title:              title.trim(),
             description:        description.trim() || null,
             amount:             Number(amount),
-            bank_name:          bankName.trim()   || null,
-            bank_code:          bankCode.trim()   || null,
+            bank_name:          bank?.name         || null,
+            bank_code:          bank?.code         || null, // ✅ set from dropdown
             account_number:     accountNumber.trim() || null,
             account_name:       accountName.trim() || null,
             completion_message: completionMessage.trim() || null,
@@ -350,10 +344,11 @@ export default function PaymentFormsPage() {
       await loadForms();
     } catch (err: unknown) {
       console.error(err);
-      const msg = err instanceof Error
-        ? err.message
-        : 'Failed to create form';
-      toast.error(msg);
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : 'Failed to create form'
+      );
     } finally {
       setSaving(false);
     }
@@ -364,34 +359,17 @@ export default function PaymentFormsPage() {
     setTitle('');
     setDescription('');
     setAmount('');
-    setBankName('');
-    setBankCode('');
+    setSelectedBank('');
     setAccountNumber('');
     setAccountName('');
     setCompletionMessage('');
     setReceiptTitle('');
-    setFields([
-      {
-        field_key:   'full_name',
-        field_label: 'Full Name',
-        field_type:  'text',
-        required:    true,
-        order_index: 0,
-      },
-      {
-        field_key:   'phone',
-        field_label: 'Phone Number',
-        field_type:  'phone',
-        required:    true,
-        order_index: 1,
-      },
-    ]);
+    setFields(DEFAULT_FIELDS);
   }
 
-  async function toggleForm(
-    formId:   string,
-    isActive: boolean
-  ) {
+  // ── Toggle / Delete ──────────────────────────────────────
+
+  async function toggleForm(formId: string, isActive: boolean) {
     const { error } = await supabase
       .from('payment_forms')
       .update({
@@ -417,9 +395,7 @@ export default function PaymentFormsPage() {
   }
 
   async function deleteForm(formId: string) {
-    if (!confirm('Delete this form and all payments?')) {
-      return;
-    }
+    if (!confirm('Delete this form and all its payments?')) return;
 
     const { error } = await supabase
       .from('payment_forms')
@@ -430,9 +406,7 @@ export default function PaymentFormsPage() {
       toast.error('Failed to delete form');
     } else {
       toast.success('Form deleted');
-      setForms((prev) =>
-        prev.filter((f) => f.id !== formId)
-      );
+      setForms((prev) => prev.filter((f) => f.id !== formId));
       if (viewingPayments === formId) {
         setViewingPayments(null);
         setPayments([]);
@@ -445,6 +419,67 @@ export default function PaymentFormsPage() {
     toast.success(`Copied: "${cmd}"`);
   }
 
+  // ── CSV export ───────────────────────────────────────────
+
+  function exportCSV(form: PaymentForm, pmts: Payment[]) {
+    if (!pmts.length) {
+      toast.error('No payments to export');
+      return;
+    }
+
+    const sortedFields = [...form.payment_form_fields].sort(
+      (a, b) => a.order_index - b.order_index
+    );
+
+    const headers = [
+      'Serial No',
+      'Phone',
+      ...sortedFields.map((f) => f.field_label),
+      'Amount',
+      'Status',
+      'Paid At',
+      'Reference',
+    ];
+
+    const rows = pmts.map((p) => [
+      p.serial_number ?? '',
+      p.phone,
+      ...sortedFields.map(
+        (f) => (p.data as Record<string, string>)[f.field_key] ?? ''
+      ),
+      fmt(p.amount),
+      p.status,
+      p.paid_at
+        ? new Date(p.paid_at).toLocaleDateString('en-NG')
+        : 'Not paid',
+      p.gateway_ref,
+    ]);
+
+    const csv = [
+      headers.join(','),
+      ...rows.map((r) =>
+        r
+          .map((v) =>
+            `"${String(v).replace(/"/g, '""')}"`
+          )
+          .join(',')
+      ),
+    ].join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download =
+      `${form.command}-payments-` +
+      `${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('✅ CSV downloaded!');
+  }
+
+  // ── Derived ──────────────────────────────────────────────
+
   const viewingForm = forms.find(
     (f) => f.id === viewingPayments
   );
@@ -452,6 +487,8 @@ export default function PaymentFormsPage() {
   const totalCollected = payments
     .filter((p) => p.status === 'Success')
     .reduce((s, p) => s + p.amount, 0);
+
+  // ── Render ───────────────────────────────────────────────
 
   return (
     <div className="space-y-6">
@@ -492,7 +529,7 @@ export default function PaymentFormsPage() {
         </div>
       </div>
 
-      {/* Info card */}
+      {/* How it works */}
       {!showCreate && !viewingPayments && (
         <Card className="border-blue-200 bg-blue-50">
           <CardContent className="pt-4">
@@ -502,16 +539,16 @@ export default function PaymentFormsPage() {
             <div className="text-sm text-blue-700 space-y-1">
               <p>1. Create a form with a bot command</p>
               <p>2. Someone types the command on WhatsApp</p>
-              <p>3. Bot collects their details</p>
-              <p>4. They pay via Paystack</p>
-              <p>5. They get your custom receipt message</p>
+              <p>3. Bot collects their details step-by-step</p>
+              <p>4. They pay securely via Paystack</p>
+              <p>5. They receive your custom receipt message</p>
               <p>6. View & export all payments here</p>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Create Form */}
+      {/* ── Create Form ─────────────────────────────────── */}
       {showCreate && (
         <Card className="border-green-200">
           <CardHeader>
@@ -519,11 +556,11 @@ export default function PaymentFormsPage() {
               ➕ Create New Payment Form
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-6">
+          <CardContent className="space-y-8">
 
             {/* Basic Info */}
-            <div className="space-y-4">
-              <h3 className="font-semibold text-sm">
+            <section className="space-y-4">
+              <h3 className="font-semibold text-sm text-gray-700 border-b pb-1">
                 Basic Information
               </h3>
 
@@ -543,7 +580,7 @@ export default function PaymentFormsPage() {
                     }
                   />
                   <p className="text-xs text-gray-400 mt-1">
-                    User types this to start
+                    User types this to start the form
                   </p>
                 </div>
 
@@ -560,6 +597,11 @@ export default function PaymentFormsPage() {
                       setAmount(e.target.value)
                     }
                   />
+                  {amount && !isNaN(Number(amount)) && (
+                    <p className="text-xs text-green-600 mt-1 font-medium">
+                      {fmt(Number(amount))}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -579,7 +621,10 @@ export default function PaymentFormsPage() {
 
               <div>
                 <Label htmlFor="description">
-                  Description (shown at start)
+                  Description
+                  <span className="text-gray-400 font-normal ml-1 text-xs">
+                    (shown at start of form)
+                  </span>
                 </Label>
                 <Input
                   id="description"
@@ -590,11 +635,100 @@ export default function PaymentFormsPage() {
                   }
                 />
               </div>
-            </div>
+            </section>
+
+            {/* Bank Account — Dropdown, no manual code */}
+            <section className="space-y-4">
+              <h3 className="font-semibold text-sm text-gray-700 border-b pb-1">
+                🏦 Payment Account
+                <span className="text-gray-400 font-normal ml-1 text-xs">
+                  (optional — for display only)
+                </span>
+              </h3>
+
+              <div className="grid grid-cols-2 gap-4">
+                {/* ✅ Bank selector — no code needed */}
+                <div>
+                  <Label>Select Bank</Label>
+                  <select
+                    value={selectedBank}
+                    onChange={(e) => {
+                      setSelectedBank(e.target.value);
+                      setAccountName(''); // reset on bank change
+                    }}
+                    className="w-full h-10 text-sm border rounded-md px-3 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">— Select bank —</option>
+                    {NIGERIAN_BANKS.map((b) => (
+                      <option key={b.code} value={b.name}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Account number + verify */}
+                <div>
+                  <Label>Account Number</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="10 digits"
+                      value={accountNumber}
+                      onChange={(e) => {
+                        setAccountNumber(e.target.value);
+                        setAccountName('');
+                      }}
+                      maxLength={10}
+                      className="font-mono"
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={verifyAccount}
+                      disabled={
+                        verifying ||
+                        !selectedBank ||
+                        accountNumber.length < 10
+                      }
+                      type="button"
+                      className="shrink-0"
+                    >
+                      {verifying ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        'Verify'
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Verified account name */}
+              {accountName && (
+                <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg p-3">
+                  <CheckCircle className="h-4 w-4 text-green-600 shrink-0" />
+                  <div>
+                    <p className="text-green-700 text-sm font-semibold">
+                      {accountName}
+                    </p>
+                    <p className="text-green-600 text-xs">
+                      {selectedBank}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Helper tip */}
+              {!accountName && selectedBank && (
+                <p className="text-xs text-gray-400">
+                  Enter account number then tap{' '}
+                  <strong>Verify</strong> to confirm
+                </p>
+              )}
+            </section>
 
             {/* Completion Message */}
-            <div className="space-y-4">
-              <h3 className="font-semibold text-sm">
+            <section className="space-y-4">
+              <h3 className="font-semibold text-sm text-gray-700 border-b pb-1">
                 ✅ After Payment Message
               </h3>
 
@@ -620,8 +754,7 @@ export default function PaymentFormsPage() {
                   id="completionMessage"
                   placeholder={
                     `e.g. Your registration is complete!\n\n` +
-                    `Show this receipt at the engineering\n` +
-                    `department gate to collect your materials.\n\n` +
+                    `Show this receipt at the gate.\n\n` +
                     `Venue: Engineering Complex, Block A\n` +
                     `Time: 8AM - 4PM weekdays`
                   }
@@ -630,83 +763,23 @@ export default function PaymentFormsPage() {
                     setCompletionMessage(e.target.value)
                   }
                   rows={5}
-                  className="w-full border rounded-lg p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={
+                    'w-full border rounded-lg p-3 text-sm ' +
+                    'resize-none focus:outline-none ' +
+                    'focus:ring-2 focus:ring-blue-500'
+                  }
                 />
                 <p className="text-xs text-gray-400 mt-1">
-                  This message is sent after successful payment.
-                  Include instructions, venue, etc.
+                  Sent to the user after successful payment.
+                  Include instructions, venue, time, etc.
                 </p>
               </div>
-            </div>
-
-            {/* Bank Account */}
-            <div className="space-y-4">
-              <h3 className="font-semibold text-sm">
-                🏦 Payment Account
-                <span className="text-gray-400 font-normal ml-1 text-xs">
-                  (optional)
-                </span>
-              </h3>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label>Bank Name</Label>
-                  <Input
-                    placeholder="e.g. GTBank"
-                    value={bankName}
-                    onChange={(e) =>
-                      setBankName(e.target.value)
-                    }
-                  />
-                </div>
-                <div>
-                  <Label>Bank Code</Label>
-                  <Input
-                    placeholder="e.g. 058"
-                    value={bankCode}
-                    onChange={(e) =>
-                      setBankCode(e.target.value)
-                    }
-                  />
-                </div>
-              </div>
-
-              <div className="flex gap-2">
-                <div className="flex-1">
-                  <Label>Account Number</Label>
-                  <Input
-                    placeholder="10 digits"
-                    value={accountNumber}
-                    onChange={(e) =>
-                      setAccountNumber(e.target.value)
-                    }
-                    maxLength={10}
-                  />
-                </div>
-                <div className="flex items-end">
-                  <Button
-                    variant="outline"
-                    onClick={verifyAccount}
-                    type="button"
-                  >
-                    Verify
-                  </Button>
-                </div>
-              </div>
-
-              {accountName && (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                  <p className="text-green-700 text-sm font-medium">
-                    ✅ {accountName}
-                  </p>
-                </div>
-              )}
-            </div>
+            </section>
 
             {/* Form Fields */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="font-semibold text-sm">
+            <section className="space-y-4">
+              <div className="flex items-center justify-between border-b pb-1">
+                <h3 className="font-semibold text-sm text-gray-700">
                   📋 Form Fields
                 </h3>
                 <Button
@@ -724,7 +797,10 @@ export default function PaymentFormsPage() {
                 {fields.map((field, index) => (
                   <div
                     key={index}
-                    className="flex gap-2 items-end bg-gray-50 p-3 rounded-lg"
+                    className={
+                      'flex gap-2 items-end ' +
+                      'bg-gray-50 p-3 rounded-lg'
+                    }
                   >
                     <div className="flex-1 grid grid-cols-3 gap-2">
                       <div>
@@ -747,9 +823,12 @@ export default function PaymentFormsPage() {
                       <div>
                         <Label className="text-xs">
                           Key
+                          <span className="text-gray-400 ml-1">
+                            (auto)
+                          </span>
                         </Label>
                         <Input
-                          placeholder="e.g. full_name"
+                          placeholder="auto"
                           value={field.field_key}
                           onChange={(e) =>
                             updateField(
@@ -760,7 +839,7 @@ export default function PaymentFormsPage() {
                                 .replace(/\s+/g, '_')
                             )
                           }
-                          className="text-sm h-8 font-mono"
+                          className="text-sm h-8 font-mono text-gray-500"
                         />
                       </div>
                       <div>
@@ -778,11 +857,21 @@ export default function PaymentFormsPage() {
                           }
                           className="w-full h-8 text-sm border rounded px-2 bg-white"
                         >
-                          <option value="text">Text</option>
-                          <option value="email">Email</option>
-                          <option value="phone">Phone</option>
-                          <option value="number">Number</option>
-                          <option value="date">Date</option>
+                          <option value="text">
+                            Text
+                          </option>
+                          <option value="email">
+                            Email
+                          </option>
+                          <option value="phone">
+                            Phone
+                          </option>
+                          <option value="number">
+                            Number
+                          </option>
+                          <option value="date">
+                            Date
+                          </option>
                         </select>
                       </div>
                     </div>
@@ -804,7 +893,9 @@ export default function PaymentFormsPage() {
                       </label>
                       {fields.length > 1 && (
                         <button
-                          onClick={() => removeField(index)}
+                          onClick={() =>
+                            removeField(index)
+                          }
                           className="text-red-400 hover:text-red-600"
                           type="button"
                         >
@@ -815,51 +906,58 @@ export default function PaymentFormsPage() {
                   </div>
                 ))}
               </div>
-            </div>
+            </section>
 
             {/* Bot Preview */}
-            <div className="bg-gray-50 rounded-lg p-4">
+            <section className="bg-gray-50 rounded-lg p-4">
               <p className="font-semibold text-sm mb-2">
                 📱 Bot Preview:
               </p>
               <div className="text-xs text-gray-600 font-mono bg-white rounded p-3 border space-y-1">
                 <p className="text-blue-600">
-                  User: {command || 'engr reg'}
+                  User: {command || 'your-command'}
                 </p>
                 <p>
                   Bot: 🎯 *{title || 'Payment Form'}*
                 </p>
                 {description && (
-                  <p>Bot: {description}</p>
+                  <p className="text-gray-500">
+                    Bot: {description}
+                  </p>
                 )}
                 <p>
-                  Bot: 💵 Amount: *{
-                    amount ? fmt(Number(amount)) : '₦5,000'
-                  }*
+                  Bot: 💵 Amount:{' '}
+                  <strong>
+                    {amount
+                      ? fmt(Number(amount))
+                      : '₦5,000'}
+                  </strong>
                 </p>
                 {fields.map((f) => (
                   <p key={f.field_key}>
-                    Bot: Please enter your *{
-                      f.field_label || 'Field'
-                    }*{f.required ? ' *' : ''}:
+                    Bot: Please enter your{' '}
+                    <strong>
+                      {f.field_label || 'Field'}
+                    </strong>
+                    {f.required ? ' *' : ''}:
                   </p>
                 ))}
                 <p className="text-gray-400">
-                  ... (confirmation screen)
+                  ... (confirmation + payment link)
                 </p>
-                <p>Bot: 💳 Payment link sent!</p>
                 <p className="text-green-600">
                   Bot: 🎉 *
-                  {receiptTitle || 'Payment Receipt'}
-                  *
+                  {receiptTitle || 'Payment Receipt'}*
                 </p>
                 {completionMessage && (
                   <p className="text-green-600">
-                    Bot: {completionMessage.split('\n')[0]}...
+                    Bot:{' '}
+                    {completionMessage.split('\n')[0]}
+                    ...
                   </p>
                 )}
               </div>
-            </div>
+            </section>
 
             {/* Actions */}
             <div className="flex gap-2">
@@ -887,7 +985,7 @@ export default function PaymentFormsPage() {
         </Card>
       )}
 
-      {/* Payments List for selected form */}
+      {/* ── Payments View ────────────────────────────────── */}
       {viewingPayments && viewingForm && (
         <Card>
           <CardHeader>
@@ -927,8 +1025,8 @@ export default function PaymentFormsPage() {
               </div>
             </div>
           </CardHeader>
-          <CardContent>
 
+          <CardContent>
             {/* Stats */}
             <div className="grid grid-cols-3 gap-4 mb-4">
               <div className="bg-blue-50 rounded-lg p-3 text-center">
@@ -941,9 +1039,11 @@ export default function PaymentFormsPage() {
               </div>
               <div className="bg-green-50 rounded-lg p-3 text-center">
                 <p className="text-2xl font-bold text-green-600">
-                  {payments.filter(
-                    (p) => p.status === 'Success'
-                  ).length}
+                  {
+                    payments.filter(
+                      (p) => p.status === 'Success'
+                    ).length
+                  }
                 </p>
                 <p className="text-xs text-gray-500">
                   Paid
@@ -988,7 +1088,7 @@ export default function PaymentFormsPage() {
                       <th className="text-left p-2 font-medium text-gray-600">
                         S/N
                       </th>
-                      {viewingForm.payment_form_fields
+                      {[...viewingForm.payment_form_fields]
                         .sort(
                           (a, b) =>
                             a.order_index - b.order_index
@@ -1017,8 +1117,11 @@ export default function PaymentFormsPage() {
                   </thead>
                   <tbody>
                     {payments.map((payment) => {
-                      const data = payment.data as
-                        Record<string, string>;
+                      const pData =
+                        payment.data as Record<
+                          string,
+                          string
+                        >;
                       return (
                         <tr
                           key={payment.id}
@@ -1031,7 +1134,9 @@ export default function PaymentFormsPage() {
                                 ).padStart(3, '0')}`
                               : '-'}
                           </td>
-                          {viewingForm.payment_form_fields
+                          {[
+                            ...viewingForm.payment_form_fields,
+                          ]
                             .sort(
                               (a, b) =>
                                 a.order_index -
@@ -1042,7 +1147,7 @@ export default function PaymentFormsPage() {
                                 key={f.field_key}
                                 className="p-2"
                               >
-                                {data[f.field_key] ??
+                                {pData[f.field_key] ??
                                   '-'}
                               </td>
                             ))}
@@ -1089,7 +1194,7 @@ export default function PaymentFormsPage() {
         </Card>
       )}
 
-      {/* Forms List */}
+      {/* ── Forms List ───────────────────────────────────── */}
       {!showCreate && !viewingPayments && (
         loading ? (
           <div className="space-y-3">
@@ -1156,7 +1261,7 @@ export default function PaymentFormsPage() {
                         </p>
                       )}
 
-                      <div className="flex gap-3 text-xs text-gray-400 mt-1">
+                      <div className="flex gap-3 text-xs text-gray-400 mt-1 flex-wrap">
                         <span>
                           📋{' '}
                           {form.payment_form_fields
@@ -1166,13 +1271,19 @@ export default function PaymentFormsPage() {
                         {form.account_name && (
                           <span>
                             🏦 {form.account_name}
+                            {form.bank_name && (
+                              <span className="text-gray-300 ml-1">
+                                ({form.bank_name})
+                              </span>
+                            )}
                           </span>
                         )}
                         {form.completion_message && (
-                          <span>✅ Has receipt message</span>
+                          <span>
+                            ✅ Has receipt message
+                          </span>
                         )}
                       </div>
-
                     </div>
 
                     {/* Actions */}
