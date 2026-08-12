@@ -1,16 +1,14 @@
 // ============================================================
 // SCHOOLBOT - MARKETING SESSION SERVICE
 // _shared/bot/marketing/marketing.session.ts
-//
-// Stores demo sessions in Supabase DB instead of memory
-// so they survive across Edge Function instances.
+// ✅ Fixed: hasActiveMarketingSession returns false
+//    for REGISTERING state so admin panel works after setup
 // ============================================================
 
 import { getSupabase } from '../../supabase.ts';
 
 const db = getSupabase();
 
-// 12 hour TTL for demo sessions
 const SESSION_TTL_HOURS = 12;
 
 export type DemoSession = {
@@ -45,22 +43,22 @@ export async function getMarketingSession(
 
   return {
     phone:        data.phone,
-    state:        data.state        ?? 'WELCOME',
-    contactName:  data.contact_name ?? null,
-    schoolName:   data.school_name  ?? null,
-    schoolType:   data.school_type  ?? null,
-    location:     data.location     ?? null,
+    state:        data.state         ?? 'WELCOME',
+    contactName:  data.contact_name  ?? null,
+    schoolName:   data.school_name   ?? null,
+    schoolType:   data.school_type   ?? null,
+    location:     data.location      ?? null,
     studentCount: data.student_count ?? null,
-    email:        data.email        ?? null,
+    email:        data.email         ?? null,
     aiHistory:    (data.ai_history as Array<{
-      role: string;
+      role:    string;
       content: string;
     }>) ?? [],
-    registered:   data.registered   ?? false,
+    registered:   data.registered    ?? false,
   };
 }
 
-// ─── Save / update session in DB ──────────────────────────
+// ─── Save session to DB ────────────────────────────────────
 export async function saveMarketingSession(
   session: DemoSession
 ): Promise<void> {
@@ -106,8 +104,10 @@ export async function createMarketingSession(
   return session;
 }
 
-// ─── Check if active session exists ───────────────────────
-// Used by handler.ts to route marketing users early
+// ─── Check if active marketing session exists ──────────────
+// ✅ Returns false for states that indicate the user
+// has moved past the marketing demo into onboarding
+// or has completed setup and is now an admin.
 export async function hasActiveMarketingSession(
   phone: string
 ): Promise<boolean> {
@@ -124,18 +124,49 @@ export async function hasActiveMarketingSession(
 
   if (!data) return false;
 
-  // Only return true if past welcome screen
-  // Fresh visitors still go through reset check
-  // so registered parents/staff are found correctly
-  return data.state !== 'WELCOME';
+  // ✅ Do NOT route to marketing bot for these states:
+  //
+  // WELCOME — brand new user, let reset check DB first
+  //           so registered parents/staff are found
+  //
+  // REGISTERING — user clicked "Register Now" and is
+  //               going through onboarding engine
+  //               (engine.ts handles their messages)
+  //
+  // NOT_INTERESTED — user said no, session inactive
+  //
+  // After showComplete() clears demo_sessions,
+  // this function returns false automatically ✅
+  if (
+    data.state === 'WELCOME'       ||
+    data.state === 'REGISTERING'   ||
+    data.state === 'NOT_INTERESTED'
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 // ─── Log demo interaction ──────────────────────────────────
 export async function logDemoInteraction(
-  phone: string,
+  phone:   string,
   feature: string
 ): Promise<void> {
   try {
+    await db
+      .from('demo_sessions')
+      .upsert(
+        {
+          phone,
+          state:         'DEMO_MENU',
+          interested:    true,
+          registered:    false,
+          last_activity: new Date().toISOString(),
+        },
+        { onConflict: 'phone' }
+      );
+
     const { data: session } = await db
       .from('demo_sessions')
       .select('id')
@@ -144,9 +175,9 @@ export async function logDemoInteraction(
 
     if (session?.id) {
       await db.from('demo_interactions').insert({
-        session_id: session.id,
+        session_id:  session.id,
         feature,
-        created_at: new Date().toISOString(),
+        created_at:  new Date().toISOString(),
       });
     }
   } catch {
