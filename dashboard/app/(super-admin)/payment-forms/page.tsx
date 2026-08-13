@@ -161,7 +161,7 @@ export default function PaymentFormsPage() {
   const [verifying,         setVerifying]         = useState(false);
   const [completionMessage, setCompletionMessage] = useState('');
   const [receiptTitle,      setReceiptTitle]      = useState('');
-  const [schoolPercent,     setSchoolPercent]     = useState('100'); // % school keeps; rest is platform commission
+  const [platformFee,       setPlatformFee]       = useState('0'); // ₦ platform adds on top; school gets 100% of the base amount
   const [fields,            setFields]            =
     useState<FormField[]>(DEFAULT_FIELDS);
 
@@ -303,9 +303,9 @@ export default function PaymentFormsPage() {
       toast.error('All field labels are required');
       return;
     }
-    const schoolPct = Number(schoolPercent);
-    if (isNaN(schoolPct) || schoolPct < 0 || schoolPct > 100) {
-      toast.error('School share must be a number between 0 and 100');
+    const platformFeeNum = Number(platformFee) || 0;
+    if (platformFeeNum < 0) {
+      toast.error('Platform fee cannot be negative');
       return;
     }
     if (!accountNumber || !accountName) {
@@ -323,9 +323,11 @@ export default function PaymentFormsPage() {
 
     setSaving(true);
     try {
-      // Create a Paystack subaccount so payments actually split to the
-      // school (minus the platform's commission) instead of going
-      // entirely to the platform's main account.
+      // Create a Paystack subaccount so payments actually reach the
+      // school instead of going entirely to the platform's main account.
+      // The school always keeps 100% of the base amount here — the
+      // platform's flat fee (if any) is added on top of what the payer
+      // is charged, not carved out of the school's share.
       const subRes = await fetch('/api/admin/create-form-subaccount', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -333,12 +335,12 @@ export default function PaymentFormsPage() {
           businessName:  title.trim() || command.trim(),
           bankCode:      bank.code,
           accountNumber: accountNumber.trim(),
-          schoolPercent: schoolPct,
+          schoolPercent: 100,
         }),
       });
       const subData = await subRes.json();
       if (!subRes.ok || subData.error) {
-        throw new Error(subData.error ?? 'Could not set up payout split for this form');
+        throw new Error(subData.error ?? 'Could not set up payout for this form');
       }
 
       const { data: form, error: formError } =
@@ -354,7 +356,9 @@ export default function PaymentFormsPage() {
             account_number:     accountNumber.trim() || null,
             account_name:       accountName.trim() || null,
             subaccount_code:    subData.subaccountCode,
-            platform_commission_percent: 100 - schoolPct,
+            charge_type:        platformFeeNum > 0 ? 'flat' : null,
+            charge_value:       platformFeeNum > 0 ? platformFeeNum : null,
+            charge_bearer:      platformFeeNum > 0 ? 'customer' : null,
             completion_message: completionMessage.trim() || null,
             receipt_title:      receiptTitle.trim() || null,
             is_active:          true,
@@ -413,7 +417,7 @@ export default function PaymentFormsPage() {
     setAccountName('');
     setCompletionMessage('');
     setReceiptTitle('');
-    setSchoolPercent('100');
+    setPlatformFee('0');
     setFields(DEFAULT_FIELDS);
   }
 
@@ -775,24 +779,24 @@ export default function PaymentFormsPage() {
                 </p>
               )}
 
-              {/* Payout split */}
+              {/* Platform fee */}
               <div>
-                <Label htmlFor="schoolPercent">
-                  School's Share (%)
+                <Label htmlFor="platformFee">
+                  Platform Fee (₦) — added on top
                 </Label>
                 <Input
-                  id="schoolPercent"
+                  id="platformFee"
                   type="number"
                   min={0}
-                  max={100}
-                  value={schoolPercent}
-                  onChange={(e) => setSchoolPercent(e.target.value)}
-                  placeholder="100"
+                  step="1"
+                  value={platformFee}
+                  onChange={(e) => setPlatformFee(e.target.value)}
+                  placeholder="0"
                 />
                 <p className="text-xs text-gray-400 mt-1">
-                  {schoolPercent && !isNaN(Number(schoolPercent))
-                    ? `School keeps ${schoolPercent}% — platform commission: ${(100 - Number(schoolPercent)).toFixed(2)}%`
-                    : 'The rest goes to the platform as commission on this form.'}
+                  {Number(platformFee) > 0
+                    ? `Payer will be charged ${fmt(Number(amount || 0) + Number(platformFee))} total (${fmt(Number(amount || 0))} to school + ${fmt(Number(platformFee))} platform fee).`
+                    : 'School receives 100% of the form amount. Leave at 0 for no platform fee on this form.'}
                 </p>
               </div>
             </section>
