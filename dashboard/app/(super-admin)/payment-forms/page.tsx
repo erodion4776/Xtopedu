@@ -67,8 +67,8 @@ interface Payment {
   created_at:    string;
 }
 
-// ── Nigerian banks list — no more memorizing codes ────────
-const NIGERIAN_BANKS = [
+// ── Nigerian banks list — fallback while the real list loads ──
+const FALLBACK_BANKS = [
   { name: 'Access Bank',            code: '044' },
   { name: 'Citibank Nigeria',       code: '023' },
   { name: 'Ecobank Nigeria',        code: '050' },
@@ -134,6 +134,21 @@ export default function PaymentFormsPage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [loadingPayments, setLoadingPayments] =
     useState(false);
+
+  const [banks, setBanks] = useState(FALLBACK_BANKS);
+
+  useEffect(() => {
+    fetch('/api/admin/banks')
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setBanks(data);
+        }
+      })
+      .catch(() => {
+        // Keep the fallback list if this fails — better than an empty dropdown
+      });
+  }, []);
 
   // ── Form state ───────────────────────────────────────────
   const [command,           setCommand]           = useState('');
@@ -204,7 +219,7 @@ export default function PaymentFormsPage() {
       return;
     }
 
-    const bank = NIGERIAN_BANKS.find(
+    const bank = banks.find(
       (b) => b.name === selectedBank
     );
     if (!bank) {
@@ -288,7 +303,7 @@ export default function PaymentFormsPage() {
       return;
     }
 
-    const bank = NIGERIAN_BANKS.find(
+    const bank = banks.find(
       (b) => b.name === selectedBank
     );
 
@@ -659,7 +674,7 @@ export default function PaymentFormsPage() {
                     className="w-full h-10 text-sm border rounded-md px-3 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="">— Select bank —</option>
-                    {NIGERIAN_BANKS.map((b) => (
+                    {banks.map((b) => (
                       <option key={b.code} value={b.name}>
                         {b.name}
                       </option>
