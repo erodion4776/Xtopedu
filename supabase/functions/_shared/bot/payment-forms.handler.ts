@@ -63,7 +63,11 @@ async function askField(phone: string, field: any, curr: number, tot: number, wa
 
 async function showFormSummary(phone: string, form: any, collected: any, wa: WhatsApp) {
   const summary = Object.entries(collected).map(([k, v]) => `*${k.replace(/_/g, ' ')}:* ${v}`).join('\n');
-  await wa.buttons(phone, `📋 *Confirm Details*\n\n${summary}\n\n💵 Amount: *${fmt(form.amount)}*`, [{ id: 'form_confirm', title: '✅ Pay' }, { id: 'form_restart', title: '🔄 Reset' }]);
+  let charge = 0;
+  if (form.charge_type === 'flat') charge = form.charge_value;
+  else if (form.charge_type === 'percentage') charge = form.amount * (form.charge_value / 100);
+  const total = form.charge_bearer === 'customer' ? form.amount + charge : form.amount;
+  await wa.buttons(phone, `📋 *Confirm Details*\n\n${summary}\n\n💵 Amount: *${fmt(total)}*`, [{ id: 'form_confirm', title: '✅ Pay' }, { id: 'form_restart', title: '🔄 Reset' }]);
 }
 
 export async function handleFormButton(phone: string, input: string, wa: WhatsApp): Promise<boolean> {
@@ -86,17 +90,29 @@ async function generatePaymentLink(phone: string, session: any, wa: WhatsApp) {
   const total = form.charge_bearer === 'customer' ? base + charge : base;
   const ref = `FORM-${Date.now().toString(36).toUpperCase()}`;
 
+  const payload: Record<string, unknown> = {
+    email: session.collected.email ?? `${formatPhone(phone)}@xtop.ng`,
+    amount: Math.round(total * 100),
+    reference: ref,
+    callback_url: `${Deno.env.get('APP_URL')}/functions/v1/payment-callback?type=form_payment&ref=${ref}`,
+    metadata: { payment_type: 'form_payment', phone: formatPhone(phone), form_id: form.id, collected: session.collected, total_amount: total, base_amount: base, charge_amount: charge }
+  };
+
+  // Split the payment: school's subaccount gets `base`, platform gets
+  // `charge` (the flat/percentage fee) as a flat kobo amount taken off
+  // the top. bearer: 'account' means the platform absorbs Paystack's own
+  // processing fee, so the school always receives the full `base` amount.
+  if (form.subaccount_code) {
+    payload.subaccount = form.subaccount_code;
+    payload.transaction_charge = Math.round(charge * 100);
+    payload.bearer = 'account';
+  }
+
   try {
     const res = await fetch('https://api.paystack.co/transaction/initialize', {
       method: 'POST',
       headers: { Authorization: `Bearer ${Deno.env.get('PAYSTACK_SECRET_KEY')}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: session.collected.email ?? `${formatPhone(phone)}@xtop.ng`,
-        amount: Math.round(total * 100),
-        reference: ref,
-        callback_url: `${Deno.env.get('APP_URL')}/functions/v1/payment-callback?type=form_payment&ref=${ref}`,
-        metadata: { payment_type: 'form_payment', phone: formatPhone(phone), form_id: form.id, collected: session.collected, total_amount: total, base_amount: base, charge_amount: charge }
-      })
+      body: JSON.stringify(payload)
     });
     const d = await res.json();
     await wa.text(phone, `💳 *Payment Link Ready*\n\nTotal: *${fmt(total)}*\n\n👇 Tap to pay:\n${d.data.authorization_url}`);
