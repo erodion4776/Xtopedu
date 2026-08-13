@@ -102,6 +102,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return json(await getLeads(url.searchParams.get('status')));
     }
 
+    // List of real Nigerian banks + codes, straight from Paystack
+    if (path === '/banks' && req.method === 'GET') {
+      const banks = await paystack.getBanks();
+      return json(banks);
+    }
+
     // Verify bank account (resolve account name via Paystack)
     if (path === '/verify-account' && req.method === 'GET') {
       const account = url.searchParams.get('account');
