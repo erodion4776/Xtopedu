@@ -30,6 +30,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const url = new URL(req.url);
   const path = url.pathname.replace('/functions/v1/super-admin-api', '');
 
+  // Temporary trace — logs every request that gets past auth, no matter what.
+  console.log('[super-admin-api] incoming', req.method, path, url.search);
+
   try {
     // Dashboard stats
     if (path === '/stats' && req.method === 'GET') {
@@ -112,6 +115,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return json(data);
     }
 
+    console.log('[super-admin-api] no route matched for', path);
     return json({ error: 'Not found' }, 404);
   } catch (err) {
     console.error('[API] error:', err);
