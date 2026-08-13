@@ -102,6 +102,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return json(await getLeads(url.searchParams.get('status')));
     }
 
+    // Create a Paystack subaccount for one payment form (per-form split)
+    if (path === '/create-form-subaccount' && req.method === 'POST') {
+      const body = await req.json();
+      const { businessName, bankCode, accountNumber, schoolPercent } = body;
+      if (!businessName || !bankCode || !accountNumber || schoolPercent == null) {
+        return json(
+          { error: 'businessName, bankCode, accountNumber, schoolPercent are required' },
+          400
+        );
+      }
+      try {
+        const result = await paystack.createFormSubaccount({
+          businessName, bankCode, accountNumber, schoolPercent,
+        });
+        return json(result);
+      } catch (err) {
+        return json({ error: String(err) }, 400);
+      }
+    }
+
     // List of real Nigerian banks + codes, straight from Paystack
     if (path === '/banks' && req.method === 'GET') {
       const banks = await paystack.getBanks();
