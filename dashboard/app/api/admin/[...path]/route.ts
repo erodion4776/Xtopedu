@@ -2,6 +2,12 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+// This proxy must never be cached — every admin dashboard call
+// (stats, verify-account, etc.) needs a fresh hit to Supabase every time.
+export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
+
 const SUPABASE_API =
   'https://nigloptmadtmsfjqshvm.supabase.co/functions/v1/super-admin-api';
 
@@ -51,11 +57,15 @@ async function proxyRequest(
           'Content-Type': 'application/json',
         },
         body,
+        cache: 'no-store',
       }
     );
 
     const data = await response.json();
-    return NextResponse.json(data, { status: response.status });
+    return NextResponse.json(data, {
+      status: response.status,
+      headers: { 'Cache-Control': 'no-store, max-age=0' },
+    });
   } catch (err) {
     console.error('[API Proxy] error:', err);
     return NextResponse.json(
