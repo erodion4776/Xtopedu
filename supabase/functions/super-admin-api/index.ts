@@ -28,7 +28,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const url = new URL(req.url);
-  const path = url.pathname.replace('/functions/v1/super-admin-api', '');
+  let path = url.pathname;
+  // Supabase's gateway strips "/functions/v1" but leaves the function's
+  // own name ("super-admin-api") in the path — strip that too, however
+  // much of a prefix is actually present, so this works regardless of
+  // how the gateway forwards the URL.
+  const marker = '/super-admin-api';
+  const markerIndex = path.indexOf(marker);
+  if (markerIndex !== -1) {
+    path = path.slice(markerIndex + marker.length);
+  }
+  if (!path.startsWith('/')) path = '/' + path;
 
   // Temporary trace — logs every request that gets past auth, no matter what.
   console.log('[super-admin-api] incoming', req.method, path, url.search);
