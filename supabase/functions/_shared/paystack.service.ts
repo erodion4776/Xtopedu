@@ -541,6 +541,40 @@ export class PaystackService {
     };
   }
 
+  // ─── Create a Paystack subaccount for a single payment form ───────────
+  // Unlike createSubaccount() above (the school's main tuition subaccount),
+  // this doesn't touch paystack_subaccounts — each form can have its own
+  // commission split, stored directly on the payment_forms row instead.
+  async createFormSubaccount(params: {
+    businessName: string;
+    bankCode: string;
+    accountNumber: string;
+    schoolPercent: number; // 0-100, what the school keeps
+  }): Promise<{
+    subaccountCode: string;
+    accountName: string;
+    bankName: string;
+  }> {
+    const res = await this.request('/subaccount', 'POST', {
+      business_name: params.businessName,
+      bank_code: params.bankCode,
+      account_number: params.accountNumber,
+      percentage_charge: params.schoolPercent,
+      description: `${params.businessName} - Payment Form`,
+    });
+
+    if (!res.status) {
+      throw new Error(`Subaccount creation failed: ${res.message}`);
+    }
+
+    const d = res.data;
+    return {
+      subaccountCode: d.subaccount_code,
+      accountName: d.account_name,
+      bankName: d.settlement_bank,
+    };
+  }
+
   // ─── Get list of Nigerian banks ───────────────────────────────────────
   async getBanks(): Promise<Array<{ name: string; code: string }>> {
     const res = await this.request(
