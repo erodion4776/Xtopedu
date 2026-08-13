@@ -397,11 +397,13 @@ export default function PaymentFormsPage() {
       await loadForms();
     } catch (err: unknown) {
       console.error(err);
-      toast.error(
+      const message =
         err instanceof Error
           ? err.message
-          : 'Failed to create form'
-      );
+          : err && typeof err === 'object' && 'message' in err
+            ? String((err as { message: unknown }).message)
+            : 'Failed to create form';
+      toast.error(message);
     } finally {
       setSaving(false);
     }
