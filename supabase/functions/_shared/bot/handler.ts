@@ -1,12 +1,13 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
-// ✅ Fixed: Onboarding check BEFORE super admin check
-// ✅ Fixed: Super admin school mode uses getPlatformWaForSchool
-// ✅ Fixed: handleDocumentUpload more lenient state check
-// ✅ Fixed: CSV auto-routed even if state drifted
-// ✅ Fixed: Detailed logging for document uploads
+// ✅ Fixed: Platform token used for media downloads
+// ✅ Fixed: School token used for sending replies
+// ✅ Fixed: CSV auto-routed in any admin state
+// ✅ Fixed: Onboarding check BEFORE super admin
+// ✅ Fixed: Super admin school mode works correctly
 // ✅ Fixed: All missing state handlers added
+// ✅ Fixed: Detailed logging for document uploads
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -205,6 +206,22 @@ function isCSVFile(
     mime.includes('application/octet-stream')     ||
     name.includes('csv')
   );
+}
+
+// ============================================================
+// GET PLATFORM WHATSAPP INSTANCE
+// ✅ Always uses platform env vars
+// ✅ Used for media downloads — never school token
+// ============================================================
+
+function getPlatformWhatsApp(): WhatsApp {
+  return new WhatsApp({
+    phone_number_id:
+      Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+    access_token:
+      Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+    status: 'active',
+  });
 }
 
 // ============================================================
@@ -593,7 +610,6 @@ async function buildAndShowSuperAdminMenu(
     waAccount,
   } as BotSession;
 
-  // Reset or menu keywords → show super admin menu
   if (
     !input ||
     RESET_KEYWORDS.has(input) ||
@@ -621,7 +637,7 @@ async function buildAndShowSuperAdminMenu(
 // ✅ Session built fresh every message
 // ✅ No collision with bot_sessions
 // ✅ "hi"/"menu" shows school menu
-// ✅ Document uploads work in school mode
+// ✅ Document uploads use platform token for download
 // ============================================================
 
 async function handleSuperAdminSchoolMode(
@@ -644,7 +660,6 @@ async function handleSuperAdminSchoolMode(
     return;
   }
 
-  // ── Get school details ──────────────────────────────────
   const { data: school } = await db
     .from('schools')
     .select('id, name, is_active')
@@ -662,10 +677,6 @@ async function handleSuperAdminSchoolMode(
   }
 
   // ✅ Get WA account — never fails
-  // Three-level fallback:
-  // 1. School-specific DB row
-  // 2. Platform number DB row (virtual)
-  // 3. Env vars directly
   const schoolWaData =
     await getPlatformWaForSchool(schoolId);
 
@@ -697,8 +708,6 @@ async function handleSuperAdminSchoolMode(
     const students =
       await parentSvc.getStudents(parent.id);
 
-    // Build session WITHOUT saving to bot_sessions
-    // Avoids collision with super admin session
     const testSession: BotSession = {
       id:                  `sa-parent-${schoolId}`,
       phone:               formatPhone(phone),
@@ -717,7 +726,6 @@ async function handleSuperAdminSchoolMode(
       waAccount:           schoolWaData as never,
     };
 
-    // Reset keywords → show parent menu
     if (!input || RESET_KEYWORDS.has(input)) {
       await showMainMenu(phone, testSession, schoolWa);
       return;
@@ -735,17 +743,12 @@ async function handleSuperAdminSchoolMode(
   }
 
   // ── ADMIN MODE ──────────────────────────────────────────
-  // Get or create school session in bot_sessions
-  // Admin state IS saved so navigation works correctly
   let { data: savedSession } = await db
     .from('bot_sessions')
     .select('*')
     .eq('phone', formatPhone(phone))
     .maybeSingle();
 
-  // If session is missing, has null school_id
-  // (super admin session), or belongs to different school
-  // → reset it to this school
   if (
     !savedSession ||
     savedSession.school_id === null ||
@@ -778,7 +781,6 @@ async function handleSuperAdminSchoolMode(
 
     savedSession = newSession;
   } else {
-    // Touch existing session
     await db
       .from('bot_sessions')
       .update({
@@ -787,7 +789,6 @@ async function handleSuperAdminSchoolMode(
       .eq('phone', formatPhone(phone));
   }
 
-  // Build full admin session with runtime data
   const adminUser = {
     id:        `sa-own-${schoolId}`,
     school_id: schoolId,
@@ -822,7 +823,6 @@ async function handleSuperAdminSchoolMode(
     waAccount:  schoolWaData as never,
   };
 
-  // Reset keywords → show admin menu
   if (!input || RESET_KEYWORDS.has(input)) {
     await showAdminMenu(phone, adminSession, schoolWa);
     return;
@@ -834,6 +834,8 @@ async function handleSuperAdminSchoolMode(
   }
 
   // Document uploads in school mode
+  // ✅ Uses platform token for download
+  // ✅ Uses school WA for replies
   if (message.type === 'document') {
     await handleDocumentUpload(
       phone, adminSession, message, schoolWa
@@ -841,7 +843,6 @@ async function handleSuperAdminSchoolMode(
     return;
   }
 
-  // Route admin input
   await routeAdmin(
     phone,
     adminSession,
@@ -1975,10 +1976,10 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // DOCUMENT UPLOAD HANDLER
-// ✅ Fixed: More lenient state check
-// ✅ Fixed: Auto-routes CSV even if state drifted
-// ✅ Fixed: Handles any admin state with CSV file
-// ✅ Fixed: Detailed logging
+// ✅ CRITICAL FIX: Uses PLATFORM token for media download
+// ✅ Uses SCHOOL WA token for sending replies
+// ✅ Auto-routes CSV in any admin state
+// ✅ Detailed logging
 // ============================================================
 
 async function handleDocumentUpload(
@@ -2001,50 +2002,75 @@ async function handleDocumentUpload(
     `  isCSV: ${isCSV}`
   );
 
+  // ✅ CRITICAL: Always use PLATFORM WhatsApp
+  // for media downloads.
+  //
+  // WHY: WhatsApp media files are tied to the
+  // phone_number_id that RECEIVED the message.
+  // The webhook always comes through the PLATFORM
+  // number. So the platform token must be used
+  // to download the file — the school token
+  // will return 401 Unauthorized.
+  //
+  // wa (school token)     → send replies
+  // platformWa (platform) → download files
+  const platformWa = getPlatformWhatsApp();
+
   // ── Direct state matches ────────────────────────────────
   if (session.state === 'ADMIN_AWAITING_CSV') {
     await handleCSVDocument(
-      phone, session, message, wa
+      phone,
+      session,
+      message,
+      platformWa,   // platform token for download
+      wa            // school token for replies
     );
     return;
   }
 
   if (session.state === 'ADMIN_AWAITING_SCORE_CSV') {
     await handleScoreCSVDocument(
-      phone, session, message, wa
+      phone,
+      session,
+      message,
+      platformWa,   // platform token for download
+      wa            // school token for replies
     );
     return;
   }
 
   // ✅ Auto-route: CSV sent but state drifted
-  // This happens when admin downloads template,
-  // navigates away, then sends the file
-  // We handle it gracefully instead of showing an error
+  // This is the most common case — admin downloads
+  // template, navigates away, then sends the file.
+  // State is no longer ADMIN_AWAITING_CSV so we
+  // handle it gracefully instead of showing error.
   if (isCSV && session.role !== 'parent') {
     console.log(
-      `[Bot] CSV file detected in state ` +
-      `"${session.state}" — auto-routing to CSV handler`
+      `[Bot] CSV in state "${session.state}" ` +
+      `— auto-routing to CSV handler`
     );
 
-    // Update state to awaiting CSV
+    // Update state so confirmation flow works
     await sessions.setState(
       phone, 'ADMIN_AWAITING_CSV'
     );
 
-    // Build updated session with new state
     const updatedSession: BotSession = {
       ...session,
       state: 'ADMIN_AWAITING_CSV',
     };
 
     await handleCSVDocument(
-      phone, updatedSession, message, wa
+      phone,
+      updatedSession,
+      message,
+      platformWa,   // platform token for download
+      wa            // school token for replies
     );
     return;
   }
 
-  // Fallback message for non-CSV documents
-  // or CSV sent by parent (not supported)
+  // Fallback — non-CSV or parent sending document
   await wa.text(
     phone,
     `📤 To upload students go to:\n\n` +
