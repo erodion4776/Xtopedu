@@ -823,6 +823,20 @@ async function handleSuperAdminSchoolMode(
     waAccount:  schoolWaData as never,
   };
 
+  // Document uploads in school mode
+  // ✅ FIX: checked BEFORE the empty-input fallback below.
+  // extractInput() returns '' for message.type === 'document'
+  // (it only handles 'text' and 'interactive'), so the old
+  // order let the "!input" branch catch every CSV upload and
+  // show the Admin Menu before this check ever ran.
+  // ✅ Uses school WA for both download and replies
+  if (message.type === 'document') {
+    await handleDocumentUpload(
+      phone, adminSession, message, schoolWa
+    );
+    return;
+  }
+
   if (!input || RESET_KEYWORDS.has(input)) {
     await showAdminMenu(phone, adminSession, schoolWa);
     return;
@@ -830,16 +844,6 @@ async function handleSuperAdminSchoolMode(
 
   if (['0', 'back', 'main_menu'].includes(input)) {
     await showAdminMenu(phone, adminSession, schoolWa);
-    return;
-  }
-
-  // Document uploads in school mode
-  // ✅ Uses platform token for download
-  // ✅ Uses school WA for replies
-  if (message.type === 'document') {
-    await handleDocumentUpload(
-      phone, adminSession, message, schoolWa
-    );
     return;
   }
 
