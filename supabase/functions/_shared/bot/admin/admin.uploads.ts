@@ -1,12 +1,14 @@
 // ============================================================
 // SCHOOLBOT - ADMIN BULK UPLOAD FLOW
 // supabase/functions/_shared/bot/admin/admin.uploads.ts
-// ✅ Fixed: handleCSVDocument accepts separate replyWa
-// ✅ Fixed: downloadMedia uses platform token
+// ✅ Fixed: Progress updates every 100 students
+// ✅ Fixed: Clear completion notification
+// ✅ Fixed: Batch processing for large files
+// ✅ Fixed: Row offset for correct error line numbers
+// ✅ Fixed: Progress bar display
+// ✅ Fixed: Auto-creates classes if not found
+// ✅ Fixed: Platform token for media downloads
 // ✅ Fixed: More lenient CSV file type detection
-// ✅ Fixed: Detailed logging at every step
-// ✅ Fixed: Better error messages with retry option
-// ✅ Fixed: State reset to ADMIN_AWAITING_CSV on failure
 // ============================================================
 
 import { WhatsApp }      from '../../whatsapp.ts';
@@ -24,7 +26,6 @@ const csvSvc   = new CSVService();
 const db       = getSupabase();
 
 // ─── CSV file type checker ─────────────────────────────────
-// ✅ Lenient — handles all common CSV mime types
 function isCSVFile(
   filename: string,
   mimeType: string
@@ -40,6 +41,16 @@ function isCSVFile(
     mime.includes('application/vnd.ms-excel')     ||
     mime.includes('application/octet-stream')     ||
     name.includes('csv')
+  );
+}
+
+// ─── Build progress bar ────────────────────────────────────
+function buildProgressBar(percent: number): string {
+  const filled = Math.floor(percent / 10);
+  const empty  = 10 - filled;
+  return (
+    '▓'.repeat(filled) +
+    '░'.repeat(empty)
   );
 }
 
@@ -62,8 +73,9 @@ export async function startBulkUpload(
     `*Supports:*\n` +
     `✅ New students\n` +
     `✅ Update existing students\n` +
-    `✅ Auto-link parents`,
-    `Classes must exist before uploading`,
+    `✅ Auto-link parents\n` +
+    `✅ Auto-creates classes if needed`,
+    `Classes auto-created during upload`,
     `📤 Upload Options`,
     [
       {
@@ -179,6 +191,10 @@ async function sendCSVTemplate(
       `• parent_email\n` +
       `• blood_group (A+, O-, etc)\n` +
       `• medical_notes\n\n` +
+      `💡 *Class names tip:*\n` +
+      `• JSS1 or JSS 1 both work\n` +
+      `• SS1 or SS 1 both work\n` +
+      `• Classes are created automatically!\n\n` +
       `After filling, *send the CSV file\n` +
       `to this chat* and I will import\n` +
       `your students! 📤`
@@ -195,13 +211,11 @@ async function sendCSVTemplate(
   } catch (err) {
     console.error('[Upload] template error:', err);
 
-    // Fallback — show template as text
     await wa.text(
       phone,
       `📥 *CSV Template*\n\n` +
       `Copy this header row into Excel\n` +
       `or Google Sheets:\n\n` +
-      `` +
       `\`first_name,last_name,admission_number,` +
       `class_name,class_arm,gender,date_of_birth,` +
       `parent_name,parent_phone,parent_email,` +
@@ -212,7 +226,6 @@ async function sendCSVTemplate(
     );
   }
 
-  // ✅ Always set state to awaiting CSV
   await sessions.setState(phone, 'ADMIN_AWAITING_CSV');
 }
 
@@ -238,8 +251,8 @@ async function showUploadInstructions(
     `⚠️ *Important Rules:*\n\n` +
     `• Do NOT change column headers\n` +
     `• One student per row\n` +
-    `• Class names must match exactly\n` +
-    `  (e.g., JSS 1 not JSS1)\n` +
+    `• Class names: JSS1 or JSS 1 both work\n` +
+    `• Classes created automatically!\n` +
     `• Date format: DD/MM/YYYY\n` +
     `• Phone: 08012345678 format\n` +
     `━━━━━━━━━━━━━━━━`
@@ -271,12 +284,21 @@ async function showAvailableClasses(
   if (!classes?.length) {
     await wa.buttons(
       phone,
-      `📚 *No Classes Found!*\n\n` +
-      `You need to add classes before\n` +
-      `uploading students.\n\n` +
-      `Go to Admin Menu → Settings\n` +
-      `to add your classes first.`,
-      [{ id: 'MAIN_MENU', title: '🏠 Menu' }]
+      `📚 *No Classes Yet*\n\n` +
+      `No classes have been created yet.\n\n` +
+      `✅ *No problem!*\n` +
+      `When you upload your CSV, classes\n` +
+      `will be created automatically.\n\n` +
+      `Just use these class names in\n` +
+      `your CSV:\n\n` +
+      `• JSS 1, JSS 2, JSS 3\n` +
+      `• SS 1, SS 2, SS 3\n` +
+      `• Primary 1 — Primary 6\n` +
+      `• Or any name you choose!`,
+      [
+        { id: 'download_template', title: '📥 Get Template' },
+        { id: 'MAIN_MENU',         title: '🏠 Menu'         },
+      ]
     );
     return;
   }
@@ -300,12 +322,11 @@ async function showAvailableClasses(
     phone,
     `📚 *Your Classes*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
-    `Use these *exact names* in your\n` +
-    `CSV class_name column:\n\n` +
     `${classList}\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `_Copy the class name exactly\n` +
-    `as shown above_`,
+    `💡 *Tip:* Classes not in this list\n` +
+    `will be created automatically\n` +
+    `during upload!`,
     [
       { id: 'download_template', title: '📥 Get Template' },
       { id: 'MAIN_MENU',         title: '🏠 Menu'         },
@@ -326,8 +347,7 @@ async function promptForCSV(
     `attachment to this chat.\n\n` +
     `Make sure the file:\n` +
     `• Has .csv extension\n` +
-    `• Uses the correct template\n` +
-    `• Has correct class names\n\n` +
+    `• Uses the correct template\n\n` +
     `_Waiting for your CSV file..._`
   );
 
@@ -335,23 +355,17 @@ async function promptForCSV(
 }
 
 // ─── Handle incoming CSV document ─────────────────────────
-// ✅ Fixed: Accepts separate downloadWa and replyWa
-// ✅ downloadWa uses PLATFORM token (for Meta API)
-// ✅ replyWa uses SCHOOL token (for sending messages)
-// ✅ Detailed logging at every step
-// ✅ State reset to ADMIN_AWAITING_CSV on failure
+// ✅ downloadWa = platform token (for Meta API download)
+// ✅ replyWa   = school token (for sending messages)
 export async function handleCSVDocument(
   phone:      string,
   session:    BotSession,
   message:    IncomingMessage,
-  downloadWa: WhatsApp,    // Used for downloadMedia
-  replyWa?:   WhatsApp     // Used for sending replies
+  downloadWa: WhatsApp,
+  replyWa?:   WhatsApp
 ): Promise<void> {
-  // Use replyWa for messages if provided,
-  // else fall back to downloadWa
   const sendWa = replyWa ?? downloadWa;
-
-  const doc = message.document;
+  const doc    = message.document;
 
   console.log(
     `[Upload] handleCSVDocument:\n` +
@@ -414,7 +428,6 @@ export async function handleCSVDocument(
       `[Upload] Downloading media: ${doc.id}`
     );
 
-    // ✅ Use downloadWa (platform token) for media download
     const csvText = await downloadWa.downloadMedia(doc.id);
 
     console.log(
@@ -424,8 +437,6 @@ export async function handleCSVDocument(
     );
 
     if (!csvText) {
-      // ✅ Keep state as ADMIN_AWAITING_CSV
-      // so admin can try sending the file again
       await sessions.setState(
         phone, 'ADMIN_AWAITING_CSV'
       );
@@ -447,13 +458,11 @@ export async function handleCSVDocument(
       return;
     }
 
-    // Preview for debugging
     console.log(
       `[Upload] CSV preview:\n` +
       `"${csvText.substring(0, 300)}"`
     );
 
-    // Parse CSV
     const { rows, errors: parseErrors } =
       csvSvc.parseCSV(csvText);
 
@@ -496,16 +505,6 @@ export async function handleCSVDocument(
       return;
     }
 
-    if (rows.length > 500) {
-      await sendWa.text(
-        phone,
-        `⚠️ *Large File Detected*\n\n` +
-        `Your file has *${rows.length}* students.\n\n` +
-        `This may take a few minutes.\n` +
-        `Please be patient. ☕`
-      );
-    }
-
     // Show preview of first 3 rows
     const preview = rows.slice(0, 3).map((r, i) => {
       const className =
@@ -534,6 +533,8 @@ export async function handleCSVDocument(
       `*First 3 students:*\n\n` +
       `${preview}${moreText}\n\n` +
       `━━━━━━━━━━━━━━━━\n` +
+      `✅ Classes will be created automatically\n` +
+      `if they don't exist yet.\n\n` +
       `Proceed with import?`,
       [
         {
@@ -544,7 +545,6 @@ export async function handleCSVDocument(
       ]
     );
 
-    // Save rows to session data
     await sessions.setState(
       phone,
       'ADMIN_CONFIRM_UPLOAD',
@@ -569,7 +569,6 @@ export async function handleCSVDocument(
       err instanceof Error ? err.message : String(err)
     );
 
-    // ✅ Reset state so admin can try again
     await sessions.setState(
       phone, 'ADMIN_AWAITING_CSV'
     );
@@ -590,6 +589,9 @@ export async function handleCSVDocument(
 }
 
 // ─── Handle upload confirmation ────────────────────────────
+// ✅ Fixed: Progress updates every 100 students
+// ✅ Fixed: Batch processing for large files
+// ✅ Fixed: Clear completion notification with summary
 export async function handleConfirmUpload(
   phone:   string,
   session: BotSession,
@@ -621,13 +623,19 @@ export async function handleConfirmUpload(
     return;
   }
 
+  // ✅ Send initial message with expectation setting
   await wa.text(
     phone,
-    `⏳ *Importing ${rows.length} students...*\n\n` +
-    `This may take a few minutes.\n` +
-    `Please do not close this chat.`
+    `⏳ *Starting Import...*\n\n` +
+    `📁 File: ${fileName}\n` +
+    `👥 Students: *${rows.length}*\n\n` +
+    `I will send you progress updates\n` +
+    `every 100 students.\n\n` +
+    `Please do not close this chat.\n\n` +
+    `_This may take a few minutes..._`
   );
 
+  // Create upload job record
   const { data: job, error: jobError } = await db
     .from('bulk_upload_jobs')
     .insert({
@@ -650,46 +658,185 @@ export async function handleConfirmUpload(
     return;
   }
 
-  const result = await csvSvc.importStudents(
-    session.school_id,
-    rows,
-    job.id
-  );
+  // ── Process in batches with progress updates ────────────
+  const BATCH_SIZE   = 50;   // Process 50 rows at a time
+  const UPDATE_EVERY = 100;  // Send WhatsApp update every 100
 
+  let totalCreated = 0;
+  let totalUpdated = 0;
+  let totalFailed  = 0;
+  let lastUpdateAt = 0;
+
+  const allErrors: Array<{
+    row:     number;
+    field:   string;
+    message: string;
+  }> = [];
+
+  const allStudentIds: string[] = [];
+
+  const startTime = Date.now();
+
+  for (
+    let batchStart = 0;
+    batchStart < rows.length;
+    batchStart += BATCH_SIZE
+  ) {
+    const batch = rows.slice(
+      batchStart,
+      Math.min(batchStart + BATCH_SIZE, rows.length)
+    );
+
+    // ── Import this batch ─────────────────────────────────
+    const batchResult = await csvSvc.importStudents(
+      session.school_id,
+      batch,
+      job.id,
+      batchStart  // Row offset for correct error numbers
+    );
+
+    totalCreated += batchResult.created;
+    totalUpdated += batchResult.updated;
+    totalFailed  += batchResult.failed;
+    allErrors.push(...batchResult.errors);
+    allStudentIds.push(...batchResult.studentIds);
+
+    const processed = batchStart + batch.length;
+    const percent   = Math.round(
+      (processed / rows.length) * 100
+    );
+
+    console.log(
+      `[Upload] Progress: ` +
+      `${processed}/${rows.length} (${percent}%) | ` +
+      `created=${totalCreated} | ` +
+      `updated=${totalUpdated} | ` +
+      `failed=${totalFailed}`
+    );
+
+    // ── Update job in DB ──────────────────────────────────
+    await db
+      .from('bulk_upload_jobs')
+      .update({
+        processed_rows: processed,
+        success_rows:   totalCreated + totalUpdated,
+        failed_rows:    totalFailed,
+      })
+      .eq('id', job.id);
+
+    // ── Send WhatsApp progress update ─────────────────────
+    // Every 100 students — but NOT for the final batch
+    // (we send a different message at the end)
+    if (
+      processed - lastUpdateAt >= UPDATE_EVERY &&
+      processed < rows.length
+    ) {
+      lastUpdateAt = processed;
+
+      const elapsed = Math.round(
+        (Date.now() - startTime) / 1000
+      );
+      const rate = processed / elapsed;
+      const remaining = rows.length - processed;
+      const etaSeconds = Math.round(remaining / rate);
+      const etaText =
+        etaSeconds > 60
+          ? `~${Math.ceil(etaSeconds / 60)} min`
+          : `~${etaSeconds} sec`;
+
+      await wa.text(
+        phone,
+        `⏳ *Import Progress*\n` +
+        `━━━━━━━━━━━━━━━━\n\n` +
+        `📊 ${processed} / ${rows.length} students\n` +
+        `${buildProgressBar(percent)} ${percent}%\n\n` +
+        `✅ Created: *${totalCreated}*\n` +
+        `🔄 Updated: *${totalUpdated}*\n` +
+        (totalFailed > 0
+          ? `❌ Failed:  *${totalFailed}*\n`
+          : '') +
+        `\n⏱️ Est. remaining: ${etaText}\n\n` +
+        `_Still importing..._`
+      );
+    }
+  }
+
+  // ── Final status ────────────────────────────────────────
+  let finalStatus: string = 'completed';
+  if (totalFailed === rows.length) {
+    finalStatus = 'failed';
+  } else if (totalFailed > 0) {
+    finalStatus = 'completed_with_errors';
+  }
+
+  const elapsed = Math.round(
+    (Date.now() - startTime) / 1000
+  );
+  const elapsedText =
+    elapsed > 60
+      ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+      : `${elapsed}s`;
+
+  // Update final job record
+  await db
+    .from('bulk_upload_jobs')
+    .update({
+      processed_rows: rows.length,
+      success_rows:   totalCreated + totalUpdated,
+      failed_rows:    totalFailed,
+      status:         finalStatus,
+      errors:         allErrors.slice(0, 50),
+      result_summary: {
+        total:   rows.length,
+        created: totalCreated,
+        updated: totalUpdated,
+        failed:  totalFailed,
+      },
+      completed_at: new Date().toISOString(),
+    })
+    .eq('id', job.id);
+
+  // ── Build completion message ────────────────────────────
   const statusIcon =
-    result.failed === 0
+    totalFailed === 0
       ? '🎉'
-      : result.created + result.updated === 0
+      : totalCreated + totalUpdated === 0
       ? '❌'
       : '⚠️';
 
   let resultMsg =
-    `${statusIcon} *Upload Complete!*\n` +
+    `${statusIcon} *Import Complete!*\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `📁 File: ${fileName}\n\n` +
-    `📊 *Results:*\n` +
-    `📋 Total Rows:  *${result.total}*\n` +
-    `✅ Created:     *${result.created}*\n` +
-    `🔄 Updated:     *${result.updated}*\n`;
+    `📁 File: ${fileName}\n` +
+    `⏱️ Time taken: ${elapsedText}\n\n` +
+    `📊 *Final Results:*\n` +
+    `📋 Total Rows:  *${rows.length}*\n` +
+    `✅ Created:     *${totalCreated}*\n` +
+    `🔄 Updated:     *${totalUpdated}*\n`;
 
-  if (result.failed > 0) {
-    resultMsg += `❌ Failed:      *${result.failed}*\n`;
+  if (totalFailed > 0) {
+    resultMsg +=
+      `❌ Failed:      *${totalFailed}*\n`;
   }
 
-  resultMsg += `━━━━━━━━━━━━━━━━\n`;
+  resultMsg +=
+    `━━━━━━━━━━━━━━━━\n` +
+    `👥 *${totalCreated + totalUpdated}* students ` +
+    `are now in your system!`;
 
-  if (result.errors.length > 0) {
-    resultMsg += `\n⚠️ *Errors (first 5):*\n`;
-    result.errors.slice(0, 5).forEach((err) => {
+  // Show first 5 errors if any
+  if (allErrors.length > 0) {
+    resultMsg += `\n\n⚠️ *Sample Errors:*\n`;
+    allErrors.slice(0, 5).forEach((err) => {
       resultMsg +=
         `• Row ${err.row}: ${err.message}\n`;
     });
 
-    if (result.errors.length > 5) {
+    if (allErrors.length > 5) {
       resultMsg +=
         `_...and ${
-          result.errors.length - 5
-        } more errors_\n`;
+          allErrors.length - 5
+        } more errors_`;
     }
   }
 
@@ -697,8 +844,9 @@ export async function handleConfirmUpload(
     phone,
     resultMsg,
     [
-      { id: 'download_template', title: '📤 Upload More' },
-      { id: 'MAIN_MENU',         title: '🏠 Menu'        },
+      { id: 'download_template', title: '📤 Upload More'   },
+      { id: 'admin_students',    title: '👥 View Students' },
+      { id: 'MAIN_MENU',         title: '🏠 Menu'          },
     ]
   );
 
@@ -828,13 +976,12 @@ export async function handleScoreUploadTermSelect(
 }
 
 // ─── Handle incoming score CSV document ────────────────────
-// ✅ Fixed: Accepts separate downloadWa and replyWa
 export async function handleScoreCSVDocument(
   phone:      string,
   session:    BotSession,
   message:    IncomingMessage,
-  downloadWa: WhatsApp,    // Used for downloadMedia
-  replyWa?:   WhatsApp     // Used for sending replies
+  downloadWa: WhatsApp,
+  replyWa?:   WhatsApp
 ): Promise<void> {
   const sendWa = replyWa ?? downloadWa;
   const doc    = message.document;
@@ -842,10 +989,8 @@ export async function handleScoreCSVDocument(
   console.log(
     `[Upload] handleScoreCSVDocument:\n` +
     `  phone: ${phone}\n` +
-    `  state: ${session.state}\n` +
     `  doc id: ${doc?.id ?? 'none'}\n` +
-    `  filename: ${doc?.filename ?? 'none'}\n` +
-    `  mimeType: ${doc?.mime_type ?? 'none'}`
+    `  filename: ${doc?.filename ?? 'none'}`
   );
 
   if (!doc) {
@@ -883,7 +1028,6 @@ export async function handleScoreCSVDocument(
       `[Upload] Downloading score CSV: ${doc.id}`
     );
 
-    // ✅ Use downloadWa (platform token) for media download
     const csvText =
       await downloadWa.downloadMedia(doc.id);
 
@@ -909,12 +1053,6 @@ export async function handleScoreCSVDocument(
 
     const { rows, errors: parseErrors } =
       csvSvc.parseCSV(csvText);
-
-    console.log(
-      `[Upload] Score parse:\n` +
-      `  rows: ${rows.length}\n` +
-      `  errors: ${parseErrors.length}`
-    );
 
     if (parseErrors.length > 0) {
       await sendWa.text(
@@ -983,11 +1121,6 @@ export async function handleScoreCSVDocument(
       }
     );
 
-    console.log(
-      `[Upload] ✅ Score preview shown ` +
-      `for ${rows.length} rows`
-    );
-
   } catch (err) {
     console.error(
       '[Upload] Score CSV error:',
@@ -1012,6 +1145,7 @@ export async function handleScoreCSVDocument(
 }
 
 // ─── Handle score upload confirmation ─────────────────────
+// ✅ Fixed: Progress updates for large score files
 export async function handleConfirmScoreUpload(
   phone:   string,
   session: BotSession,
@@ -1047,8 +1181,9 @@ export async function handleConfirmScoreUpload(
   await wa.text(
     phone,
     `⏳ *Importing ${rows.length} scores...*\n\n` +
+    `📁 File: ${fileName}\n\n` +
     `This may take a moment.\n` +
-    `Please do not close this chat.`
+    `Please do not close this chat. 🙏`
   );
 
   const { data: job, error: jobError } = await db
@@ -1100,10 +1235,13 @@ export async function handleConfirmScoreUpload(
     resultMsg += `❌ Failed:      *${result.failed}*\n`;
   }
 
-  resultMsg += `━━━━━━━━━━━━━━━━\n`;
+  resultMsg +=
+    `━━━━━━━━━━━━━━━━\n` +
+    `🎓 *${result.created + result.updated}* ` +
+    `scores imported successfully!`;
 
   if (result.errors.length > 0) {
-    resultMsg += `\n⚠️ *Errors (first 5):*\n`;
+    resultMsg += `\n\n⚠️ *Sample Errors:*\n`;
     result.errors.slice(0, 5).forEach((err) => {
       resultMsg +=
         `• Row ${err.row}: ${err.message}\n`;
@@ -1113,7 +1251,7 @@ export async function handleConfirmScoreUpload(
       resultMsg +=
         `_...and ${
           result.errors.length - 5
-        } more errors_\n`;
+        } more errors_`;
     }
   }
 
@@ -1140,7 +1278,7 @@ async function showUploadHistory(
     .from('bulk_upload_jobs')
     .select(
       'file_name, total_rows, success_rows, ' +
-      'failed_rows, status, created_at'
+      'failed_rows, status, created_at, completed_at'
     )
     .eq('school_id', session.school_id)
     .eq('upload_type', 'students')
@@ -1173,13 +1311,29 @@ async function showUploadHistory(
     .map((j) => {
       const date = new Date(j.created_at)
         .toLocaleDateString('en-NG', {
-          day: 'numeric', month: 'short', year: 'numeric',
+          day:   'numeric',
+          month: 'short',
+          year:  'numeric',
         });
       const icon = statusIcons[j.status] ?? '•';
 
+      // Calculate duration if completed
+      let durationText = '';
+      if (j.completed_at && j.created_at) {
+        const secs = Math.round(
+          (new Date(j.completed_at).getTime() -
+           new Date(j.created_at).getTime()) / 1000
+        );
+        durationText =
+          secs > 60
+            ? ` in ${Math.floor(secs / 60)}m ${secs % 60}s`
+            : ` in ${secs}s`;
+      }
+
       return (
         `${icon} *${j.file_name ?? 'Upload'}*\n` +
-        `   ✅ ${j.success_rows}/${j.total_rows} imported\n` +
+        `   ✅ ${j.success_rows ?? 0}/` +
+        `${j.total_rows} imported${durationText}\n` +
         `   📅 ${date}`
       );
     })
