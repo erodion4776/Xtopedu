@@ -3,10 +3,10 @@
 // supabase/functions/_shared/bot/handler.ts
 // ✅ Fixed: Onboarding check BEFORE super admin check
 // ✅ Fixed: Super admin school mode uses getPlatformWaForSchool
-// ✅ Fixed: No session collision between super admin & school
-// ✅ Fixed: getPlatformWaForSchool imported statically
+// ✅ Fixed: handleDocumentUpload more lenient state check
+// ✅ Fixed: CSV auto-routed even if state drifted
+// ✅ Fixed: Detailed logging for document uploads
 // ✅ Fixed: All missing state handlers added
-// ✅ Fixed: Document upload in school mode works
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -185,6 +185,29 @@ type SchoolInfo = {
 };
 
 // ============================================================
+// CSV FILE TYPE CHECKER
+// ✅ Lenient — handles all common CSV mime types
+// ============================================================
+
+function isCSVFile(
+  filename: string,
+  mimeType: string
+): boolean {
+  const name = filename.toLowerCase();
+  const mime = mimeType.toLowerCase();
+
+  return (
+    name.endsWith('.csv')                         ||
+    mime.includes('csv')                          ||
+    mime.includes('text/plain')                   ||
+    mime.includes('text/csv')                     ||
+    mime.includes('application/vnd.ms-excel')     ||
+    mime.includes('application/octet-stream')     ||
+    name.includes('csv')
+  );
+}
+
+// ============================================================
 // MAIN ENTRY POINT
 // ============================================================
 
@@ -201,6 +224,7 @@ export async function handleMessage(
     `[Bot] from=${phone} | ` +
     `platform=${isPlatformNumber} | ` +
     `superAdmin=${isSuperAdminPhone(phone)} | ` +
+    `type=${message.type} | ` +
     `input="${input.substring(0, 40)}"`
   );
 
@@ -234,8 +258,8 @@ export async function handleMessage(
 
   // ── 2. Super admin ──────────────────────────────────────
   // Must be BEFORE reset keywords
-  // When super admin is in school mode, "hi"/"menu"
-  // must go to school panel not handleReset()
+  // When super admin is in school mode,
+  // "hi"/"menu" must go to school panel not handleReset()
   if (isSuperAdminPhone(phone)) {
     console.log('[Bot] ✅ Super admin detected');
     await handleSuperAdminFlow(
@@ -429,7 +453,7 @@ export async function handleMessage(
 // ============================================================
 // SUPER ADMIN FLOW
 // ✅ Onboarding handled BEFORE this in handleMessage()
-// ✅ School mode built fresh using getPlatformWaForSchool
+// ✅ School mode uses getPlatformWaForSchool
 // ✅ No session collision with bot_sessions
 // ============================================================
 
@@ -562,7 +586,7 @@ async function buildAndShowSuperAdminMenu(
       profiles: {
         id:         'super_admin',
         full_name:  'Super Admin',
-        phone:      phone,
+        phone,
         avatar_url: null,
       },
     },
@@ -597,7 +621,7 @@ async function buildAndShowSuperAdminMenu(
 // ✅ Session built fresh every message
 // ✅ No collision with bot_sessions
 // ✅ "hi"/"menu" shows school menu
-// ✅ Document uploads work
+// ✅ Document uploads work in school mode
 // ============================================================
 
 async function handleSuperAdminSchoolMode(
@@ -637,9 +661,11 @@ async function handleSuperAdminSchoolMode(
     return;
   }
 
-  // ✅ Get WA account using virtual pattern
-  // This NEVER fails — always returns a usable WA object
-  // Even if DB has unique constraint issues
+  // ✅ Get WA account — never fails
+  // Three-level fallback:
+  // 1. School-specific DB row
+  // 2. Platform number DB row (virtual)
+  // 3. Env vars directly
   const schoolWaData =
     await getPlatformWaForSchool(schoolId);
 
@@ -717,8 +743,9 @@ async function handleSuperAdminSchoolMode(
     .eq('phone', formatPhone(phone))
     .maybeSingle();
 
-  // If session is missing, null school_id (super admin),
-  // or belongs to different school → reset it
+  // If session is missing, has null school_id
+  // (super admin session), or belongs to different school
+  // → reset it to this school
   if (
     !savedSession ||
     savedSession.school_id === null ||
@@ -975,7 +1002,9 @@ async function getSchoolsByPhone(
 
   return data
     .map((r) => r.schools as unknown as SchoolInfo)
-    .filter((s) => s !== null && s.id !== undefined);
+    .filter(
+      (s) => s !== null && s.id !== undefined
+    );
 }
 
 async function checkAndGuideOnboarding(
@@ -1022,8 +1051,14 @@ async function checkAndGuideOnboarding(
       phone,
       `Would you like to complete your setup?`,
       [
-        { id: 'RESUME_SETUP_FEE',  title: '💳 Pay Setup Fee'   },
-        { id: 'CONTACT_SUPPORT',   title: '📞 Contact Support' },
+        {
+          id:    'RESUME_SETUP_FEE',
+          title: '💳 Pay Setup Fee',
+        },
+        {
+          id:    'CONTACT_SUPPORT',
+          title: '📞 Contact Support',
+        },
       ]
     );
 
@@ -1747,6 +1782,8 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_CSV':
+      // Document handled by handleDocumentUpload()
+      // This fires when user sends TEXT in this state
       await wa.text(
         phone,
         `📤 Please send your *CSV file*\n` +
@@ -1768,6 +1805,8 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_SCORE_CSV':
+      // Document handled by handleDocumentUpload()
+      // This fires when user sends TEXT in this state
       await wa.text(
         phone,
         `📤 Please send your *score CSV*\n` +
@@ -1936,6 +1975,10 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // DOCUMENT UPLOAD HANDLER
+// ✅ Fixed: More lenient state check
+// ✅ Fixed: Auto-routes CSV even if state drifted
+// ✅ Fixed: Handles any admin state with CSV file
+// ✅ Fixed: Detailed logging
 // ============================================================
 
 async function handleDocumentUpload(
@@ -1944,24 +1987,71 @@ async function handleDocumentUpload(
   message: IncomingMessage,
   wa:      WhatsApp
 ): Promise<void> {
+  const doc      = message.document;
+  const filename = doc?.filename ?? '';
+  const mimeType = doc?.mime_type ?? '';
+
+  const isCSV = isCSVFile(filename, mimeType);
+
+  console.log(
+    `[Bot] handleDocumentUpload:\n` +
+    `  state: ${session.state}\n` +
+    `  filename: "${filename}"\n` +
+    `  mimeType: "${mimeType}"\n` +
+    `  isCSV: ${isCSV}`
+  );
+
+  // ── Direct state matches ────────────────────────────────
   if (session.state === 'ADMIN_AWAITING_CSV') {
     await handleCSVDocument(
       phone, session, message, wa
     );
-  } else if (
-    session.state === 'ADMIN_AWAITING_SCORE_CSV'
-  ) {
+    return;
+  }
+
+  if (session.state === 'ADMIN_AWAITING_SCORE_CSV') {
     await handleScoreCSVDocument(
       phone, session, message, wa
     );
-  } else {
-    await wa.text(
-      phone,
-      `📤 To upload students go to:\n\n` +
-      `*Admin Menu → More Features → Upload Students*\n\n` +
-      `Then send your CSV file here.`
-    );
+    return;
   }
+
+  // ✅ Auto-route: CSV sent but state drifted
+  // This happens when admin downloads template,
+  // navigates away, then sends the file
+  // We handle it gracefully instead of showing an error
+  if (isCSV && session.role !== 'parent') {
+    console.log(
+      `[Bot] CSV file detected in state ` +
+      `"${session.state}" — auto-routing to CSV handler`
+    );
+
+    // Update state to awaiting CSV
+    await sessions.setState(
+      phone, 'ADMIN_AWAITING_CSV'
+    );
+
+    // Build updated session with new state
+    const updatedSession: BotSession = {
+      ...session,
+      state: 'ADMIN_AWAITING_CSV',
+    };
+
+    await handleCSVDocument(
+      phone, updatedSession, message, wa
+    );
+    return;
+  }
+
+  // Fallback message for non-CSV documents
+  // or CSV sent by parent (not supported)
+  await wa.text(
+    phone,
+    `📤 To upload students go to:\n\n` +
+    `*Admin Menu → More Features → Upload Students*\n\n` +
+    `Then send your CSV file here.\n\n` +
+    `_File received: ${filename || 'unknown'}_`
+  );
 }
 
 // ============================================================
