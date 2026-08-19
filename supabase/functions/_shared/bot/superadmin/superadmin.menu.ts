@@ -45,7 +45,7 @@ function sumAmount(
 // ✅ Falls back to env vars if no DB row exists
 // ============================================================
 
-async function getPlatformWaForSchool(
+export async function getPlatformWaForSchool(
   schoolId: string
 ): Promise<Record<string, unknown>> {
   const platformPhoneNumberId =
