@@ -1,25 +1,18 @@
 // ============================================================
 // SCHOOLBOT - SUPER ADMIN BOT MENU
 // _shared/bot/superadmin/superadmin.menu.ts
-//
-// What YOU (the platform owner) see when you message
-// your own WhatsApp number (08073128887).
-// Includes ability to switch into any bot mode for testing.
+// ✅ Added: Register My Own School feature
+// ✅ Added: Switch between owned schools
 // ============================================================
 
 import { WhatsApp }        from '../../whatsapp.ts';
 import { getSupabase }     from '../../supabase.ts';
-import { fmt }             from '../../utils.ts';
+import { fmt, formatPhone, delay } from '../../utils.ts';
 import { SessionService }  from '../../session.ts';
 import type { BotSession } from '../../types.ts';
 
 const db       = getSupabase();
 const sessions = new SessionService();
-
-// ─── Delay helper ─────────────────────────────────────────
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 // ─── Sum amount helper ─────────────────────────────────────
 function sumAmount(
@@ -33,7 +26,6 @@ function sumAmount(
 
 // ============================================================
 // CHECK IF SUPER ADMIN IS IN TEST MODE
-// Called by handler.ts before routing
 // ============================================================
 
 export async function isSuperAdminTestMode(
@@ -53,7 +45,6 @@ export async function isSuperAdminTestMode(
     return { active: false, testRole: null, schoolId: null };
   }
 
-  // Test sessions expire after 2 hours
   const age = Date.now() -
     new Date(data.created_at).getTime();
   if (age > 2 * 60 * 60 * 1000) {
@@ -72,8 +63,8 @@ export async function isSuperAdminTestMode(
 }
 
 // ─── Set test mode ─────────────────────────────────────────
-async function setTestMode(
-  phone: string,
+export async function setTestMode(
+  phone:    string,
   testRole: 'parent' | 'admin' | 'marketing',
   schoolId: string | null
 ): Promise<void> {
@@ -105,9 +96,9 @@ export async function clearTestMode(
 // ============================================================
 
 export async function showSuperAdminMenu(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const name =
     session.schoolUser?.profiles?.full_name
@@ -119,7 +110,6 @@ export async function showSuperAdminMenu(
     hour < 17 ? 'Good afternoon' :
     'Good evening';
 
-  // Get quick stats
   const stats = await getQuickStats();
 
   await wa.list(
@@ -186,6 +176,21 @@ export async function showSuperAdminMenu(
         ],
       },
       {
+        title: '🏫 My School',
+        rows: [
+          {
+            id:          'SA_REGISTER_MY_SCHOOL',
+            title:       '🏫 Register My School',
+            description: 'Full onboarding as real owner',
+          },
+          {
+            id:          'SA_MANAGE_MY_SCHOOL',
+            title:       '⚙️ Manage My School',
+            description: 'Switch to your school admin',
+          },
+        ],
+      },
+      {
         title: '🧪 Testing & Debug',
         rows: [
           {
@@ -214,11 +219,11 @@ export async function showSuperAdminMenu(
 // ============================================================
 
 export async function handleSuperAdminMenu(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
+  input:   string,
   rawText: string,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
 
@@ -261,6 +266,23 @@ export async function handleSuperAdminMenu(
       await showSuperAdminMenu(phone, session, wa);
       break;
 
+    // ── My School ─────────────────────────────────────────
+    case 'sa_register_my_school':
+      await startSuperAdminSchoolRegistration(
+        phone, session, wa
+      );
+      break;
+
+    case 'sa_manage_my_school':
+      await manageMySuperAdminSchool(
+        phone, session, wa
+      );
+      break;
+
+    case 'sa_add_another_school':
+      await addAnotherSchool(phone, session, wa);
+      break;
+
     // ── Testing & Debug ───────────────────────────────────
     case 'sa_test_bot':
       await showTestOptions(phone, session, wa);
@@ -274,7 +296,6 @@ export async function handleSuperAdminMenu(
       await showSystemHealth(phone, wa);
       break;
 
-    // ── Test mode selections ──────────────────────────────
     case 'test_as_parent':
       await activateParentTest(phone, session, wa);
       break;
@@ -287,15 +308,22 @@ export async function handleSuperAdminMenu(
       await activateMarketingTest(phone, session, wa);
       break;
 
-    // ── School selector for admin test ────────────────────
     default:
-      if (input.startsWith('test_school_')) {
-        const schoolId = input.replace('test_school_', '');
+      if (input.startsWith('sa_switch_school_')) {
+        const schoolId =
+          input.replace('sa_switch_school_', '');
+        await switchToMySuperAdminSchool(
+          phone, schoolId, wa
+        );
+      } else if (input.startsWith('test_school_')) {
+        const schoolId =
+          input.replace('test_school_', '');
         await activateAdminTestForSchool(
           phone, session, schoolId, wa
         );
       } else if (input.startsWith('debug_school_')) {
-        const schoolId = input.replace('debug_school_', '');
+        const schoolId =
+          input.replace('debug_school_', '');
         await showSchoolDebug(phone, schoolId, wa);
       } else {
         await showSuperAdminMenu(phone, session, wa);
@@ -304,13 +332,414 @@ export async function handleSuperAdminMenu(
 }
 
 // ============================================================
+// 🏫 REGISTER MY OWN SCHOOL
+// Super admin goes through REAL onboarding
+// Setup fee auto-waived, platform WA auto-connected
+// ============================================================
+
+async function startSuperAdminSchoolRegistration(
+  phone:   string,
+  session: BotSession,
+  wa:      WhatsApp
+): Promise<void> {
+  // Check if they already have schools registered
+  const { data: existing } = await db
+    .from('school_onboarding')
+    .select(`
+      school_id,
+      schools (
+        id,
+        name,
+        is_active,
+        onboarding_status,
+        setup_fee_paid
+      )
+    `)
+    .eq('admin_phone', formatPhone(phone));
+
+  if (existing?.length) {
+    const schoolList = existing
+      .map((s, i) => {
+        const school =
+          s.schools as Record<string, unknown> | null;
+        const isActive =
+          school?.is_active as boolean;
+        const status =
+          school?.onboarding_status as string;
+        return (
+          `${i + 1}. *${school?.name ?? 'Unknown'}*\n` +
+          `   ${
+            isActive
+              ? '🟢 Active'
+              : `⏳ ${status ?? 'Pending'}`
+          }`
+        );
+      })
+      .join('\n\n');
+
+    await wa.buttons(
+      phone,
+      `🏫 *Your Registered Schools*\n\n` +
+      `${schoolList}\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `What would you like to do?`,
+      [
+        {
+          id:    'SA_ADD_ANOTHER_SCHOOL',
+          title: '➕ Register New School',
+        },
+        {
+          id:    'SA_MANAGE_MY_SCHOOL',
+          title: '⚙️ Manage Existing',
+        },
+        {
+          id:    '0',
+          title: '↩️ Back',
+        },
+      ]
+    );
+    return;
+  }
+
+  // No schools yet — start full onboarding
+  await wa.text(
+    phone,
+    `🏫 *Register Your School*\n\n` +
+    `You are about to register your own\n` +
+    `school on SchoolBot!\n\n` +
+    `✅ *What is different for you:*\n` +
+    `• Setup fee is *WAIVED* automatically\n` +
+    `• Platform WA number auto-connected\n` +
+    `• Everything else is 100% real\n\n` +
+    `✅ *What is exactly the same:*\n` +
+    `• Same onboarding flow customers see\n` +
+    `• Real bank account setup\n` +
+    `• Real classes, real staff invites\n` +
+    `• Real admin panel after setup\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `Let's start! 🚀\n\n` +
+    `What is your *full name*?`
+  );
+
+  // Start real onboarding with super admin flag
+  await launchSuperAdminOnboarding(phone);
+}
+
+// ─── Launch onboarding for super admin ────────────────────
+async function launchSuperAdminOnboarding(
+  phone: string
+): Promise<void> {
+  const { startOnboardingSession } =
+    await import('../../onboarding/engine.ts');
+
+  // Clear any existing onboarding session first
+  await db
+    .from('onboarding_sessions')
+    .delete()
+    .eq('phone', formatPhone(phone));
+
+  // Start fresh onboarding
+  await startOnboardingSession(phone, 'main');
+
+  // Mark as super admin so fee gets auto-waived
+  await db
+    .from('onboarding_sessions')
+    .update({
+      temp_data: { is_super_admin: true },
+    })
+    .eq('phone', formatPhone(phone));
+
+  console.log(
+    `[SuperAdmin] ✅ Real onboarding started for ${phone}`
+  );
+}
+
+// ─── Add another school ────────────────────────────────────
+async function addAnotherSchool(
+  phone:   string,
+  session: BotSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await wa.text(
+    phone,
+    `🏫 *Register Another School*\n\n` +
+    `Let's add a new school!\n\n` +
+    `✅ Setup fee waived\n` +
+    `✅ Platform WA auto-connected\n\n` +
+    `What is your *full name*?`
+  );
+
+  await launchSuperAdminOnboarding(phone);
+}
+
+// ============================================================
+// ⚙️ MANAGE MY SCHOOL
+// Super admin picks one of their own schools
+// and enters it as the real admin
+// ============================================================
+
+async function manageMySuperAdminSchool(
+  phone:   string,
+  session: BotSession,
+  wa:      WhatsApp
+): Promise<void> {
+  const { data: mySchools } = await db
+    .from('school_onboarding')
+    .select(`
+      school_id,
+      schools (
+        id,
+        name,
+        is_active,
+        onboarding_status,
+        setup_fee_paid
+      )
+    `)
+    .eq('admin_phone', formatPhone(phone));
+
+  if (!mySchools?.length) {
+    await wa.buttons(
+      phone,
+      `🏫 *No Schools Registered*\n\n` +
+      `You have not registered a school yet.\n\n` +
+      `Register your first school now!`,
+      [
+        {
+          id:    'SA_REGISTER_MY_SCHOOL',
+          title: '🏫 Register School',
+        },
+        {
+          id:    '0',
+          title: '↩️ Back',
+        },
+      ]
+    );
+    return;
+  }
+
+  // Single school — go straight in
+  if (mySchools.length === 1) {
+    const schoolId = mySchools[0].school_id;
+    await switchToMySuperAdminSchool(
+      phone, schoolId, wa
+    );
+    return;
+  }
+
+  // Multiple schools — show picker
+  const rows = mySchools.slice(0, 9).map((s) => {
+    const school =
+      s.schools as Record<string, unknown> | null;
+    const isActive = school?.is_active as boolean;
+    const feePaid  =
+      school?.setup_fee_paid as boolean;
+
+    let icon        = '🟢';
+    let description = 'Active — tap to manage';
+
+    if (!feePaid) {
+      icon        = '💳';
+      description = 'Setup fee pending';
+    } else if (!isActive) {
+      icon        = '🔌';
+      description = 'WhatsApp not connected';
+    }
+
+    return {
+      id:    `SA_SWITCH_SCHOOL_${s.school_id}`,
+      title: `${icon} ${
+        String(school?.name ?? 'School').substring(0, 20)
+      }`,
+      description,
+    };
+  });
+
+  await wa.list(
+    phone,
+    `🏫 Your Schools`,
+    `Select a school to manage:\n\n` +
+    `🟢 Active  💳 Fee pending  🔌 WA pending`,
+    `Tap to switch`,
+    `🏫 Select School`,
+    [{ title: 'Your Schools', rows }]
+  );
+}
+
+// ─── Switch super admin into their own real school ─────────
+async function switchToMySuperAdminSchool(
+  phone:    string,
+  schoolId: string,
+  wa:       WhatsApp
+): Promise<void> {
+  // Get school details
+  const { data: school } = await db
+    .from('schools')
+    .select(
+      'id, name, is_active, onboarding_status, setup_fee_paid'
+    )
+    .eq('id', schoolId)
+    .single();
+
+  if (!school) {
+    await wa.text(phone, `❌ School not found.`);
+    return;
+  }
+
+  // ── Setup fee not paid → resume onboarding ─────────────
+  if (!school.setup_fee_paid) {
+    await wa.text(
+      phone,
+      `⏳ *${school.name}*\n\n` +
+      `Setup is not complete yet.\n` +
+      `Resuming onboarding...`
+    );
+    await delay(500);
+
+    const { getOnboardingSession } =
+      await import('../../onboarding/engine.ts');
+    const obSession =
+      await getOnboardingSession(phone);
+
+    if (!obSession) {
+      // Restart onboarding for this school
+      await launchSuperAdminOnboarding(phone);
+      await wa.text(
+        phone,
+        `What is your *full name*?`
+      );
+    }
+    // handler.ts will pick up onboarding session
+    // automatically on next message
+    return;
+  }
+
+  // ── Fee paid but WA not connected ──────────────────────
+  const { data: waAccount } = await db
+    .from('whatsapp_accounts')
+    .select('*')
+    .eq('school_id', schoolId)
+    .eq('status', 'active')
+    .maybeSingle();
+
+  if (!waAccount) {
+    // Auto-connect platform WA number
+    await wa.text(
+      phone,
+      `🔌 *Connecting WhatsApp...*\n\n` +
+      `Auto-connecting platform number\n` +
+      `to *${school.name}*...`
+    );
+
+    await db
+      .from('whatsapp_accounts')
+      .upsert(
+        {
+          school_id:
+            schoolId,
+          phone_number_id:
+            Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+          access_token:
+            Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+          display_number:
+            Deno.env.get('WHATSAPP_DISPLAY_NUMBER') ?? '',
+          status:     'active',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'school_id' }
+      );
+
+    // Mark school as fully active
+    await db
+      .from('schools')
+      .update({
+        is_active:         true,
+        onboarding_status: 'active',
+        updated_at:        new Date().toISOString(),
+      })
+      .eq('id', schoolId);
+
+    await db
+      .from('school_onboarding')
+      .update({
+        current_step: 'complete',
+        completed:    true,
+        updated_at:   new Date().toISOString(),
+      })
+      .eq('school_id', schoolId);
+
+    await wa.text(
+      phone,
+      `✅ *WhatsApp Connected!*\n\n` +
+      `*${school.name}* is now live!\n\n` +
+      `Switching to admin panel...`
+    );
+    await delay(800);
+  }
+
+  // ── Get fresh WA account ───────────────────────────────
+  const { data: freshWa } = await db
+    .from('whatsapp_accounts')
+    .select('*')
+    .eq('school_id', schoolId)
+    .eq('status', 'active')
+    .single();
+
+  // ── Create real admin session ──────────────────────────
+  const adminUser = {
+    id:        `sa-own-${schoolId}`,
+    school_id: schoolId,
+    user_id:   `sa-own-${schoolId}`,
+    role_id:   'admin',
+    status:    'active',
+    roles:     { id: 'admin', name: 'admin' },
+    profiles: {
+      id:         `sa-own-${schoolId}`,
+      full_name:  'School Admin',
+      phone,
+      avatar_url: null,
+    },
+  };
+
+  const adminSession = await sessions.createAdminSession(
+    phone,
+    adminUser as never,
+    freshWa as never,
+    'admin'
+  );
+
+  // Set test mode so EXIT returns to super admin panel
+  await setTestMode(phone, 'admin', schoolId);
+
+  await wa.text(
+    phone,
+    `✅ *Welcome to ${school.name}!*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `You are now managing this school\n` +
+    `as the admin.\n\n` +
+    `This is 100% real — everything\n` +
+    `you do here actually happens.\n\n` +
+    `⚠️ Type *EXIT* anytime to return\n` +
+    `to your super admin panel.`
+  );
+
+  await delay(800);
+
+  // Show the real admin menu
+  const { showAdminMenu } =
+    await import('../admin/admin.menu.ts');
+  const schoolWa = new WhatsApp(freshWa as never);
+  await showAdminMenu(phone, adminSession, schoolWa);
+}
+
+// ============================================================
 // 🧪 TEST BOT FEATURES
 // ============================================================
 
 async function showTestOptions(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.buttons(
     phone,
@@ -322,21 +751,19 @@ async function showTestOptions(
     `⚠️ Type *EXIT* at any time\n` +
     `to return to your admin panel.`,
     [
-      { id: 'test_as_parent',  title: '👨‍👩‍👧 Test as Parent' },
-      { id: 'test_as_admin',   title: '👨‍💼 Test as Admin' },
-      { id: 'test_marketing',  title: '🎯 Test Marketing Bot' },
+      { id: 'TEST_AS_PARENT',  title: '👨‍👩‍👧 Test as Parent'   },
+      { id: 'TEST_AS_ADMIN',   title: '👨‍💼 Test as Admin'    },
+      { id: 'TEST_MARKETING',  title: '🎯 Test Marketing Bot' },
     ],
     '🧪 Test Mode'
   );
 }
 
-// ─── Activate Parent Test Mode ────────────────────────────
 async function activateParentTest(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  // Get list of schools to test with
   const { data: schools } = await db
     .from('schools')
     .select('id, name')
@@ -349,32 +776,38 @@ async function activateParentTest(
       phone,
       `❌ *No Active Schools*\n\n` +
       `You need at least one active\n` +
-      `school to test the parent bot.`,
-      [{ id: 'SA_TEST_BOT', title: '↩️ Back' }]
+      `school to test the parent bot.\n\n` +
+      `Register your own school first!`,
+      [
+        { id: 'SA_REGISTER_MY_SCHOOL', title: '🏫 Register School' },
+        { id: 'SA_TEST_BOT',           title: '↩️ Back'            },
+      ]
     );
     return;
   }
 
   if (schools.length === 1) {
-    // Only one school — go straight to test
     await activateParentTestForSchool(
-      phone, session, schools[0].id, schools[0].name, wa
+      phone, session,
+      schools[0].id,
+      schools[0].name,
+      wa
     );
     return;
   }
 
-  // Multiple schools — let them pick
   await wa.list(
     phone,
     `👨‍👩‍👧 Test as Parent`,
-    `Select which school to test\nthe parent experience for:`,
+    `Select which school to test\n` +
+    `the parent experience for:`,
     `You will see what parents see`,
     `🏫 Select School`,
     [
       {
         title: 'Active Schools',
         rows: schools.map((s) => ({
-          id:          `test_school_parent_${s.id}`,
+          id:          `TEST_SCHOOL_PARENT_${s.id}`,
           title:       s.name.substring(0, 24),
           description: 'Test parent bot for this school',
         })),
@@ -384,13 +817,12 @@ async function activateParentTest(
 }
 
 async function activateParentTestForSchool(
-  phone: string,
-  session: BotSession,
-  schoolId: string,
+  phone:      string,
+  session:    BotSession,
+  schoolId:   string,
   schoolName: string,
-  wa: WhatsApp
+  wa:         WhatsApp
 ): Promise<void> {
-  // Get a real parent from this school to test with
   const { data: parent } = await db
     .from('parents')
     .select('id, full_name, phone, whatsapp_number')
@@ -398,7 +830,6 @@ async function activateParentTestForSchool(
     .limit(1)
     .maybeSingle();
 
-  // Get school WA account
   const { data: waAccount } = await db
     .from('whatsapp_accounts')
     .select('*')
@@ -412,40 +843,37 @@ async function activateParentTestForSchool(
       `⚠️ *No parents found*\n\n` +
       `*${schoolName}* has no parents\n` +
       `registered yet.\n\n` +
-      `Add parents first to test\n` +
-      `the parent experience.`,
+      `Add students with parent data first.`,
       [
-        { id: 'test_as_admin',  title: '👨‍💼 Test as Admin' },
-        { id: 'SA_TEST_BOT',    title: '↩️ Back' },
+        { id: 'TEST_AS_ADMIN', title: '👨‍💼 Test as Admin' },
+        { id: 'SA_TEST_BOT',   title: '↩️ Back'           },
       ]
     );
     return;
   }
 
-  // Set test mode in DB
   await setTestMode(phone, 'parent', schoolId);
 
-  // Create a parent session using the real parent's data
-  const { ParentService } = await import(
-    '../../services/parent.service.ts'
-  );
+  const { ParentService } =
+    await import('../../services/parent.service.ts');
   const parentSvc = new ParentService();
+  const students  =
+    await parentSvc.getStudents(parent.id);
 
-  const students = await parentSvc.getStudents(parent.id);
+  const testSession =
+    await sessions.createParentSession(
+      phone,
+      {
+        ...parent,
+        school_id: schoolId,
+        schools: { name: schoolName } as never,
+      } as never,
+      students,
+      waAccount as never
+    );
 
-  const testSession = await sessions.createParentSession(
-    phone,
-    {
-      ...parent,
-      school_id: schoolId,
-      schools: { name: schoolName } as never,
-    } as never,
-    students,
-    waAccount as never
-  );
-
-  // Import and show the real parent menu
-  const { showMainMenu } = await import('../menu.ts');
+  const { showMainMenu } =
+    await import('../menu.ts');
   const schoolWa = new WhatsApp(waAccount as never);
 
   await wa.text(
@@ -465,13 +893,11 @@ async function activateParentTestForSchool(
   await showMainMenu(phone, testSession, schoolWa);
 }
 
-// ─── Activate Admin Test Mode ─────────────────────────────
 async function activateAdminTest(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  // Get list of schools
   const { data: schools } = await db
     .from('schools')
     .select('id, name')
@@ -483,9 +909,11 @@ async function activateAdminTest(
     await wa.buttons(
       phone,
       `❌ *No Active Schools*\n\n` +
-      `You need at least one active\n` +
-      `school to test the admin bot.`,
-      [{ id: 'SA_TEST_BOT', title: '↩️ Back' }]
+      `Register your own school first!`,
+      [
+        { id: 'SA_REGISTER_MY_SCHOOL', title: '🏫 Register School' },
+        { id: 'SA_TEST_BOT',           title: '↩️ Back'            },
+      ]
     );
     return;
   }
@@ -500,14 +928,15 @@ async function activateAdminTest(
   await wa.list(
     phone,
     `👨‍💼 Test as School Admin`,
-    `Select which school to test\nthe admin experience for:`,
+    `Select which school to test\n` +
+    `the admin experience for:`,
     `You will see what school admins see`,
     `🏫 Select School`,
     [
       {
         title: 'Active Schools',
         rows: schools.map((s) => ({
-          id:          `test_school_${s.id}`,
+          id:          `TEST_SCHOOL_${s.id}`,
           title:       s.name.substring(0, 24),
           description: 'Test admin bot for this school',
         })),
@@ -517,19 +946,17 @@ async function activateAdminTest(
 }
 
 async function activateAdminTestForSchool(
-  phone: string,
-  session: BotSession,
+  phone:    string,
+  session:  BotSession,
   schoolId: string,
-  wa: WhatsApp
+  wa:       WhatsApp
 ): Promise<void> {
-  // Get school details
   const { data: school } = await db
     .from('schools')
     .select('name')
     .eq('id', schoolId)
     .single();
 
-  // Get school WA account
   const { data: waAccount } = await db
     .from('whatsapp_accounts')
     .select('*')
@@ -537,35 +964,30 @@ async function activateAdminTestForSchool(
     .eq('status', 'active')
     .maybeSingle();
 
-  // Set test mode in DB
   await setTestMode(phone, 'admin', schoolId);
 
-  // Build a fake admin school user for this school
   const fakeAdminUser = {
     id:        `test-admin-${schoolId}`,
     school_id: schoolId,
     user_id:   `test-admin-${schoolId}`,
     role_id:   'admin',
     status:    'active',
-    roles: {
-      id:   'admin',
-      name: 'admin',
-    },
+    roles:     { id: 'admin', name: 'admin' },
     profiles: {
       id:         `test-admin-${schoolId}`,
       full_name:  'Super Admin (Testing)',
-      phone:      phone,
+      phone,
       avatar_url: null,
     },
   };
 
-  // Create admin session for this school
-  const testSession = await sessions.createAdminSession(
-    phone,
-    fakeAdminUser as never,
-    waAccount as never,
-    'admin'
-  );
+  const testSession =
+    await sessions.createAdminSession(
+      phone,
+      fakeAdminUser as never,
+      waAccount as never,
+      'admin'
+    );
 
   const schoolWa = new WhatsApp(waAccount as never);
 
@@ -576,35 +998,24 @@ async function activateAdminTestForSchool(
     `🏫 School: *${school?.name ?? 'Unknown'}*\n\n` +
     `You are now seeing exactly what\n` +
     `the school admin sees!\n\n` +
-    `You can test:\n` +
-    `✅ Mark attendance\n` +
-    `💰 Record fees\n` +
-    `👨‍🏫 Manage staff\n` +
-    `📊 View reports\n` +
-    `📢 Send broadcasts\n\n` +
     `⚠️ Type *EXIT* to return to\n` +
     `your super admin panel.`
   );
 
   await delay(1000);
 
-  // Import and show real admin menu
-  const { showAdminMenu } = await import(
-    '../admin/admin.menu.ts'
-  );
+  const { showAdminMenu } =
+    await import('../admin/admin.menu.ts');
   await showAdminMenu(phone, testSession, schoolWa);
 }
 
-// ─── Activate Marketing Bot Test ──────────────────────────
 async function activateMarketingTest(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  // Set test mode
   await setTestMode(phone, 'marketing', null);
 
-  // Clear any existing marketing session so it starts fresh
   await db
     .from('demo_sessions')
     .delete()
@@ -615,13 +1026,7 @@ async function activateMarketingTest(
     `🧪 *Marketing Bot Test Mode ACTIVE*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
     `You are now seeing exactly what\n` +
-    `school owners see when they\n` +
-    `message your number!\n\n` +
-    `You can test:\n` +
-    `🎯 Demo features (attendance, fees)\n` +
-    `🤖 Sabi AI responses\n` +
-    `💵 Pricing display\n` +
-    `🚀 Registration flow\n\n` +
+    `school owners see!\n\n` +
     `⚠️ Type *EXIT* to return to\n` +
     `your super admin panel.\n\n` +
     `Starting marketing bot now...`
@@ -629,21 +1034,16 @@ async function activateMarketingTest(
 
   await delay(1000);
 
-  // Trigger the marketing bot welcome
-  const { handleMarketingMessage } = await import(
-    '../marketing/marketing.handler.ts'
-  );
+  const { handleMarketingMessage } =
+    await import('../marketing/marketing.handler.ts');
 
-  // Create a fake "hi" message
-  const fakeMessage = {
+  await handleMarketingMessage({
     id:        'test-message',
     from:      phone,
     timestamp: Date.now().toString(),
     type:      'text' as const,
     text:      { body: 'hi' },
-  };
-
-  await handleMarketingMessage(fakeMessage);
+  });
 }
 
 // ============================================================
@@ -652,7 +1052,7 @@ async function activateMarketingTest(
 
 async function promptDebug(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const { data: schools } = await db
     .from('schools')
@@ -661,26 +1061,25 @@ async function promptDebug(
     .limit(8);
 
   if (!schools?.length) {
-    await wa.text(
-      phone,
-      `❌ No schools found to debug.`
-    );
+    await wa.text(phone, `❌ No schools found.`);
     return;
   }
 
   await wa.list(
     phone,
     `🔍 Debug School`,
-    `Select a school to inspect\nits bot sessions and activity:`,
+    `Select a school to inspect:`,
     `Tap to view debug info`,
     `🔍 Select School`,
     [
       {
         title: 'Schools',
         rows: schools.map((s) => ({
-          id:          `debug_school_${s.id}`,
+          id:          `DEBUG_SCHOOL_${s.id}`,
           title:       s.name.substring(0, 24),
-          description: s.is_active ? '🟢 Active' : '🔴 Inactive',
+          description: s.is_active
+            ? '🟢 Active'
+            : '🔴 Inactive',
         })),
       },
     ]
@@ -688,60 +1087,69 @@ async function promptDebug(
 }
 
 async function showSchoolDebug(
-  phone: string,
+  phone:    string,
   schoolId: string,
-  wa: WhatsApp
+  wa:       WhatsApp
 ): Promise<void> {
-  const [school, sessions_, waAccount, students,
-    parents, staff, payments, logs] =
-    await Promise.all([
-      db.from('schools')
-        .select('name, is_active, onboarding_status, ' +
-          'setup_fee_paid, student_count, created_at')
-        .eq('id', schoolId)
-        .single(),
-      db.from('bot_sessions')
-        .select('phone, role, state, last_activity')
-        .eq('school_id', schoolId)
-        .gte(
-          'last_activity',
-          new Date(Date.now() - 3600000).toISOString()
-        ),
-      db.from('whatsapp_accounts')
-        .select('status, phone_number_id, display_number')
-        .eq('school_id', schoolId)
-        .maybeSingle(),
-      db.from('students')
-        .select('id', { count: 'exact' })
-        .eq('school_id', schoolId)
-        .eq('status', 'active'),
-      db.from('parents')
-        .select('id', { count: 'exact' })
-        .eq('school_id', schoolId),
-      db.from('staff')
-        .select('id', { count: 'exact' })
-        .eq('school_id', schoolId)
-        .eq('employment_status', 'active'),
-      db.from('payments')
-        .select('id', { count: 'exact' })
-        .eq('school_id', schoolId)
-        .eq('status', 'Success'),
-      db.from('platform_logs')
-        .select('level, message, created_at')
-        .eq('school_id', schoolId)
-        .order('created_at', { ascending: false })
-        .limit(3),
-    ]);
+  const [
+    school, sessions_, waAccount,
+    students, parents, staff,
+    payments, logs,
+  ] = await Promise.all([
+    db.from('schools')
+      .select(
+        'name, is_active, onboarding_status, ' +
+        'setup_fee_paid, student_count, created_at'
+      )
+      .eq('id', schoolId)
+      .single(),
+    db.from('bot_sessions')
+      .select('phone, role, state, last_activity')
+      .eq('school_id', schoolId)
+      .gte(
+        'last_activity',
+        new Date(Date.now() - 3600000).toISOString()
+      ),
+    db.from('whatsapp_accounts')
+      .select('status, phone_number_id, display_number')
+      .eq('school_id', schoolId)
+      .maybeSingle(),
+    db.from('students')
+      .select('id', { count: 'exact' })
+      .eq('school_id', schoolId)
+      .eq('status', 'active'),
+    db.from('parents')
+      .select('id', { count: 'exact' })
+      .eq('school_id', schoolId),
+    db.from('staff')
+      .select('id', { count: 'exact' })
+      .eq('school_id', schoolId)
+      .eq('employment_status', 'active'),
+    db.from('payments')
+      .select('id', { count: 'exact' })
+      .eq('school_id', schoolId)
+      .eq('status', 'Success'),
+    db.from('platform_logs')
+      .select('level, message, created_at')
+      .eq('school_id', schoolId)
+      .order('created_at', { ascending: false })
+      .limit(3),
+  ]);
 
-  const s         = school.data;
-  const wa_       = waAccount.data;
-  const activeSes = sessions_.data ?? [];
+  const s          = school.data;
+  const wa_        = waAccount.data;
+  const activeSes  = sessions_.data ?? [];
 
-  const recentLogs = (logs.data ?? []).map((l) => {
-    const icon = l.level === 'error' ? '🔴' :
-      l.level === 'warning' ? '🟡' : '🔵';
-    return `${icon} ${l.message.substring(0, 40)}`;
-  }).join('\n');
+  const recentLogs = (logs.data ?? [])
+    .map((l) => {
+      const icon =
+        l.level === 'error'   ? '🔴' :
+        l.level === 'warning' ? '🟡' : '🔵';
+      return (
+        `${icon} ${l.message.substring(0, 40)}`
+      );
+    })
+    .join('\n');
 
   await wa.buttons(
     phone,
@@ -750,10 +1158,16 @@ async function showSchoolDebug(
     `🏫 *${s?.name ?? 'Unknown'}*\n\n` +
     `📊 *Status:*\n` +
     `Active: ${s?.is_active ? '✅' : '❌'}\n` +
-    `Setup Fee: ${s?.setup_fee_paid ? '✅ Paid' : '❌ Not Paid'}\n` +
+    `Setup Fee: ${
+      s?.setup_fee_paid ? '✅ Paid' : '❌ Not Paid'
+    }\n` +
     `Onboarding: ${s?.onboarding_status ?? 'N/A'}\n\n` +
     `📱 *WhatsApp:*\n` +
-    `Status: ${wa_?.status === 'active' ? '✅ Connected' : '❌ Not Connected'}\n` +
+    `Status: ${
+      wa_?.status === 'active'
+        ? '✅ Connected'
+        : '❌ Not Connected'
+    }\n` +
     `Number: ${wa_?.display_number ?? 'Not set'}\n\n` +
     `👥 *Users:*\n` +
     `Students: *${students.count ?? 0}*\n` +
@@ -766,7 +1180,7 @@ async function showSchoolDebug(
     `━━━━━━━━━━━━━━━━`,
     [
       {
-        id:    `test_school_${schoolId}`,
+        id:    `TEST_SCHOOL_${schoolId}`,
         title: '🧪 Test as Admin',
       },
       {
@@ -782,17 +1196,14 @@ async function showSchoolDebug(
 }
 
 // ============================================================
-// 🤖 SYSTEM HEALTH CHECK
+// 🤖 SYSTEM HEALTH
 // ============================================================
 
 async function showSystemHealth(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
-  await wa.text(
-    phone,
-    `⏳ Running system health check...`
-  );
+  await wa.text(phone, `⏳ Running health check...`);
 
   const checks: Array<{
     name:   string;
@@ -800,12 +1211,9 @@ async function showSystemHealth(
     detail: string;
   }> = [];
 
-  // ── Check 1: Database ─────────────────────────────────
+  // Database
   try {
-    const { data } = await db
-      .from('schools')
-      .select('id')
-      .limit(1);
+    await db.from('schools').select('id').limit(1);
     checks.push({
       name:   'Database',
       status: true,
@@ -819,7 +1227,7 @@ async function showSystemHealth(
     });
   }
 
-  // ── Check 2: WhatsApp API ─────────────────────────────
+  // WhatsApp API
   try {
     const apiUrl =
       Deno.env.get('WHATSAPP_API_URL') ??
@@ -829,14 +1237,9 @@ async function showSystemHealth(
     const phoneId =
       Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
 
-    const res = await fetch(
-      `${apiUrl}/${phoneId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
+    const res = await fetch(`${apiUrl}/${phoneId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     checks.push({
       name:   'WhatsApp API',
       status: res.ok,
@@ -852,15 +1255,14 @@ async function showSystemHealth(
     });
   }
 
-  // ── Check 3: Paystack ─────────────────────────────────
+  // Paystack
   try {
-    const key = Deno.env.get('PAYSTACK_SECRET_KEY') ?? '';
+    const key =
+      Deno.env.get('PAYSTACK_SECRET_KEY') ?? '';
     const res = await fetch(
       'https://api.paystack.co/bank?currency=NGN&perPage=1',
       {
-        headers: {
-          Authorization: `Bearer ${key}`,
-        },
+        headers: { Authorization: `Bearer ${key}` },
       }
     );
     checks.push({
@@ -878,13 +1280,14 @@ async function showSystemHealth(
     });
   }
 
-  // ── Check 4: AI Service ───────────────────────────────
+  // AI Service
   try {
     const provider =
       Deno.env.get('AI_PROVIDER') ?? 'groq';
-    const key = provider === 'groq'
-      ? Deno.env.get('GROQ_API_KEY') ?? ''
-      : Deno.env.get('OPENAI_API_KEY') ?? '';
+    const key =
+      provider === 'groq'
+        ? Deno.env.get('GROQ_API_KEY') ?? ''
+        : Deno.env.get('OPENAI_API_KEY') ?? '';
 
     checks.push({
       name:   'AI Service',
@@ -901,7 +1304,7 @@ async function showSystemHealth(
     });
   }
 
-  // ── Check 5: Active schools ───────────────────────────
+  // Active schools
   try {
     const { data } = await db
       .from('schools')
@@ -920,7 +1323,7 @@ async function showSystemHealth(
     });
   }
 
-  // ── Check 6: Environment vars ─────────────────────────
+  // Environment vars
   const requiredEnvVars = [
     'WHATSAPP_PHONE_NUMBER_ID',
     'WHATSAPP_ACCESS_TOKEN',
@@ -943,7 +1346,6 @@ async function showSystemHealth(
       : `Missing: ${missingVars.join(', ')}`,
   });
 
-  // ── Build report ──────────────────────────────────────
   const allPassed = checks.every((c) => c.status);
 
   const lines = checks
@@ -959,13 +1361,15 @@ async function showSystemHealth(
     `━━━━━━━━━━━━━━━━\n\n` +
     `${lines}\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `${allPassed
-      ? '✅ *All systems operational!*'
-      : '⚠️ *Some systems need attention*'}`,
+    `${
+      allPassed
+        ? '✅ *All systems operational!*'
+        : '⚠️ *Some systems need attention*'
+    }`,
     [
-      { id: 'SA_LOGS',     title: '📋 View Logs' },
-      { id: 'SA_TEST_BOT', title: '🧪 Test Bot' },
-      { id: '0',           title: '↩️ Menu' },
+      { id: 'SA_LOGS',     title: '📋 View Logs'  },
+      { id: 'SA_TEST_BOT', title: '🧪 Test Bot'   },
+      { id: '0',           title: '↩️ Menu'        },
     ]
   );
 }
@@ -976,7 +1380,7 @@ async function showSystemHealth(
 
 async function showFullStats(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const now          = new Date();
   const startOfMonth = new Date(
@@ -1020,12 +1424,11 @@ async function showFullStats(
   ]);
 
   const schools       = schoolsRes.data ?? [];
-  const activeSchools = schools.filter(
-    (s) => s.is_active
-  ).length;
-  const monthRev      = sumAmount(monthRevRes.data ?? []);
-  const yearRev       = sumAmount(yearRevRes.data   ?? []);
-  const allRev        = sumAmount(allRevRes.data    ?? []);
+  const activeSchools =
+    schools.filter((s) => s.is_active).length;
+  const monthRev  = sumAmount(monthRevRes.data ?? []);
+  const yearRev   = sumAmount(yearRevRes.data   ?? []);
+  const allRev    = sumAmount(allRevRes.data    ?? []);
 
   await wa.buttons(
     phone,
@@ -1036,8 +1439,12 @@ async function showFullStats(
     `Active:   *${activeSchools}*\n` +
     `Inactive: *${schools.length - activeSchools}*\n\n` +
     `👥 *Users:*\n` +
-    `Students: *${(studentsRes.count ?? 0).toLocaleString()}*\n` +
-    `Parents:  *${(parentsRes.count ?? 0).toLocaleString()}*\n\n` +
+    `Students: *${(
+      studentsRes.count ?? 0
+    ).toLocaleString()}*\n` +
+    `Parents:  *${(
+      parentsRes.count ?? 0
+    ).toLocaleString()}*\n\n` +
     `💰 *Revenue:*\n` +
     `This Month: *${fmt(monthRev)}*\n` +
     `This Year:  *${fmt(yearRev)}*\n` +
@@ -1048,8 +1455,8 @@ async function showFullStats(
     `━━━━━━━━━━━━━━━━`,
     [
       { id: 'SA_REVENUE', title: '💰 Revenue Detail' },
-      { id: 'SA_SCHOOLS', title: '🏫 Schools' },
-      { id: 'SA_LEADS',   title: '🧲 Leads' },
+      { id: 'SA_SCHOOLS', title: '🏫 Schools'        },
+      { id: 'SA_LEADS',   title: '🧲 Leads'          },
     ]
   );
 }
@@ -1060,7 +1467,7 @@ async function showFullStats(
 
 async function showRevenue(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const startOfMonth = new Date(
     new Date().getFullYear(),
@@ -1104,20 +1511,24 @@ async function showRevenue(
     .order('created_at', { ascending: false })
     .limit(5);
 
-  const recentLines = (recent ?? []).map((p) => {
-    const school = p.schools as
-      Record<string, string> | null;
-    const date = new Date(p.created_at)
-      .toLocaleDateString('en-NG', {
-        day: 'numeric', month: 'short',
-      });
-    const type = p.payment_type === 'setup_fee'
-      ? '🔧' : '💸';
-    return (
-      `${type} ${school?.name ?? 'Unknown'}\n` +
-      `   ${fmt(parseFloat(String(p.amount)))} • ${date}`
-    );
-  }).join('\n\n');
+  const recentLines = (recent ?? [])
+    .map((p) => {
+      const school =
+        p.schools as Record<string, string> | null;
+      const date = new Date(p.created_at)
+        .toLocaleDateString('en-NG', {
+          day: 'numeric', month: 'short',
+        });
+      const type =
+        p.payment_type === 'setup_fee' ? '🔧' : '💸';
+      return (
+        `${type} ${school?.name ?? 'Unknown'}\n` +
+        `   ${fmt(
+          parseFloat(String(p.amount))
+        )} • ${date}`
+      );
+    })
+    .join('\n\n');
 
   await wa.buttons(
     phone,
@@ -1131,14 +1542,14 @@ async function showRevenue(
     `All Time:   *${fmt(cmAllAmt)}*\n\n` +
     `💵 *Grand Total:*\n` +
     `This Month: *${fmt(sfMonthAmt + cmMonthAmt)}*\n` +
-    `All Time:   *${fmt(sfAllAmt + cmAllAmt)}*\n\n` +
+    `All Time:   *${fmt(sfAllAmt  + cmAllAmt)}*\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
     `📋 *Recent Payments:*\n\n` +
     `${recentLines || 'No payments yet'}`,
     [
       { id: 'SA_STATS',   title: '📊 Full Stats' },
-      { id: 'SA_SCHOOLS', title: '🏫 Schools' },
-      { id: '0',          title: '↩️ Menu' },
+      { id: 'SA_SCHOOLS', title: '🏫 Schools'    },
+      { id: '0',          title: '↩️ Menu'        },
     ]
   );
 }
@@ -1149,7 +1560,7 @@ async function showRevenue(
 
 async function showSchools(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const { data: schools } = await db
     .from('schools')
@@ -1169,15 +1580,17 @@ async function showSchools(
     return;
   }
 
-  const lines = schools.map((s, i) => {
-    const status  = s.is_active ? '🟢' : '🔴';
-    const feePaid = s.setup_fee_paid ? '✅' : '⏳';
-    return (
-      `${i + 1}. ${status} *${s.name}*\n` +
-      `   👥 ${s.student_count ?? 0} students  ` +
-      `${feePaid} ${s.onboarding_status}`
-    );
-  }).join('\n\n');
+  const lines = schools
+    .map((s, i) => {
+      const status  = s.is_active     ? '🟢' : '🔴';
+      const feePaid = s.setup_fee_paid ? '✅' : '⏳';
+      return (
+        `${i + 1}. ${status} *${s.name}*\n` +
+        `   👥 ${s.student_count ?? 0} students  ` +
+        `${feePaid} ${s.onboarding_status}`
+      );
+    })
+    .join('\n\n');
 
   await wa.buttons(
     phone,
@@ -1189,8 +1602,8 @@ async function showSchools(
     `✅ Fee Paid  ⏳ Pending`,
     [
       { id: 'SA_DEBUG',   title: '🔍 Debug School' },
-      { id: 'SA_REVENUE', title: '💰 Revenue' },
-      { id: '0',          title: '↩️ Menu' },
+      { id: 'SA_REVENUE', title: '💰 Revenue'      },
+      { id: '0',          title: '↩️ Menu'          },
     ]
   );
 }
@@ -1201,7 +1614,7 @@ async function showSchools(
 
 async function showLeads(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const { data: leads } = await db
     .from('leads')
@@ -1241,18 +1654,20 @@ async function showLeads(
     {} as Record<string, number>
   );
 
-  const lines = leads.map((l, i) => {
-    const icon = statusIcons[l.status] ?? '•';
-    const date = new Date(l.created_at)
-      .toLocaleDateString('en-NG', {
-        day: 'numeric', month: 'short',
-      });
-    return (
-      `${i + 1}. ${icon} *${l.contact_name}*\n` +
-      `   🏫 ${l.school_name}\n` +
-      `   📱 ${l.phone} | ${date}`
-    );
-  }).join('\n\n');
+  const lines = leads
+    .map((l, i) => {
+      const icon = statusIcons[l.status] ?? '•';
+      const date = new Date(l.created_at)
+        .toLocaleDateString('en-NG', {
+          day: 'numeric', month: 'short',
+        });
+      return (
+        `${i + 1}. ${icon} *${l.contact_name}*\n` +
+        `   🏫 ${l.school_name}\n` +
+        `   📱 ${l.phone} | ${date}`
+      );
+    })
+    .join('\n\n');
 
   await wa.buttons(
     phone,
@@ -1266,7 +1681,7 @@ async function showLeads(
     `${lines}`,
     [
       { id: 'SA_STATS', title: '📊 Stats' },
-      { id: '0',        title: '↩️ Menu' },
+      { id: '0',        title: '↩️ Menu'  },
     ]
   );
 }
@@ -1277,7 +1692,7 @@ async function showLeads(
 
 async function showActiveSessions(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const since = new Date(
     Date.now() - 60 * 60 * 1000
@@ -1308,23 +1723,30 @@ async function showActiveSessions(
     teacher: '👨‍🏫',
   };
 
-  const parents  = (activeSessions ?? [])
-    .filter((s) => s.role === 'parent').length;
-  const admins   = (activeSessions ?? [])
-    .filter((s) => s.role === 'admin').length;
-  const teachers = (activeSessions ?? [])
-    .filter((s) => s.role === 'teacher').length;
+  const parents  =
+    (activeSessions ?? [])
+      .filter((s) => s.role === 'parent').length;
+  const admins   =
+    (activeSessions ?? [])
+      .filter((s) => s.role === 'admin').length;
+  const teachers =
+    (activeSessions ?? [])
+      .filter((s) => s.role === 'teacher').length;
 
-  const lines = (activeSessions ?? []).map((s) => {
-    const icon = roleIcons[s.role] ?? '👤';
-    const time = new Date(s.last_activity)
-      .toLocaleTimeString('en-NG', {
-        hour: '2-digit', minute: '2-digit',
-      });
-    const ph =
-      s.phone.slice(0, 7) + '***' + s.phone.slice(-2);
-    return `${icon} ${ph} | ${time}`;
-  }).join('\n');
+  const lines = (activeSessions ?? [])
+    .map((s) => {
+      const icon = roleIcons[s.role] ?? '👤';
+      const time = new Date(s.last_activity)
+        .toLocaleTimeString('en-NG', {
+          hour: '2-digit', minute: '2-digit',
+        });
+      const ph =
+        s.phone.slice(0, 7) +
+        '***' +
+        s.phone.slice(-2);
+      return `${icon} ${ph} | ${time}`;
+    })
+    .join('\n');
 
   await wa.buttons(
     phone,
@@ -1338,7 +1760,7 @@ async function showActiveSessions(
     `${lines}`,
     [
       { id: 'SA_STATS', title: '📊 Stats' },
-      { id: '0',        title: '↩️ Menu' },
+      { id: '0',        title: '↩️ Menu'  },
     ]
   );
 }
@@ -1349,7 +1771,7 @@ async function showActiveSessions(
 
 async function showLogs(
   phone: string,
-  wa: WhatsApp
+  wa:    WhatsApp
 ): Promise<void> {
   const { data: logs } = await db
     .from('platform_logs')
@@ -1369,19 +1791,24 @@ async function showLogs(
     return;
   }
 
-  const lines = logs.map((l) => {
-    const icon = l.level === 'error' ? '🔴' : '🟡';
-    const time = new Date(l.created_at)
-      .toLocaleString('en-NG', {
-        day: 'numeric', month: 'short',
-        hour: '2-digit', minute: '2-digit',
-      });
-    return (
-      `${icon} *${l.category ?? l.level}*\n` +
-      `   ${l.message.substring(0, 60)}\n` +
-      `   ${time}`
-    );
-  }).join('\n\n');
+  const lines = logs
+    .map((l) => {
+      const icon =
+        l.level === 'error' ? '🔴' : '🟡';
+      const time = new Date(l.created_at)
+        .toLocaleString('en-NG', {
+          day:    'numeric',
+          month:  'short',
+          hour:   '2-digit',
+          minute: '2-digit',
+        });
+      return (
+        `${icon} *${l.category ?? l.level}*\n` +
+        `   ${l.message.substring(0, 60)}\n` +
+        `   ${time}`
+      );
+    })
+    .join('\n\n');
 
   await wa.buttons(
     phone,
@@ -1392,7 +1819,7 @@ async function showLogs(
     `Use dashboard for full details.`,
     [
       { id: 'SA_SYSTEM_TEST', title: '🤖 Health Check' },
-      { id: '0',              title: '↩️ Menu' },
+      { id: '0',              title: '↩️ Menu'          },
     ]
   );
 }
@@ -1402,9 +1829,9 @@ async function showLogs(
 // ============================================================
 
 async function promptBroadcast(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.text(
     phone,
@@ -1423,10 +1850,10 @@ async function promptBroadcast(
 }
 
 export async function handleSuperAdminBroadcast(
-  phone: string,
+  phone:   string,
   session: BotSession,
   rawText: string,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const text = rawText.trim();
 
@@ -1454,7 +1881,7 @@ export async function handleSuperAdminBroadcast(
     `Send this message?`,
     [
       { id: 'SA_BROADCAST_CONFIRM', title: '✅ Send Now' },
-      { id: 'SA_BROADCAST_CANCEL',  title: '❌ Cancel' },
+      { id: 'SA_BROADCAST_CANCEL',  title: '❌ Cancel'  },
     ]
   );
 
@@ -1467,9 +1894,9 @@ export async function handleSuperAdminBroadcast(
 }
 
 async function confirmBroadcast(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const message =
     session.data?.broadcastMessage as string | null;
@@ -1481,13 +1908,15 @@ async function confirmBroadcast(
 
   const { data: waAccounts } = await db
     .from('whatsapp_accounts')
-    .select('phone_number_id, access_token, school_id')
+    .select(
+      'phone_number_id, access_token, school_id'
+    )
     .eq('status', 'active');
 
   if (!waAccounts?.length) {
     await wa.text(
       phone,
-      `❌ No active school WhatsApp accounts found.`
+      `❌ No active school WhatsApp accounts.`
     );
     return;
   }
@@ -1519,7 +1948,7 @@ async function confirmBroadcast(
       );
 
       sent++;
-      await new Promise((r) => setTimeout(r, 200));
+      await delay(200);
     } catch {
       failed++;
     }
@@ -1579,8 +2008,8 @@ async function getQuickStats(): Promise<{
     const schoolList = schools.data ?? [];
 
     return {
-      totalSchools:   schoolList.length,
-      activeSchools:  schoolList.filter(
+      totalSchools:  schoolList.length,
+      activeSchools: schoolList.filter(
         (s) => s.is_active
       ).length,
       totalStudents:  students.count  ?? 0,
