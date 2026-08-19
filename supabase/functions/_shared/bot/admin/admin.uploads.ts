@@ -1,6 +1,11 @@
 // ============================================================
 // SCHOOLBOT - ADMIN BULK UPLOAD FLOW
 // supabase/functions/_shared/bot/admin/admin.uploads.ts
+// ✅ Fixed: More lenient CSV file type detection
+// ✅ Fixed: Detailed logging at every step
+// ✅ Fixed: State check more lenient for document uploads
+// ✅ Fixed: Better error messages
+// ✅ Fixed: downloadMedia error handling
 // ============================================================
 
 import { WhatsApp } from '../../whatsapp.ts';
@@ -11,14 +16,14 @@ import { getSupabase } from '../../supabase.ts';
 import type { BotSession, IncomingMessage } from '../../types.ts';
 
 const sessions = new SessionService();
-const csvSvc = new CSVService();
-const db = getSupabase();
+const csvSvc   = new CSVService();
+const db       = getSupabase();
 
 // ─── Start bulk upload flow ────────────────────────────────────────────────
 export async function startBulkUpload(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.list(
     phone,
@@ -41,18 +46,18 @@ export async function startBulkUpload(
         title: 'Get Started',
         rows: [
           {
-            id: 'download_template',
-            title: '📥 Get CSV Template',
+            id:          'download_template',
+            title:       '📥 Get CSV Template',
             description: 'Download the template format',
           },
           {
-            id: 'upload_instructions',
-            title: '📖 How to Fill Template',
+            id:          'upload_instructions',
+            title:       '📖 How to Fill Template',
             description: 'Step by step guide',
           },
           {
-            id: 'view_classes',
-            title: '📚 View My Classes',
+            id:          'view_classes',
+            title:       '📚 View My Classes',
             description: 'See available class names to use',
           },
         ],
@@ -61,8 +66,8 @@ export async function startBulkUpload(
         title: 'History',
         rows: [
           {
-            id: 'upload_history',
-            title: '📋 Upload History',
+            id:          'upload_history',
+            title:       '📋 Upload History',
             description: 'View previous uploads',
           },
         ],
@@ -75,10 +80,10 @@ export async function startBulkUpload(
 
 // ─── Handle upload menu selections ────────────────────────────────────────
 export async function handleUploadMenu(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
     case 'download_template':
@@ -97,7 +102,6 @@ export async function handleUploadMenu(
       await showUploadHistory(phone, session, wa);
       break;
 
-    // Retry after seeing instructions
     case 'ready_to_upload':
       await promptForCSV(phone, session, wa);
       break;
@@ -109,29 +113,24 @@ export async function handleUploadMenu(
 
 // ─── Send CSV template as downloadable link ────────────────────────────────
 async function sendCSVTemplate(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  // Generate template content
   const template = csvSvc.generateTemplate();
 
   try {
-    // Upload template to Supabase Storage
-    const fileName = `templates/student_template_${session.school_id}.csv`;
+    const fileName =
+      `templates/student_template_${session.school_id}.csv`;
 
     await db.storage
       .from('school-files')
       .upload(
         fileName,
         new TextEncoder().encode(template),
-        {
-          contentType: 'text/csv',
-          upsert: true,
-        }
+        { contentType: 'text/csv', upsert: true }
       );
 
-    // Get public URL
     const { data: urlData } = db.storage
       .from('school-files')
       .getPublicUrl(fileName);
@@ -165,22 +164,25 @@ async function sendCSVTemplate(
       `Need help filling the template?`,
       [
         { id: 'upload_instructions', title: '📖 Instructions' },
-        { id: 'view_classes', title: '📚 View Classes' },
+        { id: 'view_classes',        title: '📚 View Classes' },
       ]
     );
 
-    // Set state to awaiting CSV
+    // ✅ Set state to awaiting CSV
     await sessions.setState(phone, 'ADMIN_AWAITING_CSV');
   } catch (err) {
     console.error('[Upload] template error:', err);
 
-    // Fallback - show template as text
+    // Fallback — show template as text
     await wa.text(
       phone,
       `📥 *CSV Template*\n\n` +
       `Copy this header row into Excel\n` +
       `or Google Sheets:\n\n` +
-      `\`first_name,last_name,admission_number,class_name,class_arm,gender,date_of_birth,parent_name,parent_phone,parent_email,blood_group,medical_notes\`\n\n` +
+      `\`first_name,last_name,admission_number,` +
+      `class_name,class_arm,gender,date_of_birth,` +
+      `parent_name,parent_phone,parent_email,` +
+      `blood_group,medical_notes\`\n\n` +
       `Fill in student data below the\n` +
       `header row, save as CSV and\n` +
       `send the file here.`
@@ -192,9 +194,9 @@ async function sendCSVTemplate(
 
 // ─── Show upload instructions ──────────────────────────────────────────────
 async function showUploadInstructions(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.text(
     phone,
@@ -223,18 +225,18 @@ async function showUploadInstructions(
     phone,
     `Ready to upload?`,
     [
-      { id: 'download_template', title: '📥 Get Template' },
-      { id: 'view_classes', title: '📚 View Classes' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'download_template',  title: '📥 Get Template' },
+      { id: 'view_classes',       title: '📚 View Classes' },
+      { id: 'MAIN_MENU',          title: '🏠 Menu'         },
     ]
   );
 }
 
 // ─── Show available class names ────────────────────────────────────────────
 async function showAvailableClasses(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const { data: classes } = await db
     .from('classes')
@@ -255,7 +257,6 @@ async function showAvailableClasses(
     return;
   }
 
-  // Build class list
   const classList = classes
     .map((cls) => {
       const arms = (
@@ -282,16 +283,16 @@ async function showAvailableClasses(
     `as shown above_`,
     [
       { id: 'download_template', title: '📥 Get Template' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'MAIN_MENU',         title: '🏠 Menu'         },
     ]
   );
 }
 
 // ─── Prompt admin to send CSV file ────────────────────────────────────────
 async function promptForCSV(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.text(
     phone,
@@ -308,53 +309,82 @@ async function promptForCSV(
   await sessions.setState(phone, 'ADMIN_AWAITING_CSV');
 }
 
+// ─── Check if file is a CSV ────────────────────────────────────────────────
+function isCSVFile(
+  filename: string,
+  mimeType: string
+): boolean {
+  const name = filename.toLowerCase();
+  const mime = mimeType.toLowerCase();
+
+  return (
+    name.endsWith('.csv')                          ||
+    mime.includes('csv')                           ||
+    mime.includes('text/plain')                    ||
+    mime.includes('text/csv')                      ||
+    mime.includes('application/vnd.ms-excel')      ||
+    mime.includes('application/octet-stream')      ||
+    name.includes('csv')
+  );
+}
+
 // ─── Handle incoming CSV document ─────────────────────────────────────────
-// Called from main handler when message type is 'document'
+// ✅ Fixed: More lenient file type detection
+// ✅ Fixed: Detailed logging at every step
+// ✅ Fixed: Better error messages
 export async function handleCSVDocument(
-  phone: string,
+  phone:   string,
   session: BotSession,
   message: IncomingMessage,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  // Check we are in the right state
-  if (session.state !== 'ADMIN_AWAITING_CSV') {
+  const doc = message.document;
+
+  console.log(
+    `[Upload] handleCSVDocument called:\n` +
+    `  phone: ${phone}\n` +
+    `  state: ${session.state}\n` +
+    `  doc id: ${doc?.id ?? 'none'}\n` +
+    `  filename: ${doc?.filename ?? 'none'}\n` +
+    `  mimeType: ${doc?.mime_type ?? 'none'}`
+  );
+
+  if (!doc) {
     await wa.text(
       phone,
-      `📤 To upload students, go to:\n\n` +
-      `*Admin Menu → Upload Students*\n\n` +
-      `Then send your CSV file.`
+      `❌ No document found.\n\nPlease send a CSV file.`
     );
     return;
   }
 
-  const doc = message.document;
-
-  if (!doc) {
-    await wa.text(phone, `❌ No document found. Please send a CSV file.`);
-    return;
-  }
-
-  // Validate file type
   const filename = doc.filename ?? '';
   const mimeType = doc.mime_type ?? '';
-  const isCSV =
-    filename.toLowerCase().endsWith('.csv') ||
-    mimeType.includes('csv') ||
-    mimeType.includes('text/plain');
+
+  // ✅ More lenient CSV check
+  const isCSV = isCSVFile(filename, mimeType);
+
+  console.log(
+    `[Upload] File type check:\n` +
+    `  filename: "${filename}"\n` +
+    `  mimeType: "${mimeType}"\n` +
+    `  isCSV: ${isCSV}`
+  );
 
   if (!isCSV) {
     await wa.buttons(
       phone,
       `❌ *Wrong File Type!*\n\n` +
       `Please send a *.csv* file.\n\n` +
-      `Steps:\n` +
+      `File received:\n` +
+      `*${filename || mimeType || 'unknown type'}*\n\n` +
+      `Steps to fix:\n` +
       `1. Open your spreadsheet\n` +
       `2. File → Save As\n` +
-      `3. Choose CSV format\n` +
+      `3. Choose *CSV* format\n` +
       `4. Send the CSV file here`,
       [
-        { id: 'download_template', title: '📥 Get Template' },
-        { id: 'upload_instructions', title: '📖 Help' },
+        { id: 'download_template',   title: '📥 Get Template' },
+        { id: 'upload_instructions', title: '📖 Help'         },
       ]
     );
     return;
@@ -363,35 +393,71 @@ export async function handleCSVDocument(
   await wa.text(
     phone,
     `⏳ *Processing your CSV file...*\n\n` +
+    `📁 File: ${filename || 'upload.csv'}\n\n` +
     `Please wait a moment.`
   );
 
   try {
+    console.log(
+      `[Upload] Downloading media id: ${doc.id}`
+    );
+
     // Download the CSV file from WhatsApp
     const csvText = await wa.downloadMedia(doc.id);
+
+    console.log(
+      `[Upload] Media download result:\n` +
+      `  success: ${csvText !== null}\n` +
+      `  length: ${csvText?.length ?? 0} chars`
+    );
 
     if (!csvText) {
       await wa.text(
         phone,
-        `❌ Could not read the file.\n\n` +
-        `Please try sending it again.`
+        `❌ *Could not download the file*\n\n` +
+        `WhatsApp media download failed.\n\n` +
+        `Please try:\n` +
+        `• Send the file again\n` +
+        `• Make sure file is under 16MB\n` +
+        `• Try saving as CSV again`
       );
       return;
     }
 
+    // Log preview for debugging
+    console.log(
+      `[Upload] CSV preview:\n` +
+      `"${csvText.substring(0, 300)}"`
+    );
+
     // Parse CSV
-    const { rows, errors: parseErrors } = csvSvc.parseCSV(csvText);
+    const { rows, errors: parseErrors } =
+      csvSvc.parseCSV(csvText);
+
+    console.log(
+      `[Upload] Parse result:\n` +
+      `  rows: ${rows.length}\n` +
+      `  parseErrors: ${parseErrors.length}`
+    );
 
     // CSV format errors
     if (parseErrors.length > 0) {
+      const errorList = parseErrors
+        .slice(0, 3)
+        .join('\n');
+
       await wa.buttons(
         phone,
         `❌ *CSV Format Error*\n\n` +
-        `${parseErrors.join('\n')}\n\n` +
-        `Please fix and try again.`,
+        `${errorList}\n\n` +
+        `Please fix and try again.\n\n` +
+        `*Common fixes:*\n` +
+        `• Do not change column headers\n` +
+        `• Save as CSV not Excel\n` +
+        `• Use comma as separator`,
         [
-          { id: 'download_template', title: '📥 Get Template' },
-          { id: 'upload_instructions', title: '📖 Help' },
+          { id: 'download_template',   title: '📥 Get Template' },
+          { id: 'upload_instructions', title: '📖 Help'         },
         ]
       );
       return;
@@ -409,23 +475,26 @@ export async function handleCSVDocument(
       return;
     }
 
-    // Too many rows at once - warn but continue
+    // Large file warning
     if (rows.length > 500) {
       await wa.text(
         phone,
         `⚠️ *Large File Detected*\n\n` +
-        `Your file has ${rows.length} students.\n\n` +
+        `Your file has *${rows.length}* students.\n\n` +
         `This may take a few minutes.\n` +
-        `Please be patient.`
+        `Please be patient. ☕`
       );
     }
 
     // Show preview of first 3 rows
     const preview = rows.slice(0, 3).map((r, i) => {
-      const className = r.class_name?.trim() ?? 'Unknown';
-      const arm = r.class_arm?.trim() ?? 'A';
+      const className =
+        r.class_name?.trim() ?? 'Unknown';
+      const arm =
+        r.class_arm?.trim()  ?? 'A';
       return (
-        `${i + 1}. *${r.first_name} ${r.last_name}*\n` +
+        `${i + 1}. *${r.first_name ?? '?'} ` +
+        `${r.last_name ?? '?'}*\n` +
         `   📋 ${r.admission_number ?? 'No ADM'}\n` +
         `   🏫 ${className} ${arm}`
       );
@@ -440,7 +509,7 @@ export async function handleCSVDocument(
       phone,
       `📊 *File Preview*\n` +
       `━━━━━━━━━━━━━━━━\n` +
-      `📁 File: ${filename}\n` +
+      `📁 File: ${filename || 'upload.csv'}\n` +
       `👥 Students found: *${rows.length}*\n\n` +
       `*First 3 students:*\n\n` +
       `${preview}${moreText}\n\n` +
@@ -448,44 +517,58 @@ export async function handleCSVDocument(
       `Proceed with import?`,
       [
         {
-          id: `CONFIRM_UPLOAD_${rows.length}`,
+          id:    `CONFIRM_UPLOAD_${rows.length}`,
           title: `✅ Import ${rows.length} Students`,
         },
         { id: 'CANCEL_UPLOAD', title: '❌ Cancel' },
       ]
     );
 
-    // Save rows to session data temporarily
+    // Save rows to session data
     await sessions.setState(
       phone,
       'ADMIN_CONFIRM_UPLOAD',
       null,
       {
         data: {
-          pendingRows: rows,
-          pendingCount: rows.length,
-          pendingFileName: filename,
+          pendingRows:     rows,
+          pendingCount:    rows.length,
+          pendingFileName: filename || 'upload.csv',
         },
       }
     );
+
+    console.log(
+      `[Upload] ✅ Preview shown for ` +
+      `${rows.length} students`
+    );
+
   } catch (err) {
-    console.error('[Upload] CSV processing error:', err);
+    console.error(
+      '[Upload] CSV processing error:',
+      err instanceof Error ? err.message : String(err)
+    );
     await wa.text(
       phone,
       `❌ *Error processing file*\n\n` +
-      `Something went wrong.\n` +
+      `Something went wrong.\n\n` +
+      `Error: ${
+        err instanceof Error
+          ? err.message
+          : String(err)
+      }\n\n` +
       `Please check the file and try again.\n\n` +
-      `Error: ${err}`
+      `Type *0* to go back.`
     );
   }
 }
 
 // ─── Handle upload confirmation ────────────────────────────────────────────
 export async function handleConfirmUpload(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   // Cancel
   if (input === 'cancel_upload') {
@@ -502,7 +585,8 @@ export async function handleConfirmUpload(
     | null;
 
   const fileName =
-    (session.data?.pendingFileName as string) ?? 'upload.csv';
+    (session.data?.pendingFileName as string) ??
+    'upload.csv';
 
   if (!rows?.length) {
     await wa.text(
@@ -524,13 +608,13 @@ export async function handleConfirmUpload(
   const { data: job, error: jobError } = await db
     .from('bulk_upload_jobs')
     .insert({
-      school_id: session.school_id,
+      school_id:   session.school_id,
       upload_type: 'students',
-      file_name: fileName,
-      total_rows: rows.length,
-      status: 'processing',
-      started_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
+      file_name:   fileName,
+      total_rows:  rows.length,
+      status:      'processing',
+      started_at:  new Date().toISOString(),
+      created_at:  new Date().toISOString(),
     })
     .select()
     .single();
@@ -577,12 +661,12 @@ export async function handleConfirmUpload(
   if (result.errors.length > 0) {
     resultMsg += `\n⚠️ *Errors (first 5):*\n`;
     result.errors.slice(0, 5).forEach((err) => {
-      resultMsg +=
-        `• Row ${err.row}: ${err.message}\n`;
+      resultMsg += `• Row ${err.row}: ${err.message}\n`;
     });
 
     if (result.errors.length > 5) {
-      resultMsg += `_...and ${result.errors.length - 5} more errors_\n`;
+      resultMsg +=
+        `_...and ${result.errors.length - 5} more errors_\n`;
     }
   }
 
@@ -591,18 +675,18 @@ export async function handleConfirmUpload(
     resultMsg,
     [
       { id: 'download_template', title: '📤 Upload More' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'MAIN_MENU',         title: '🏠 Menu'        },
     ]
   );
 
   await sessions.setState(phone, 'ADMIN_UPLOAD_MENU');
 }
 
-// ─── Start score upload flow — pick a term first ──────────────────────────
+// ─── Start score upload flow ──────────────────────────────────────────────
 export async function startScoreUpload(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const { data: terms } = await db
     .from('terms')
@@ -624,10 +708,13 @@ export async function startScoreUpload(
 
   const rows = terms.map((t) => {
     const year =
-      (t.academic_years as Record<string, string> | null)?.name ?? '';
+      (t.academic_years as Record<string, string> | null)
+        ?.name ?? '';
     return {
-      id: `SCORE_UPLOAD_TERM_${t.id}`,
-      title: `${t.name}${t.is_current ? ' ⭐' : ''}`.substring(0, 24),
+      id:          `SCORE_UPLOAD_TERM_${t.id}`,
+      title:       `${t.name}${
+        t.is_current ? ' ⭐' : ''
+      }`.substring(0, 24),
       description: year,
     };
   });
@@ -642,30 +729,35 @@ export async function startScoreUpload(
     [{ title: 'Available Terms', rows }]
   );
 
-  await sessions.setState(phone, 'ADMIN_SCORE_UPLOAD_TERM_SELECT');
+  await sessions.setState(
+    phone, 'ADMIN_SCORE_UPLOAD_TERM_SELECT'
+  );
 }
 
-// ─── Handle term selection, then show the score template ─────────────────
+// ─── Handle term selection for score upload ────────────────────────────────
 export async function handleScoreUploadTermSelect(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   if (!input.startsWith('score_upload_term_')) return;
 
-  const termId = input.replace('score_upload_term_', '');
+  const termId =
+    input.replace('score_upload_term_', '');
   const template = csvSvc.generateScoreTemplate();
 
   try {
-    const fileName = `templates/score_template_${session.school_id}.csv`;
+    const fileName =
+      `templates/score_template_${session.school_id}.csv`;
 
     await db.storage
       .from('school-files')
-      .upload(fileName, new TextEncoder().encode(template), {
-        contentType: 'text/csv',
-        upsert: true,
-      });
+      .upload(
+        fileName,
+        new TextEncoder().encode(template),
+        { contentType: 'text/csv', upsert: true }
+      );
 
     const { data: urlData } = db.storage
       .from('school-files')
@@ -681,10 +773,8 @@ export async function handleScoreUploadTermSelect(
       `• subject *(required)*\n` +
       `• ca_score *(required, 0-40 typical)*\n` +
       `• exam_score *(required, 0-60 typical)*\n\n` +
-      `*One row = one student's score for one subject.*\n` +
+      `*One row = one student score for one subject.*\n` +
       `Add a new row for each subject per student.\n\n` +
-      `Subjects that don't exist yet are created\n` +
-      `automatically.\n\n` +
       `After filling, *send the CSV file\n` +
       `to this chat* and I'll import the scores! 📤`
     );
@@ -718,33 +808,43 @@ export async function handleScoreUploadTermSelect(
 }
 
 // ─── Handle incoming score CSV document ────────────────────────────────────
-// Called from main handler when message type is 'document' and state is
-// ADMIN_AWAITING_SCORE_CSV.
+// ✅ Fixed: More lenient file type detection
+// ✅ Fixed: Detailed logging
 export async function handleScoreCSVDocument(
-  phone: string,
+  phone:   string,
   session: BotSession,
   message: IncomingMessage,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const doc = message.document;
 
+  console.log(
+    `[Upload] handleScoreCSVDocument called:\n` +
+    `  phone: ${phone}\n` +
+    `  state: ${session.state}\n` +
+    `  doc id: ${doc?.id ?? 'none'}\n` +
+    `  filename: ${doc?.filename ?? 'none'}\n` +
+    `  mimeType: ${doc?.mime_type ?? 'none'}`
+  );
+
   if (!doc) {
-    await wa.text(phone, `❌ No document found. Please send a CSV file.`);
+    await wa.text(
+      phone,
+      `❌ No document found. Please send a CSV file.`
+    );
     return;
   }
 
   const filename = doc.filename ?? '';
   const mimeType = doc.mime_type ?? '';
-  const isCSV =
-    filename.toLowerCase().endsWith('.csv') ||
-    mimeType.includes('csv') ||
-    mimeType.includes('text/plain');
+  const isCSV    = isCSVFile(filename, mimeType);
 
   if (!isCSV) {
     await wa.text(
       phone,
       `❌ *Wrong File Type!*\n\n` +
-      `Please send a *.csv* file with your scores.`
+      `Please send a *.csv* file with your scores.\n\n` +
+      `File received: *${filename || mimeType || 'unknown'}*`
     );
     return;
   }
@@ -752,26 +852,47 @@ export async function handleScoreCSVDocument(
   await wa.text(
     phone,
     `⏳ *Processing your score file...*\n\n` +
+    `📁 File: ${filename || 'scores.csv'}\n\n` +
     `Please wait a moment.`
   );
 
   try {
+    console.log(
+      `[Upload] Downloading score CSV: ${doc.id}`
+    );
+
     const csvText = await wa.downloadMedia(doc.id);
+
+    console.log(
+      `[Upload] Score CSV download result:\n` +
+      `  success: ${csvText !== null}\n` +
+      `  length: ${csvText?.length ?? 0} chars`
+    );
 
     if (!csvText) {
       await wa.text(
         phone,
-        `❌ Could not read the file.\n\nPlease try sending it again.`
+        `❌ Could not download the file.\n\n` +
+        `Please try sending it again.`
       );
       return;
     }
 
-    const { rows, errors: parseErrors } = csvSvc.parseCSV(csvText);
+    const { rows, errors: parseErrors } =
+      csvSvc.parseCSV(csvText);
+
+    console.log(
+      `[Upload] Score CSV parse result:\n` +
+      `  rows: ${rows.length}\n` +
+      `  errors: ${parseErrors.length}`
+    );
 
     if (parseErrors.length > 0) {
       await wa.text(
         phone,
-        `❌ *CSV Format Error*\n\n${parseErrors.join('\n')}\n\nPlease fix and try again.`
+        `❌ *CSV Format Error*\n\n` +
+        `${parseErrors.slice(0, 3).join('\n')}\n\n` +
+        `Please fix and try again.`
       );
       return;
     }
@@ -779,33 +900,41 @@ export async function handleScoreCSVDocument(
     if (!rows.length) {
       await wa.text(
         phone,
-        `❌ *Empty file!*\n\nThe CSV file has no score data.`
+        `❌ *Empty file!*\n\n` +
+        `The CSV file has no score data.`
       );
       return;
     }
 
     const preview = rows.slice(0, 3).map((r, i) => {
       return (
-        `${i + 1}. ${r.admission_number ?? '?'} — ${r.subject ?? '?'}\n` +
-        `   CA: ${r.ca_score ?? '?'} | Exam: ${r.exam_score ?? '?'}`
+        `${i + 1}. ${r.admission_number ?? '?'} — ` +
+        `${r.subject ?? '?'}\n` +
+        `   CA: ${r.ca_score ?? '?'} | ` +
+        `Exam: ${r.exam_score ?? '?'}`
       );
     }).join('\n\n');
 
     const moreText =
-      rows.length > 3 ? `\n\n_...and ${rows.length - 3} more rows_` : '';
+      rows.length > 3
+        ? `\n\n_...and ${rows.length - 3} more rows_`
+        : '';
 
     await wa.buttons(
       phone,
       `📊 *File Preview*\n` +
       `━━━━━━━━━━━━━━━━\n` +
-      `📁 File: ${filename}\n` +
+      `📁 File: ${filename || 'scores.csv'}\n` +
       `📝 Score rows found: *${rows.length}*\n\n` +
       `*First 3 rows:*\n\n` +
       `${preview}${moreText}\n\n` +
       `━━━━━━━━━━━━━━━━\n` +
       `Proceed with import?`,
       [
-        { id: `CONFIRM_SCORE_UPLOAD_${rows.length}`, title: `✅ Import ${rows.length} Scores` },
+        {
+          id:    `CONFIRM_SCORE_UPLOAD_${rows.length}`,
+          title: `✅ Import ${rows.length} Scores`,
+        },
         { id: 'CANCEL_SCORE_UPLOAD', title: '❌ Cancel' },
       ]
     );
@@ -816,28 +945,44 @@ export async function handleScoreCSVDocument(
       null,
       {
         data: {
-          scoreTermId: session.data?.scoreTermId,
-          pendingScoreRows: rows,
-          pendingScoreCount: rows.length,
-          pendingScoreFileName: filename,
+          scoreTermId:        session.data?.scoreTermId,
+          pendingScoreRows:   rows,
+          pendingScoreCount:  rows.length,
+          pendingScoreFileName: filename || 'scores.csv',
         },
       }
     );
+
+    console.log(
+      `[Upload] ✅ Score preview shown for ` +
+      `${rows.length} rows`
+    );
+
   } catch (err) {
-    console.error('[Upload] score CSV processing error:', err);
+    console.error(
+      '[Upload] Score CSV processing error:',
+      err instanceof Error ? err.message : String(err)
+    );
     await wa.text(
       phone,
-      `❌ *Error processing file*\n\nSomething went wrong.\nError: ${err}`
+      `❌ *Error processing file*\n\n` +
+      `Something went wrong.\n\n` +
+      `Error: ${
+        err instanceof Error
+          ? err.message
+          : String(err)
+      }\n\n` +
+      `Type *0* to go back.`
     );
   }
 }
 
 // ─── Handle score upload confirmation ──────────────────────────────────────
 export async function handleConfirmScoreUpload(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   if (input === 'cancel_score_upload') {
     await wa.text(phone, `❌ Score upload cancelled.`);
@@ -850,12 +995,17 @@ export async function handleConfirmScoreUpload(
   const rows = session.data?.pendingScoreRows as
     | Array<Record<string, string>>
     | null;
-  const termId = session.data?.scoreTermId as string;
+  const termId =
+    session.data?.scoreTermId as string;
   const fileName =
-    (session.data?.pendingScoreFileName as string) ?? 'scores.csv';
+    (session.data?.pendingScoreFileName as string) ??
+    'scores.csv';
 
   if (!rows?.length || !termId) {
-    await wa.text(phone, `❌ No data to import.\n\nPlease start over.`);
+    await wa.text(
+      phone,
+      `❌ No data to import.\n\nPlease start over.`
+    );
     await showAdminMenu(phone, session, wa);
     return;
   }
@@ -870,19 +1020,22 @@ export async function handleConfirmScoreUpload(
   const { data: job, error: jobError } = await db
     .from('bulk_upload_jobs')
     .insert({
-      school_id: session.school_id,
+      school_id:   session.school_id,
       upload_type: 'scores',
-      file_name: fileName,
-      total_rows: rows.length,
-      status: 'processing',
-      started_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
+      file_name:   fileName,
+      total_rows:  rows.length,
+      status:      'processing',
+      started_at:  new Date().toISOString(),
+      created_at:  new Date().toISOString(),
     })
     .select()
     .single();
 
   if (jobError || !job) {
-    await wa.text(phone, `❌ Failed to start upload.\n\nPlease try again.`);
+    await wa.text(
+      phone,
+      `❌ Failed to start upload.\n\nPlease try again.`
+    );
     return;
   }
 
@@ -922,7 +1075,8 @@ export async function handleConfirmScoreUpload(
     });
 
     if (result.errors.length > 5) {
-      resultMsg += `_...and ${result.errors.length - 5} more errors_\n`;
+      resultMsg +=
+        `_...and ${result.errors.length - 5} more errors_\n`;
     }
   }
 
@@ -930,9 +1084,9 @@ export async function handleConfirmScoreUpload(
     phone,
     resultMsg,
     [
-      { id: 'ADMIN_UPLOAD_SCORES', title: '📤 Upload More' },
-      { id: 'ADMIN_REPORTS', title: '🎓 View Results' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'ADMIN_UPLOAD_SCORES', title: '📤 Upload More'    },
+      { id: 'ADMIN_REPORTS',       title: '🎓 View Results'   },
+      { id: 'MAIN_MENU',           title: '🏠 Menu'           },
     ]
   );
 
@@ -941,14 +1095,15 @@ export async function handleConfirmScoreUpload(
 
 // ─── Show upload history ───────────────────────────────────────────────────
 async function showUploadHistory(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   const { data: jobs } = await db
     .from('bulk_upload_jobs')
     .select(
-      'file_name, total_rows, success_rows, failed_rows, status, created_at'
+      'file_name, total_rows, success_rows, ' +
+      'failed_rows, status, created_at'
     )
     .eq('school_id', session.school_id)
     .eq('upload_type', 'students')
@@ -963,27 +1118,26 @@ async function showUploadHistory(
       `Upload your first batch of students!`,
       [
         { id: 'download_template', title: '📥 Get Template' },
-        { id: 'MAIN_MENU', title: '🏠 Menu' },
+        { id: 'MAIN_MENU',         title: '🏠 Menu'         },
       ]
     );
     return;
   }
 
-  // Status icons
   const statusIcons: Record<string, string> = {
-    completed:              '✅',
-    processing:             '⏳',
-    failed:                 '❌',
-    completed_with_errors:  '⚠️',
-    pending:                '🔄',
+    completed:             '✅',
+    processing:            '⏳',
+    failed:                '❌',
+    completed_with_errors: '⚠️',
+    pending:               '🔄',
   };
 
   const lines = jobs
     .map((j) => {
-      const date = new Date(j.created_at).toLocaleDateString(
-        'en-NG',
-        { day: 'numeric', month: 'short', year: 'numeric' }
-      );
+      const date = new Date(j.created_at)
+        .toLocaleDateString('en-NG', {
+          day: 'numeric', month: 'short', year: 'numeric',
+        });
       const icon = statusIcons[j.status] ?? '•';
 
       return (
@@ -1001,7 +1155,7 @@ async function showUploadHistory(
     `${lines}`,
     [
       { id: 'download_template', title: '📤 New Upload' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'MAIN_MENU',         title: '🏠 Menu'       },
     ]
   );
 }
