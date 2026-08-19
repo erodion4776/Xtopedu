@@ -2,10 +2,9 @@
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
 // ✅ Fixed: Onboarding check BEFORE super admin check
-// ✅ Fixed: Super admin school mode built fresh each message
+// ✅ Fixed: Super admin school mode uses getPlatformWaForSchool
 // ✅ Fixed: No session collision between super admin & school
-// ✅ Fixed: "hi"/"menu" goes to school panel when in school mode
-// ✅ Fixed: Regular school owners session persistence
+// ✅ Fixed: getPlatformWaForSchool imported statically
 // ✅ Fixed: All missing state handlers added
 // ✅ Fixed: Document upload in school mode works
 // ============================================================
@@ -124,6 +123,7 @@ import {
   handleSuperAdminBroadcast,
   isSuperAdminTestMode,
   clearTestMode,
+  getPlatformWaForSchool,
 } from './superadmin/superadmin.menu.ts';
 
 import {
@@ -207,7 +207,6 @@ export async function handleMessage(
   const wa = new WhatsApp(waAccount);
 
   // ── Staff invite token ──────────────────────────────────
-  // Check first before everything else
   if (message.type === 'text' && isInviteToken(rawText)) {
     await handleInvitationToken(
       phone,
@@ -430,7 +429,7 @@ export async function handleMessage(
 // ============================================================
 // SUPER ADMIN FLOW
 // ✅ Onboarding handled BEFORE this in handleMessage()
-// ✅ School mode built fresh from DB every message
+// ✅ School mode built fresh using getPlatformWaForSchool
 // ✅ No session collision with bot_sessions
 // ============================================================
 
@@ -448,8 +447,6 @@ async function handleSuperAdminFlow(
     const testMode = await isSuperAdminTestMode(phone);
     if (testMode.active) {
       await clearTestMode(phone);
-      // Delete school session so next message
-      // gets a clean super admin session
       await db
         .from('bot_sessions')
         .delete()
@@ -460,7 +457,6 @@ async function handleSuperAdminFlow(
         `Returning to your super admin panel...`
       );
       await delay(800);
-      // Show super admin menu immediately
       await buildAndShowSuperAdminMenu(
         phone, waAccount, wa
       );
@@ -472,13 +468,11 @@ async function handleSuperAdminFlow(
   const testMode = await isSuperAdminTestMode(phone);
 
   if (testMode.active) {
-    // Marketing test mode
     if (testMode.testRole === 'marketing') {
       await handleMarketingMessage(message);
       return;
     }
 
-    // Parent or admin school mode
     if (
       testMode.testRole === 'parent' ||
       testMode.testRole === 'admin'
@@ -511,8 +505,6 @@ async function buildAndShowSuperAdminMenu(
   input?:    string,
   rawText?:  string
 ): Promise<void> {
-  // Upsert super admin session with school_id = null
-  // This clearly marks it as super admin not school
   const { data, error } = await db
     .from('bot_sessions')
     .upsert(
@@ -587,7 +579,6 @@ async function buildAndShowSuperAdminMenu(
     return;
   }
 
-  // Broadcast compose state
   if (session.sub_state === 'SA_BROADCAST_COMPOSE') {
     await handleSuperAdminBroadcast(
       phone, session, rawText ?? '', wa
@@ -595,7 +586,6 @@ async function buildAndShowSuperAdminMenu(
     return;
   }
 
-  // Route to super admin menu handler
   await handleSuperAdminMenu(
     phone, session, input, rawText ?? '', wa
   );
@@ -603,11 +593,11 @@ async function buildAndShowSuperAdminMenu(
 
 // ============================================================
 // SUPER ADMIN SCHOOL MODE
-// ✅ Session built fresh from DB on EVERY message
+// ✅ Uses getPlatformWaForSchool — never fails
+// ✅ Session built fresh every message
 // ✅ No collision with bot_sessions
-// ✅ Works for own school AND test-as-admin/parent
-// ✅ "hi"/"menu" shows school menu not super admin menu
-// ✅ Document uploads work in school mode
+// ✅ "hi"/"menu" shows school menu
+// ✅ Document uploads work
 // ============================================================
 
 async function handleSuperAdminSchoolMode(
@@ -647,13 +637,11 @@ async function handleSuperAdminSchoolMode(
     return;
   }
 
-  // ── Get school WA account ───────────────────────────────
-  const { data: schoolWaData } = await db
-    .from('whatsapp_accounts')
-    .select('*')
-    .eq('school_id', schoolId)
-    .eq('status', 'active')
-    .maybeSingle();
+  // ✅ Get WA account using virtual pattern
+  // This NEVER fails — always returns a usable WA object
+  // Even if DB has unique constraint issues
+  const schoolWaData =
+    await getPlatformWaForSchool(schoolId);
 
   const schoolWa = new WhatsApp(schoolWaData as never);
 
@@ -662,12 +650,8 @@ async function handleSuperAdminSchoolMode(
     const { data: parent } = await db
       .from('parents')
       .select(`
-        id,
-        school_id,
-        full_name,
-        phone,
-        whatsapp_number,
-        email,
+        id, school_id, full_name,
+        phone, whatsapp_number, email,
         preferred_language,
         schools ( id, name, is_active )
       `)
@@ -687,8 +671,8 @@ async function handleSuperAdminSchoolMode(
     const students =
       await parentSvc.getStudents(parent.id);
 
-    // Build session without saving to bot_sessions
-    // to avoid collision with super admin session
+    // Build session WITHOUT saving to bot_sessions
+    // Avoids collision with super admin session
     const testSession: BotSession = {
       id:                  `sa-parent-${schoolId}`,
       phone:               formatPhone(phone),
@@ -726,16 +710,15 @@ async function handleSuperAdminSchoolMode(
 
   // ── ADMIN MODE ──────────────────────────────────────────
   // Get or create school session in bot_sessions
-  // We DO save admin state so navigation works correctly
+  // Admin state IS saved so navigation works correctly
   let { data: savedSession } = await db
     .from('bot_sessions')
     .select('*')
     .eq('phone', formatPhone(phone))
     .maybeSingle();
 
-  // If session is missing, belongs to super admin
-  // (school_id = null), or belongs to a different school
-  // then reset it to this school
+  // If session is missing, null school_id (super admin),
+  // or belongs to different school → reset it
   if (
     !savedSession ||
     savedSession.school_id === null ||
@@ -808,8 +791,8 @@ async function handleSuperAdminSchoolMode(
       last_activity:       new Date().toISOString(),
       created_at:          new Date().toISOString(),
     }),
-    schoolUser:  adminUser as never,
-    waAccount:   schoolWaData as never,
+    schoolUser: adminUser as never,
+    waAccount:  schoolWaData as never,
   };
 
   // Reset keywords → show admin menu
@@ -846,7 +829,6 @@ async function handleSuperAdminSchoolMode(
 // RESET / IDENTIFY USER
 // ✅ Super admin never reaches here
 // ✅ Regular school owners correctly identified
-// ✅ Staff / teachers correctly identified
 // ============================================================
 
 async function handleReset(
@@ -983,11 +965,8 @@ async function getSchoolsByPhone(
     .select(`
       school_id,
       schools (
-        id,
-        name,
-        is_active,
-        onboarding_status,
-        setup_fee_paid
+        id, name, is_active,
+        onboarding_status, setup_fee_paid
       )
     `)
     .eq('admin_phone', formatted);
@@ -996,9 +975,7 @@ async function getSchoolsByPhone(
 
   return data
     .map((r) => r.schools as unknown as SchoolInfo)
-    .filter(
-      (s) => s !== null && s.id !== undefined
-    );
+    .filter((s) => s !== null && s.id !== undefined);
 }
 
 async function checkAndGuideOnboarding(
@@ -1045,14 +1022,8 @@ async function checkAndGuideOnboarding(
       phone,
       `Would you like to complete your setup?`,
       [
-        {
-          id:    'RESUME_SETUP_FEE',
-          title: '💳 Pay Setup Fee',
-        },
-        {
-          id:    'CONTACT_SUPPORT',
-          title: '📞 Contact Support',
-        },
+        { id: 'RESUME_SETUP_FEE',  title: '💳 Pay Setup Fee'   },
+        { id: 'CONTACT_SUPPORT',   title: '📞 Contact Support' },
       ]
     );
 
@@ -1081,7 +1052,6 @@ async function checkAndGuideOnboarding(
   if (!waConnected) {
     const appUrl = Deno.env.get('APP_URL') ?? '';
 
-    // Check for valid non-expired token
     const { data: existingToken } = await db
       .from('school_activation_tokens')
       .select('token, expires_at')
@@ -1098,7 +1068,6 @@ async function checkAndGuideOnboarding(
       activationLink =
         `${appUrl}/activate/${existingToken.token}`;
     } else {
-      // ✅ Secure token using Web Crypto API
       const token =
         crypto.randomUUID().replace(/-/g, '');
 
@@ -1170,14 +1139,11 @@ async function checkAndGuideOnboarding(
     user_id:   `admin-${school.id}`,
     role_id:   'admin',
     status:    'active',
-    roles: {
-      id:   'admin',
-      name: 'admin',
-    },
+    roles:     { id: 'admin', name: 'admin' },
     profiles: {
       id:         `admin-${school.id}`,
       full_name:  'School Admin',
-      phone:      phone,
+      phone,
       avatar_url: null,
     },
   };
@@ -1576,7 +1542,7 @@ async function routeAdmin(
         email:
           onboarding?.admin_email   ?? null,
         schoolId:
-          session.school_id          ?? null,
+          session.school_id         ?? null,
         setupFeePaid:      false,
         tempData:          {},
         lastActivity:      Date.now(),
@@ -1781,8 +1747,6 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_CSV':
-      // Document handled by handleDocumentUpload()
-      // This message fires when user sends TEXT
       await wa.text(
         phone,
         `📤 Please send your *CSV file*\n` +
@@ -1804,8 +1768,6 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_SCORE_CSV':
-      // Document handled by handleDocumentUpload()
-      // This message fires when user sends TEXT
       await wa.text(
         phone,
         `📤 Please send your *score CSV*\n` +
