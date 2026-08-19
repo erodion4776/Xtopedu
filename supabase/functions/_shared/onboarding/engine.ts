@@ -1,6 +1,9 @@
 // ============================================================
 // SCHOOLBOT - ONBOARDING ENGINE
 // supabase/functions/_shared/onboarding/engine.ts
+// ✅ Added: Super admin fee auto-waiver
+// ✅ Added: Platform WA auto-connect on complete
+// ✅ Fixed: Insecure token generation
 // ============================================================
 
 import { getSupabase }    from '../supabase.ts';
@@ -9,7 +12,7 @@ import {
   PaystackService,
   calculateSetupFee,
 } from '../paystack.service.ts';
-import { formatPhone }    from '../utils.ts';
+import { formatPhone, delay } from '../utils.ts';
 import type {
   OnboardingState,
   OnboardingStep,
@@ -406,12 +409,12 @@ async function handleCollectStudentCount(
     count: number;
     range: string;
   }> = {
-    count_1_100:     { count: 50,   range: '1-100' },
-    count_101_300:   { count: 200,  range: '101-300' },
-    count_301_500:   { count: 400,  range: '301-500' },
-    count_501_1000:  { count: 750,  range: '501-1000' },
+    count_1_100:     { count: 50,   range: '1-100'     },
+    count_101_300:   { count: 200,  range: '101-300'   },
+    count_301_500:   { count: 400,  range: '301-500'   },
+    count_501_1000:  { count: 750,  range: '501-1000'  },
     count_1001_2000: { count: 1500, range: '1001-2000' },
-    count_2001_plus: { count: 2500, range: '2000+' },
+    count_2001_plus: { count: 2500, range: '2000+'     },
   };
 
   const selected = countMap[input.toLowerCase()];
@@ -551,17 +554,34 @@ async function handleCollectEmail(
   await showSetupFeeInfo(phone, session, wa);
 }
 
+// ============================================================
+// SETUP FEE STEP
+// ✅ Auto-waives fee for super admin
+// ✅ Checks trial codes
+// ============================================================
+
 export async function showSetupFeeInfo(
   phone:   string,
   session: OnboardingState,
   wa:      WhatsApp
 ): Promise<void> {
+  // Ensure school record exists
   if (!session.schoolId) {
     const schoolId   = await createSchoolRecord(session);
     session.schoolId = schoolId;
     await setOnboardingSession(phone, session);
   }
 
+  // ✅ Auto-waive fee for super admin
+  const isSuperAdmin =
+    (session.tempData?.is_super_admin as boolean) === true;
+
+  if (isSuperAdmin) {
+    await handleSuperAdminFeeWaiver(phone, session, wa);
+    return;
+  }
+
+  // Check if fee already paid (e.g. returning user)
   if (await checkSetupFeePaid(session.schoolId)) {
     session.setupFeePaid = true;
     session.step         = 'BANK_SELECT';
@@ -648,6 +668,62 @@ export async function showSetupFeeInfo(
   await setOnboardingSession(phone, session);
 }
 
+// ─── Super admin fee waiver ────────────────────────────────
+// Called instead of showing payment when is_super_admin=true
+async function handleSuperAdminFeeWaiver(
+  phone:   string,
+  session: OnboardingState,
+  wa:      WhatsApp
+): Promise<void> {
+  console.log(
+    `[Onboarding] ✅ Super admin fee waiver for ` +
+    `school: ${session.schoolId}`
+  );
+
+  // Mark school as fee paid — ₦0 waived
+  await db
+    .from('schools')
+    .update({
+      setup_fee_paid:    true,
+      setup_fee_amount:  0,
+      setup_fee_paid_at: new Date().toISOString(),
+      onboarding_status: 'setup_fee_paid',
+      // is_active stays false until WA is connected
+      updated_at:        new Date().toISOString(),
+    })
+    .eq('id', session.schoolId);
+
+  // Update onboarding progress
+  await db
+    .from('school_onboarding')
+    .update({
+      step_setup_fee_paid: true,
+      current_step:        'bank',
+      updated_at:          new Date().toISOString(),
+    })
+    .eq('school_id', session.schoolId);
+
+  session.setupFeePaid = true;
+  session.step         = 'BANK_SELECT';
+  await setOnboardingSession(phone, session);
+
+  await wa.text(
+    phone,
+    `✅ *Setup Fee — WAIVED*\n\n` +
+    `As the platform owner, your\n` +
+    `setup fee is automatically\n` +
+    `waived. 🎉\n\n` +
+    `Let's continue setting up\n` +
+    `your school! 🚀`
+  );
+
+  await delay(800);
+
+  // Go straight to bank setup
+  await startBankSetup(phone, session, wa);
+}
+
+// ─── Handle setup fee input ────────────────────────────────
 async function handleSetupFeeStep(
   phone:   string,
   session: OnboardingState,
@@ -655,7 +731,16 @@ async function handleSetupFeeStep(
   rawText: string,
   wa:      WhatsApp
 ): Promise<void> {
-  // ✅ Trial code check first
+  // ✅ Super admin check first
+  const isSuperAdmin =
+    (session.tempData?.is_super_admin as boolean) === true;
+
+  if (isSuperAdmin) {
+    await handleSuperAdminFeeWaiver(phone, session, wa);
+    return;
+  }
+
+  // Trial code check
   if (TRIAL_CODE_PATTERN.test(rawText.trim())) {
     console.log(
       `[Onboarding] Trial code at setup fee: ` +
@@ -713,8 +798,8 @@ async function handleSetupFeeStep(
       phone,
       `Ready to proceed?`,
       [
-        { id: 'PROCEED_SETUP_FEE', title: '💳 Pay Now' },
-        { id: 'SETUP_TALK_TO_US',  title: '📞 Call Us' },
+        { id: 'PROCEED_SETUP_FEE', title: '💳 Pay Now'  },
+        { id: 'SETUP_TALK_TO_US',  title: '📞 Call Us'  },
       ]
     );
     return;
@@ -756,7 +841,7 @@ async function handleSetupFeeStep(
         `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`,
         [
           { id: 'RETRY_PAYMENT', title: '🔄 New Pay Link' },
-          { id: 'CHECK_PAYMENT', title: '✅ Check Again' },
+          { id: 'CHECK_PAYMENT', title: '✅ Check Again'  },
         ]
       );
     }
@@ -823,7 +908,7 @@ async function generateAndSendSetupFeeLink(
     `Need help?`,
     [
       { id: 'CHECK_PAYMENT', title: '✅ Check Payment' },
-      { id: 'RETRY_PAYMENT', title: '🔄 New Link' },
+      { id: 'RETRY_PAYMENT', title: '🔄 New Link'      },
     ]
   );
 }
@@ -946,7 +1031,7 @@ async function handleTrialCodeInOnboarding(
     return;
   }
 
-  // ✅ Valid! Mark as used
+  // ✅ Valid — mark as used
   await db
     .from('trial_codes')
     .update({
@@ -1046,7 +1131,7 @@ async function handleTrialOnboarding(
   await startBankSetup(phone, session, wa);
 }
 
-// ─── Step 8: Bank setup ───────────────────────────────────
+// ─── Step: Bank setup ──────────────────────────────────────
 async function startBankSetup(
   phone:   string,
   session: OnboardingState,
@@ -1067,7 +1152,6 @@ async function startBankSetup(
   await showBankList(phone, session, wa);
 }
 
-// ✅ Fixed: Max 9 rows
 async function showBankList(
   phone:   string,
   session: OnboardingState,
@@ -1138,7 +1222,6 @@ async function showBankList(
   await setOnboardingSession(phone, session);
 }
 
-// ✅ New: Digital banks page (7 rows)
 async function showMoreBanks(
   phone:   string,
   session: OnboardingState,
@@ -1195,7 +1278,6 @@ async function showMoreBanks(
   );
 }
 
-// ✅ Updated: Handles more_banks and back_to_banks
 async function handleBankSelect(
   phone:   string,
   session: OnboardingState,
@@ -1279,15 +1361,15 @@ async function handleBankAccountNumber(
     cleaned, bankCode
   );
 
-  if (!resolved) {
+  if (!resolved.ok) {
     await wa.buttons(
       phone,
       `❌ Could not verify account\n` +
       `with *${bankName}*.\n\n` +
       `Please check and try again.`,
       [
-        { id: `BANK_${bankCode}`, title: '🔄 Try Again' },
-        { id: 'BACK_TO_BANKS',   title: '🏦 Change Bank' },
+        { id: `BANK_${bankCode}`, title: '🔄 Try Again'   },
+        { id: 'BACK_TO_BANKS',   title: '🏦 Change Bank'  },
       ]
     );
     return;
@@ -1312,7 +1394,7 @@ async function handleBankAccountNumber(
     `Is this correct?`,
     [
       { id: 'BANK_CONFIRM_YES', title: '✅ Yes, Confirm' },
-      { id: 'BANK_CONFIRM_NO',  title: '❌ No, Change' },
+      { id: 'BANK_CONFIRM_NO',  title: '❌ No, Change'   },
     ]
   );
 }
@@ -1389,6 +1471,7 @@ async function handleBankConfirm(
   }
 }
 
+// ─── Class setup ───────────────────────────────────────────
 async function showClassSetup(
   phone:   string,
   session: OnboardingState,
@@ -1401,15 +1484,20 @@ async function showClassSetup(
     .order('level', { ascending: true });
 
   const classList = classes?.length
-    ? classes.map((c) => {
-        const arms = (
-          c.class_arms as Array<{ name: string }> | null
-        )?.map((a) => a.name).join(', ');
-        return (
-          `📚 *${c.name}*` +
-          (arms ? ` (${arms})` : '')
-        );
-      }).join('\n')
+    ? classes
+        .map((c) => {
+          const arms = (
+            c.class_arms as
+              Array<{ name: string }> | null
+          )
+            ?.map((a) => a.name)
+            .join(', ');
+          return (
+            `📚 *${c.name}*` +
+            (arms ? ` (${arms})` : '')
+          );
+        })
+        .join('\n')
     : '_No classes added yet_';
 
   await wa.list(
@@ -1521,7 +1609,10 @@ async function handleClassAddName(
   const name = rawText.trim();
 
   if (name.length < 2) {
-    await wa.text(phone, `Please enter a valid class name:`);
+    await wa.text(
+      phone,
+      `Please enter a valid class name:`
+    );
     return;
   }
 
@@ -1538,7 +1629,7 @@ async function handleClassAddName(
     `How many arms does this class have?`,
     [
       { id: 'ARMS_1', title: '1 Arm (A only)' },
-      { id: 'ARMS_2', title: '2 Arms (A, B)' },
+      { id: 'ARMS_2', title: '2 Arms (A, B)'  },
       { id: 'ARMS_3', title: '3 Arms (A, B, C)' },
     ]
   );
@@ -1596,7 +1687,7 @@ async function handleClassAddArm(
       `Add more classes or continue?`,
       [
         { id: 'ADD_CLASS_MANUAL', title: '➕ Add More' },
-        { id: 'CLASSES_DONE',     title: '✅ Done' },
+        { id: 'CLASSES_DONE',     title: '✅ Done'     },
       ]
     );
   }
@@ -1708,7 +1799,7 @@ async function applyClassTemplate(
     `\n\nEach class has Arms A and B.`,
     [
       { id: 'ADD_CLASS_MANUAL', title: '➕ Add More' },
-      { id: 'CLASSES_DONE',     title: '✅ Done' },
+      { id: 'CLASSES_DONE',     title: '✅ Done'     },
     ]
   );
 
@@ -1716,6 +1807,7 @@ async function applyClassTemplate(
   await setOnboardingSession(phone, session);
 }
 
+// ─── Staff setup ───────────────────────────────────────────
 async function showStaffSetup(
   phone:   string,
   session: OnboardingState,
@@ -1733,22 +1825,24 @@ async function showStaffSetup(
     .eq('employment_status', 'active');
 
   const staffText = staffList?.length
-    ? staffList.map((s) => {
-        const inv = (
-          s.staff_invitations as Array<{
-            status: string;
-            token:  string;
-          }> | null
-        )?.[0];
-        const icon =
-          inv?.status === 'accepted' ? '✅' : '⏳';
-        return (
-          `${icon} ${s.first_name} ${s.last_name}` +
-          (inv?.status === 'pending'
-            ? ` (Code: ${inv.token})`
-            : '')
-        );
-      }).join('\n')
+    ? staffList
+        .map((s) => {
+          const inv = (
+            s.staff_invitations as Array<{
+              status: string;
+              token:  string;
+            }> | null
+          )?.[0];
+          const icon =
+            inv?.status === 'accepted' ? '✅' : '⏳';
+          return (
+            `${icon} ${s.first_name} ${s.last_name}` +
+            (inv?.status === 'pending'
+              ? ` (Code: ${inv.token})`
+              : '')
+          );
+        })
+        .join('\n')
     : '_No staff added yet_';
 
   await wa.list(
@@ -1841,7 +1935,10 @@ async function handleStaffAddName(
   const name = rawText.trim();
 
   if (name.length < 3) {
-    await wa.text(phone, `Please enter a valid full name:`);
+    await wa.text(
+      phone,
+      `Please enter a valid full name:`
+    );
     return;
   }
 
@@ -1952,12 +2049,24 @@ async function handleStaffAddRole(
     label: string;
     role:  string;
   }> = {
-    role_class_teacher:   { label: 'Class Teacher',   role: 'teacher' },
-    role_subject_teacher: { label: 'Subject Teacher', role: 'teacher' },
-    role_head_teacher:    { label: 'Head Teacher',    role: 'admin' },
-    role_admin:           { label: 'Admin Staff',     role: 'admin' },
-    role_bursar:          { label: 'Bursar',          role: 'admin' },
-    role_security:        { label: 'Security',        role: 'teacher' },
+    role_class_teacher:   {
+      label: 'Class Teacher',   role: 'teacher',
+    },
+    role_subject_teacher: {
+      label: 'Subject Teacher', role: 'teacher',
+    },
+    role_head_teacher:    {
+      label: 'Head Teacher',    role: 'admin',
+    },
+    role_admin:           {
+      label: 'Admin Staff',     role: 'admin',
+    },
+    role_bursar:          {
+      label: 'Bursar',          role: 'admin',
+    },
+    role_security:        {
+      label: 'Security',        role: 'teacher',
+    },
   };
 
   const selected = roleMap[input.toLowerCase()];
@@ -2042,7 +2151,7 @@ async function handleStaffAddRole(
       `✅ Invite sent to their WhatsApp!`,
       [
         { id: 'ADD_STAFF_NOW', title: '➕ Add More' },
-        { id: 'STAFF_DONE',    title: '✅ Complete' },
+        { id: 'STAFF_DONE',    title: '✅ Complete'  },
       ]
     );
 
@@ -2058,8 +2167,10 @@ async function handleStaffAddRole(
 }
 
 // ============================================================
-// ✅ STEP 11: COMPLETE
-// Fixed: Clears demo session, sends activation link
+// ✅ COMPLETE
+// ✅ Auto-connects platform WA for super admin
+// ✅ Sends activation link for normal schools
+// ✅ Clears demo and onboarding sessions
 // ============================================================
 
 async function showComplete(
@@ -2067,6 +2178,59 @@ async function showComplete(
   session: OnboardingState,
   wa:      WhatsApp
 ): Promise<void> {
+
+  const isSuperAdmin =
+    (session.tempData?.is_super_admin as boolean) === true;
+
+  // ✅ Auto-connect platform WA number for super admin
+  // Normal schools get an activation link instead
+  if (isSuperAdmin && session.schoolId) {
+    await db
+      .from('whatsapp_accounts')
+      .upsert(
+        {
+          school_id:
+            session.schoolId,
+          phone_number_id:
+            Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+          access_token:
+            Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+          display_number:
+            Deno.env.get('WHATSAPP_DISPLAY_NUMBER') ?? '',
+          status:     'active',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'school_id' }
+      );
+
+    // Mark school as fully active
+    await db
+      .from('schools')
+      .update({
+        is_active:         true,
+        onboarding_status: 'active',
+        updated_at:        new Date().toISOString(),
+      })
+      .eq('id', session.schoolId);
+
+    await db
+      .from('school_onboarding')
+      .update({
+        step_staff_added: true,
+        current_step:     'complete',
+        completed:        true,
+        completed_at:     new Date().toISOString(),
+        updated_at:       new Date().toISOString(),
+      })
+      .eq('school_id', session.schoolId);
+
+    console.log(
+      `[Onboarding] ✅ Platform WA auto-connected ` +
+      `for super admin school: ${session.schoolId}`
+    );
+  }
+
   const [classCount, staffCount] = await Promise.all([
     db.from('classes')
       .select('id', { count: 'exact' })
@@ -2077,37 +2241,56 @@ async function showComplete(
       .eq('employment_status', 'active'),
   ]);
 
-  // ✅ Generate WhatsApp activation link
-  const activationLink =
-    await generateActivationLink(session.schoolId);
+  if (isSuperAdmin) {
+    // ── Super admin completion message ─────────────────
+    await wa.text(
+      phone,
+      `🎉 *Your School is Ready!*\n` +
+      `━━━━━━━━━━━━━━━━\n\n` +
+      `🏫 *${session.schoolName}*\n` +
+      `is now LIVE on SchoolBot! 🚀\n\n` +
+      `📊 *Setup Summary:*\n` +
+      `📚 Classes: *${classCount.count ?? 0}*\n` +
+      `👨‍🏫 Staff:   *${staffCount.count ?? 0}*\n\n` +
+      `✅ *Everything is connected:*\n` +
+      `• WhatsApp number linked\n` +
+      `• Admin panel ready\n` +
+      `• All features active\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `Type *menu* to access your\n` +
+      `school admin panel! 🎯`
+    );
+  } else {
+    // ── Normal school completion message ───────────────
+    const activationLink =
+      await generateActivationLink(session.schoolId);
 
-  // Send completion + activation link message
-  await wa.text(
-    phone,
-    `🎉 *Setup Complete!*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `🏫 *${session.schoolName}* is\n` +
-    `registered on SchoolBot! 🚀\n\n` +
-    `📊 *Your Setup:*\n` +
-    `📚 Classes: *${classCount.count ?? 0}*\n` +
-    `👨‍🏫 Staff:   *${staffCount.count ?? 0}*\n\n` +
-    `━━━━━━━━━━━━━━━━\n` +
-    `🔌 *Final Step — Connect WhatsApp*\n\n` +
-    `Connect your school's WhatsApp\n` +
-    `Business number to go LIVE:\n\n` +
-    `👇 *Tap this link:*\n` +
-    `${activationLink}\n\n` +
-    `⏰ Valid for *7 days*\n` +
-    `Takes less than 2 minutes! ✅\n\n` +
-    `━━━━━━━━━━━━━━━━\n` +
-    `After connecting, type *menu*\n` +
-    `to access your admin panel! 🚀`
-  );
+    await wa.text(
+      phone,
+      `🎉 *Setup Complete!*\n` +
+      `━━━━━━━━━━━━━━━━\n\n` +
+      `🏫 *${session.schoolName}* is\n` +
+      `registered on SchoolBot! 🚀\n\n` +
+      `📊 *Your Setup:*\n` +
+      `📚 Classes: *${classCount.count ?? 0}*\n` +
+      `👨‍🏫 Staff:   *${staffCount.count ?? 0}*\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `🔌 *Final Step — Connect WhatsApp*\n\n` +
+      `Connect your school's WhatsApp\n` +
+      `Business number to go LIVE:\n\n` +
+      `👇 *Tap this link:*\n` +
+      `${activationLink}\n\n` +
+      `⏰ Valid for *7 days*\n` +
+      `Takes less than 2 minutes! ✅\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `After connecting, type *menu*\n` +
+      `to access your admin panel! 🚀`
+    );
+  }
 
-  // Notify super admin
-  const superPhone =
-    Deno.env.get('SUPER_ADMIN_PHONE');
-  if (superPhone) {
+  // Notify super admin of new school
+  const superPhone = Deno.env.get('SUPER_ADMIN_PHONE');
+  if (superPhone && !isSuperAdmin) {
     try {
       const notifyWa = new WhatsApp();
       await notifyWa.text(
@@ -2121,8 +2304,7 @@ async function showComplete(
         `📱 Admin: ${phone}\n` +
         `🔗 Source: ${session.source} bot\n` +
         `━━━━━━━━━━━━━━━━\n` +
-        `⏰ ${new Date().toLocaleString('en-NG')}\n\n` +
-        `✅ Activation link sent to school`
+        `⏰ ${new Date().toLocaleString('en-NG')}`
       );
     } catch {
       // Non-critical
@@ -2146,8 +2328,7 @@ async function showComplete(
     { onConflict: 'phone' }
   );
 
-  // ✅ Clear marketing demo session
-  // so "menu" goes to admin panel not demo bot
+  // Clear marketing demo session
   try {
     await db
       .from('demo_sessions')
@@ -2160,28 +2341,22 @@ async function showComplete(
     // Non-critical
   }
 
-  // ✅ Clear onboarding session
+  // Clear onboarding session
   await clearOnboardingSession(phone);
 }
 
-// ─── Generate WhatsApp activation link ────────────────────
+// ─── Generate activation link ──────────────────────────────
+// ✅ Uses crypto.randomUUID for secure token
 async function generateActivationLink(
   schoolId: string | null
 ): Promise<string> {
-  const appUrl =
-    Deno.env.get('APP_URL') ?? '';
+  const appUrl = Deno.env.get('APP_URL') ?? '';
 
   if (!schoolId) return `${appUrl}/activate`;
 
   try {
-    // Generate unique 32-char token
-    const token = Array.from(
-      { length: 32 },
-      () =>
-        'abcdefghijklmnopqrstuvwxyz0123456789'[
-          Math.floor(Math.random() * 36)
-        ]
-    ).join('');
+    // ✅ Secure token using Web Crypto API
+    const token = crypto.randomUUID().replace(/-/g, '');
 
     await db
       .from('school_activation_tokens')
@@ -2248,9 +2423,7 @@ export async function handleInvitationToken(
     return;
   }
 
-  if (
-    new Date(invitation.expires_at) < new Date()
-  ) {
+  if (new Date(invitation.expires_at) < new Date()) {
     await db
       .from('staff_invitations')
       .update({ status: 'expired' })
@@ -2266,10 +2439,10 @@ export async function handleInvitationToken(
     return;
   }
 
-  const school = invitation.schools as
-    Record<string, unknown>;
-  const staff  = invitation.staff as
-    Record<string, string>;
+  const school =
+    invitation.schools as Record<string, unknown>;
+  const staff  =
+    invitation.staff  as Record<string, string>;
 
   if (!school?.is_active) {
     await wa.text(
@@ -2436,18 +2609,13 @@ async function checkSetupFeePaid(
 // UTILITY HELPERS
 // ============================================================
 
+// ✅ Cryptographically secure token
 function generateToken(): string {
   const chars =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  return Array.from(
-    { length: 8 },
-    () =>
-      chars[Math.floor(Math.random() * chars.length)]
-  ).join('');
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) =>
-    setTimeout(resolve, ms)
-  );
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => chars[b % chars.length])
+    .join('');
 }
