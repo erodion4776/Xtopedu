@@ -1,9 +1,12 @@
 // ============================================================
 // SCHOOLBOT - SUPER ADMIN BOT MENU
 // _shared/bot/superadmin/superadmin.menu.ts
-// ✅ Added: Register My Own School feature
-// ✅ Added: Switch between owned schools
-// ✅ Fixed: All dynamic imports moved to static imports
+// ✅ Fixed: List truncated — reduced to exactly 10 rows
+// ✅ Fixed: Logs and System Health moved to Debug submenu
+// ✅ Fixed: All dynamic imports are static
+// ✅ Fixed: switchToMySuperAdminSchool uses school WA
+// ✅ Fixed: setTestMode called before showing menu
+// ✅ Fixed: bot_sessions updated with correct school_id
 // ============================================================
 
 import { WhatsApp }        from '../../whatsapp.ts';
@@ -16,7 +19,6 @@ import { showAdminMenu }   from '../admin/admin.menu.ts';
 import {
   startOnboardingSession,
   getOnboardingSession,
-  handleOnboardingInput,
 } from '../../onboarding/engine.ts';
 import {
   handleMarketingMessage,
@@ -37,7 +39,7 @@ function sumAmount(
 }
 
 // ============================================================
-// CHECK IF SUPER ADMIN IS IN TEST MODE
+// CHECK IF SUPER ADMIN IS IN TEST / SCHOOL MODE
 // ============================================================
 
 export async function isSuperAdminTestMode(
@@ -54,17 +56,26 @@ export async function isSuperAdminTestMode(
     .maybeSingle();
 
   if (!data) {
-    return { active: false, testRole: null, schoolId: null };
+    return {
+      active:   false,
+      testRole: null,
+      schoolId: null,
+    };
   }
 
-  const age = Date.now() -
-    new Date(data.created_at).getTime();
+  // Sessions expire after 2 hours
+  const age =
+    Date.now() - new Date(data.created_at).getTime();
   if (age > 2 * 60 * 60 * 1000) {
     await db
       .from('super_admin_test_sessions')
       .delete()
       .eq('phone', phone);
-    return { active: false, testRole: null, schoolId: null };
+    return {
+      active:   false,
+      testRole: null,
+      schoolId: null,
+    };
   }
 
   return {
@@ -74,7 +85,7 @@ export async function isSuperAdminTestMode(
   };
 }
 
-// ─── Set test mode ─────────────────────────────────────────
+// ─── Set test / school mode ────────────────────────────────
 export async function setTestMode(
   phone:    string,
   testRole: 'parent' | 'admin' | 'marketing',
@@ -93,7 +104,7 @@ export async function setTestMode(
     );
 }
 
-// ─── Clear test mode ───────────────────────────────────────
+// ─── Clear test / school mode ──────────────────────────────
 export async function clearTestMode(
   phone: string
 ): Promise<void> {
@@ -105,6 +116,7 @@ export async function clearTestMode(
 
 // ============================================================
 // MAIN SUPER ADMIN MENU
+// ✅ Exactly 10 rows — within WhatsApp limit
 // ============================================================
 
 export async function showSuperAdminMenu(
@@ -132,13 +144,15 @@ export async function showSuperAdminMenu(
     `🏫 Schools: *${stats.totalSchools}* ` +
     `(${stats.activeSchools} active)\n` +
     `💰 This Month: *${fmt(stats.monthRevenue)}*\n` +
-    `👥 Students: *${stats.totalStudents.toLocaleString()}*\n` +
+    `👥 Students: ` +
+    `*${stats.totalStudents.toLocaleString()}*\n` +
     `💬 Active Now: *${stats.activeSessions}*`,
     `Type *0* anytime to return here`,
     `⚙️ Open Menu`,
     [
       {
-        title: '📊 Platform',
+        // 4 rows
+        title: '📊 Platform & Sales',
         rows: [
           {
             id:          'SA_STATS',
@@ -152,43 +166,19 @@ export async function showSuperAdminMenu(
           },
           {
             id:          'SA_SCHOOLS',
-            title:       '🏫 Schools',
-            description: 'View all schools',
+            title:       '🏫 All Schools',
+            description: 'View all registered schools',
           },
-        ],
-      },
-      {
-        title: '🧲 Sales',
-        rows: [
           {
             id:          'SA_LEADS',
             title:       '🧲 Leads',
-            description: 'New school leads',
-          },
-          {
-            id:          'SA_SESSIONS',
-            title:       '💬 Active Sessions',
-            description: 'Who is online now',
+            description: 'New school leads pipeline',
           },
         ],
       },
       {
-        title: '🛠️ Operations',
-        rows: [
-          {
-            id:          'SA_LOGS',
-            title:       '📋 System Logs',
-            description: 'Errors & warnings',
-          },
-          {
-            id:          'SA_BROADCAST',
-            title:       '📢 Broadcast',
-            description: 'Message all schools',
-          },
-        ],
-      },
-      {
-        title: '🏫 My School',
+        // 4 rows
+        title: '🏫 My School & Operations',
         rows: [
           {
             id:          'SA_REGISTER_MY_SCHOOL',
@@ -200,9 +190,20 @@ export async function showSuperAdminMenu(
             title:       '⚙️ Manage My School',
             description: 'Switch to your school admin',
           },
+          {
+            id:          'SA_BROADCAST',
+            title:       '📢 Broadcast',
+            description: 'Message all school admins',
+          },
+          {
+            id:          'SA_SESSIONS',
+            title:       '💬 Active Sessions',
+            description: 'Who is online right now',
+          },
         ],
       },
       {
+        // 2 rows — total = 10 ✅
         title: '🧪 Testing & Debug',
         rows: [
           {
@@ -212,13 +213,8 @@ export async function showSuperAdminMenu(
           },
           {
             id:          'SA_DEBUG',
-            title:       '🔍 Debug School',
-            description: 'Inspect a school bot session',
-          },
-          {
-            id:          'SA_SYSTEM_TEST',
-            title:       '🤖 System Health',
-            description: 'Check all systems working',
+            title:       '🔍 Debug & Health',
+            description: 'School debug, logs & health',
           },
         ],
       },
@@ -239,7 +235,7 @@ export async function handleSuperAdminMenu(
 ): Promise<void> {
   switch (input) {
 
-    // ── Platform ─────────────────────────────────────────
+    // ── Platform & Sales ──────────────────────────────────
     case 'sa_stats':
       await showFullStats(phone, wa);
       break;
@@ -252,7 +248,6 @@ export async function handleSuperAdminMenu(
       await showSchools(phone, wa);
       break;
 
-    // ── Sales ─────────────────────────────────────────────
     case 'sa_leads':
       await showLeads(phone, wa);
       break;
@@ -261,24 +256,7 @@ export async function handleSuperAdminMenu(
       await showActiveSessions(phone, wa);
       break;
 
-    // ── Operations ────────────────────────────────────────
-    case 'sa_logs':
-      await showLogs(phone, wa);
-      break;
-
-    case 'sa_broadcast':
-      await promptBroadcast(phone, session, wa);
-      break;
-
-    case 'sa_broadcast_confirm':
-      await confirmBroadcast(phone, session, wa);
-      break;
-
-    case 'sa_broadcast_cancel':
-      await showSuperAdminMenu(phone, session, wa);
-      break;
-
-    // ── My School ─────────────────────────────────────────
+    // ── My School & Operations ────────────────────────────
     case 'sa_register_my_school':
       await startSuperAdminSchoolRegistration(
         phone, session, wa
@@ -295,17 +273,40 @@ export async function handleSuperAdminMenu(
       await addAnotherSchool(phone, session, wa);
       break;
 
-    // ── Testing & Debug ───────────────────────────────────
-    case 'sa_test_bot':
-      await showTestOptions(phone, session, wa);
+    case 'sa_broadcast':
+      await promptBroadcast(phone, session, wa);
       break;
 
+    case 'sa_broadcast_confirm':
+      await confirmBroadcast(phone, session, wa);
+      break;
+
+    case 'sa_broadcast_cancel':
+      await showSuperAdminMenu(phone, session, wa);
+      break;
+
+    // ── Testing & Debug ───────────────────────────────────
+    // SA_DEBUG now shows a submenu with 3 options
     case 'sa_debug':
+      await showDebugAndHealthMenu(phone, wa);
+      break;
+
+    // Sub-options from debug menu
+    case 'sa_debug_school':
       await promptDebug(phone, wa);
       break;
 
     case 'sa_system_test':
       await showSystemHealth(phone, wa);
+      break;
+
+    case 'sa_logs':
+      await showLogs(phone, wa);
+      break;
+
+    // ── Test bot selections ───────────────────────────────
+    case 'sa_test_bot':
+      await showTestOptions(phone, session, wa);
       break;
 
     case 'test_as_parent':
@@ -327,6 +328,23 @@ export async function handleSuperAdminMenu(
         await switchToMySuperAdminSchool(
           phone, schoolId, wa
         );
+      } else if (input.startsWith('test_school_parent_')) {
+        const schoolId =
+          input.replace('test_school_parent_', '');
+        const { data: schoolData } = await db
+          .from('schools')
+          .select('id, name')
+          .eq('id', schoolId)
+          .single();
+        if (schoolData) {
+          await activateParentTestForSchool(
+            phone,
+            session,
+            schoolData.id,
+            schoolData.name,
+            wa
+          );
+        }
       } else if (input.startsWith('test_school_')) {
         const schoolId =
           input.replace('test_school_', '');
@@ -344,7 +362,40 @@ export async function handleSuperAdminMenu(
 }
 
 // ============================================================
+// 🔍 DEBUG & HEALTH SUBMENU
+// Replaces the old separate SA_LOGS and SA_SYSTEM_TEST
+// menu items — now accessible from one tap
+// ============================================================
+
+async function showDebugAndHealthMenu(
+  phone: string,
+  wa:    WhatsApp
+): Promise<void> {
+  await wa.buttons(
+    phone,
+    `🔍 *Debug & Health*\n\n` +
+    `What would you like to check?`,
+    [
+      {
+        id:    'SA_DEBUG_SCHOOL',
+        title: '🔍 Debug a School',
+      },
+      {
+        id:    'SA_SYSTEM_TEST',
+        title: '🤖 System Health',
+      },
+      {
+        id:    'SA_LOGS',
+        title: '📋 System Logs',
+      },
+    ]
+  );
+}
+
+// ============================================================
 // 🏫 REGISTER MY OWN SCHOOL
+// Super admin goes through REAL onboarding
+// Setup fee auto-waived, platform WA auto-connected
 // ============================================================
 
 async function startSuperAdminSchoolRegistration(
@@ -357,11 +408,8 @@ async function startSuperAdminSchoolRegistration(
     .select(`
       school_id,
       schools (
-        id,
-        name,
-        is_active,
-        onboarding_status,
-        setup_fee_paid
+        id, name, is_active,
+        onboarding_status, setup_fee_paid
       )
     `)
     .eq('admin_phone', formatPhone(phone));
@@ -454,7 +502,8 @@ async function launchSuperAdminOnboarding(
     .eq('phone', formatPhone(phone));
 
   console.log(
-    `[SuperAdmin] ✅ Real onboarding started for ${phone}`
+    `[SuperAdmin] ✅ Real onboarding started ` +
+    `for ${phone}`
   );
 }
 
@@ -490,11 +539,8 @@ async function manageMySuperAdminSchool(
     .select(`
       school_id,
       schools (
-        id,
-        name,
-        is_active,
-        onboarding_status,
-        setup_fee_paid
+        id, name, is_active,
+        onboarding_status, setup_fee_paid
       )
     `)
     .eq('admin_phone', formatPhone(phone));
@@ -532,8 +578,8 @@ async function manageMySuperAdminSchool(
   const rows = mySchools.slice(0, 9).map((s) => {
     const school =
       s.schools as Record<string, unknown> | null;
-    const isActive = school?.is_active as boolean;
-    const feePaid  =
+    const isActive  = school?.is_active as boolean;
+    const feePaid   =
       school?.setup_fee_paid as boolean;
 
     let icon        = '🟢';
@@ -569,6 +615,10 @@ async function manageMySuperAdminSchool(
 }
 
 // ─── Switch super admin into their own real school ─────────
+// ✅ Fixed: setTestMode called FIRST
+// ✅ Fixed: bot_sessions updated with school_id
+// ✅ Fixed: Uses school WhatsApp not platform wa
+// ✅ Fixed: Clear confirmation message shown
 async function switchToMySuperAdminSchool(
   phone:    string,
   schoolId: string,
@@ -577,8 +627,8 @@ async function switchToMySuperAdminSchool(
   const { data: school } = await db
     .from('schools')
     .select(
-      'id, name, is_active, onboarding_status, ' +
-      'setup_fee_paid'
+      'id, name, is_active, ' +
+      'onboarding_status, setup_fee_paid'
     )
     .eq('id', schoolId)
     .single();
@@ -599,7 +649,6 @@ async function switchToMySuperAdminSchool(
     await delay(500);
 
     const obSession = await getOnboardingSession(phone);
-
     if (!obSession) {
       await launchSuperAdminOnboarding(phone);
       await wa.text(
@@ -607,8 +656,6 @@ async function switchToMySuperAdminSchool(
         `What is your *full name*?`
       );
     }
-    // handler.ts picks up onboarding session
-    // automatically on next message
     return;
   }
 
@@ -621,14 +668,7 @@ async function switchToMySuperAdminSchool(
     .maybeSingle();
 
   if (!waAccount) {
-    // Auto-connect platform WA number
-    await wa.text(
-      phone,
-      `🔌 *Connecting WhatsApp...*\n\n` +
-      `Auto-connecting platform number\n` +
-      `to *${school.name}*...`
-    );
-
+    // Auto-connect platform WA number to this school
     const { data: newWa } = await db
       .from('whatsapp_accounts')
       .upsert(
@@ -636,11 +676,17 @@ async function switchToMySuperAdminSchool(
           school_id:
             schoolId,
           phone_number_id:
-            Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+            Deno.env.get(
+              'WHATSAPP_PHONE_NUMBER_ID'
+            ) ?? '',
           access_token:
-            Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+            Deno.env.get(
+              'WHATSAPP_ACCESS_TOKEN'
+            ) ?? '',
           display_number:
-            Deno.env.get('WHATSAPP_DISPLAY_NUMBER') ?? '',
+            Deno.env.get(
+              'WHATSAPP_DISPLAY_NUMBER'
+            ) ?? '',
           status:     'active',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -670,17 +716,42 @@ async function switchToMySuperAdminSchool(
         updated_at:   new Date().toISOString(),
       })
       .eq('school_id', schoolId);
-
-    await wa.text(
-      phone,
-      `✅ *WhatsApp Connected!*\n\n` +
-      `*${school.name}* is now live!\n\n` +
-      `Switching to admin panel...`
-    );
-    await delay(800);
   }
 
-  // ── Create real admin session ──────────────────────────
+  if (!waAccount) {
+    await wa.text(
+      phone,
+      `❌ Could not connect WhatsApp.\n\n` +
+      `Please try again or contact support.`
+    );
+    return;
+  }
+
+  // ✅ Step 1: Set test mode FIRST
+  // This ensures next message goes to school panel
+  await setTestMode(phone, 'admin', schoolId);
+
+  // ✅ Step 2: Update bot_sessions with school_id
+  // This is critical for routeAdmin() to work correctly
+  await db
+    .from('bot_sessions')
+    .upsert(
+      {
+        phone:               formatPhone(phone),
+        parent_id:           null,
+        school_user_id:      null,
+        school_id:           schoolId,
+        role:                'admin',
+        state:               'ADMIN_MAIN_MENU',
+        sub_state:           null,
+        selected_student_id: null,
+        data:                {},
+        last_activity:       new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
+
+  // ✅ Step 3: Build admin session
   const adminUser = {
     id:        `sa-own-${schoolId}`,
     school_id: schoolId,
@@ -703,24 +774,30 @@ async function switchToMySuperAdminSchool(
     'admin'
   );
 
-  // Set test mode so EXIT returns to super admin panel
-  await setTestMode(phone, 'admin', schoolId);
+  // ✅ Step 4: Use SCHOOL WhatsApp not platform wa
+  const schoolWa = new WhatsApp(waAccount as never);
 
-  await wa.text(
+  // ✅ Step 5: Send clear confirmation message
+  await schoolWa.text(
     phone,
-    `✅ *Welcome to ${school.name}!*\n` +
+    `✅ *You are now in ${school.name}!*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
+    `🏫 *${school.name}*\n\n` +
     `You are now managing this school\n` +
     `as the admin.\n\n` +
-    `This is 100% real — everything\n` +
-    `you do here actually happens.\n\n` +
+    `✅ *Everything here is 100% real:*\n` +
+    `• Attendance marking works\n` +
+    `• Fee recording works\n` +
+    `• Staff management works\n` +
+    `• All features active\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
     `⚠️ Type *EXIT* anytime to return\n` +
     `to your super admin panel.`
   );
 
-  await delay(800);
+  await delay(1000);
 
-  const schoolWa = new WhatsApp(waAccount as never);
+  // ✅ Step 6: Show real admin menu
   await showAdminMenu(phone, adminSession, schoolWa);
 }
 
@@ -850,6 +927,7 @@ async function activateParentTestForSchool(
     return;
   }
 
+  // ✅ Set test mode FIRST
   await setTestMode(phone, 'parent', schoolId);
 
   const parentSvc = new ParentService();
@@ -860,7 +938,7 @@ async function activateParentTestForSchool(
     {
       ...parent,
       school_id: schoolId,
-      schools: { name: schoolName } as never,
+      schools:   { name: schoolName } as never,
     } as never,
     students,
     waAccount as never
@@ -868,7 +946,7 @@ async function activateParentTestForSchool(
 
   const schoolWa = new WhatsApp(waAccount as never);
 
-  await wa.text(
+  await schoolWa.text(
     phone,
     `🧪 *Parent Test Mode ACTIVE*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
@@ -962,7 +1040,27 @@ async function activateAdminTestForSchool(
     .eq('status', 'active')
     .maybeSingle();
 
+  // ✅ Set test mode FIRST
   await setTestMode(phone, 'admin', schoolId);
+
+  // ✅ Update bot_sessions with correct school_id
+  await db
+    .from('bot_sessions')
+    .upsert(
+      {
+        phone:               formatPhone(phone),
+        parent_id:           null,
+        school_user_id:      null,
+        school_id:           schoolId,
+        role:                'admin',
+        state:               'ADMIN_MAIN_MENU',
+        sub_state:           null,
+        selected_student_id: null,
+        data:                {},
+        last_activity:       new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    );
 
   const fakeAdminUser = {
     id:        `test-admin-${schoolId}`,
@@ -988,7 +1086,7 @@ async function activateAdminTestForSchool(
 
   const schoolWa = new WhatsApp(waAccount as never);
 
-  await wa.text(
+  await schoolWa.text(
     phone,
     `🧪 *School Admin Test Mode ACTIVE*\n` +
     `━━━━━━━━━━━━━━━━\n\n` +
@@ -1175,7 +1273,7 @@ async function showSchoolDebug(
         title: '🧪 Test as Admin',
       },
       {
-        id:    'SA_DEBUG',
+        id:    'SA_DEBUG_SCHOOL',
         title: '🔍 Other School',
       },
       {
@@ -1230,11 +1328,7 @@ async function showSystemHealth(
 
     const res = await fetch(
       `${apiUrl}/${phoneId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
     checks.push({
       name:   'WhatsApp API',
@@ -1256,12 +1350,9 @@ async function showSystemHealth(
     const key =
       Deno.env.get('PAYSTACK_SECRET_KEY') ?? '';
     const res = await fetch(
-      'https://api.paystack.co/bank?currency=NGN&perPage=1',
-      {
-        headers: {
-          Authorization: `Bearer ${key}`,
-        },
-      }
+      'https://api.paystack.co/bank' +
+      '?currency=NGN&perPage=1',
+      { headers: { Authorization: `Bearer ${key}` } }
     );
     checks.push({
       name:   'Paystack',
@@ -1304,14 +1395,14 @@ async function showSystemHealth(
 
   // Active schools
   try {
-    const { data } = await db
+    const { count } = await db
       .from('schools')
       .select('id', { count: 'exact' })
       .eq('is_active', true);
     checks.push({
       name:   'Active Schools',
       status: true,
-      detail: `${data?.length ?? 0} schools live`,
+      detail: `${count ?? 0} schools live`,
     });
   } catch {
     checks.push({
@@ -1365,9 +1456,9 @@ async function showSystemHealth(
         : '⚠️ *Some systems need attention*'
     }`,
     [
-      { id: 'SA_LOGS',     title: '📋 View Logs'  },
-      { id: 'SA_TEST_BOT', title: '🧪 Test Bot'   },
-      { id: '0',           title: '↩️ Menu'        },
+      { id: 'SA_LOGS',        title: '📋 View Logs'  },
+      { id: 'SA_DEBUG_SCHOOL', title: '🔍 Debug School' },
+      { id: '0',              title: '↩️ Menu'        },
     ]
   );
 }
@@ -1452,9 +1543,9 @@ async function showFullStats(
     `New Leads:  *${leadsRes.count ?? 0}*\n` +
     `━━━━━━━━━━━━━━━━`,
     [
-      { id: 'SA_REVENUE', title: '💰 Revenue Detail' },
-      { id: 'SA_SCHOOLS', title: '🏫 Schools'        },
-      { id: 'SA_LEADS',   title: '🧲 Leads'          },
+      { id: 'SA_REVENUE',     title: '💰 Revenue Detail' },
+      { id: 'SA_LOGS',        title: '📋 System Logs'    },
+      { id: 'SA_SYSTEM_TEST', title: '🤖 Health Check'   },
     ]
   );
 }
@@ -1503,7 +1594,8 @@ async function showRevenue(
   const { data: recent } = await db
     .from('platform_payments')
     .select(
-      'amount, payment_type, created_at, schools(name)'
+      'amount, payment_type, created_at, ' +
+      'schools(name)'
     )
     .eq('status', 'Success')
     .order('created_at', { ascending: false })
@@ -1599,9 +1691,9 @@ async function showSchools(
     `🟢 Active  🔴 Inactive\n` +
     `✅ Fee Paid  ⏳ Pending`,
     [
-      { id: 'SA_DEBUG',   title: '🔍 Debug School' },
-      { id: 'SA_REVENUE', title: '💰 Revenue'      },
-      { id: '0',          title: '↩️ Menu'          },
+      { id: 'SA_DEBUG_SCHOOL', title: '🔍 Debug School'  },
+      { id: 'SA_SYSTEM_TEST',  title: '🤖 Health Check'  },
+      { id: '0',               title: '↩️ Menu'          },
     ]
   );
 }
@@ -1784,7 +1876,10 @@ async function showLogs(
       `📋 *System Logs*\n\n` +
       `✅ No errors or warnings!\n` +
       `All systems running clean. 🎉`,
-      [{ id: '0', title: '↩️ Menu' }]
+      [
+        { id: 'SA_SYSTEM_TEST', title: '🤖 Health Check' },
+        { id: '0',              title: '↩️ Menu'          },
+      ]
     );
     return;
   }
