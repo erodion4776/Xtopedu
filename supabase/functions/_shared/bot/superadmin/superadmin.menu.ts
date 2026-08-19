@@ -3,12 +3,24 @@
 // _shared/bot/superadmin/superadmin.menu.ts
 // ✅ Added: Register My Own School feature
 // ✅ Added: Switch between owned schools
+// ✅ Fixed: All dynamic imports moved to static imports
 // ============================================================
 
 import { WhatsApp }        from '../../whatsapp.ts';
 import { getSupabase }     from '../../supabase.ts';
 import { fmt, formatPhone, delay } from '../../utils.ts';
 import { SessionService }  from '../../session.ts';
+import { ParentService }   from '../../services/parent.service.ts';
+import { showMainMenu }    from '../menu.ts';
+import { showAdminMenu }   from '../admin/admin.menu.ts';
+import {
+  startOnboardingSession,
+  getOnboardingSession,
+  handleOnboardingInput,
+} from '../../onboarding/engine.ts';
+import {
+  handleMarketingMessage,
+} from '../marketing/marketing.handler.ts';
 import type { BotSession } from '../../types.ts';
 
 const db       = getSupabase();
@@ -333,8 +345,6 @@ export async function handleSuperAdminMenu(
 
 // ============================================================
 // 🏫 REGISTER MY OWN SCHOOL
-// Super admin goes through REAL onboarding
-// Setup fee auto-waived, platform WA auto-connected
 // ============================================================
 
 async function startSuperAdminSchoolRegistration(
@@ -342,7 +352,6 @@ async function startSuperAdminSchoolRegistration(
   session: BotSession,
   wa:      WhatsApp
 ): Promise<void> {
-  // Check if they already have schools registered
   const { data: existing } = await db
     .from('school_onboarding')
     .select(`
@@ -401,7 +410,6 @@ async function startSuperAdminSchoolRegistration(
     return;
   }
 
-  // No schools yet — start full onboarding
   await wa.text(
     phone,
     `🏫 *Register Your School*\n\n` +
@@ -421,7 +429,6 @@ async function startSuperAdminSchoolRegistration(
     `What is your *full name*?`
   );
 
-  // Start real onboarding with super admin flag
   await launchSuperAdminOnboarding(phone);
 }
 
@@ -429,16 +436,13 @@ async function startSuperAdminSchoolRegistration(
 async function launchSuperAdminOnboarding(
   phone: string
 ): Promise<void> {
-  const { startOnboardingSession } =
-    await import('../../onboarding/engine.ts');
-
   // Clear any existing onboarding session first
   await db
     .from('onboarding_sessions')
     .delete()
     .eq('phone', formatPhone(phone));
 
-  // Start fresh onboarding
+  // Start fresh real onboarding
   await startOnboardingSession(phone, 'main');
 
   // Mark as super admin so fee gets auto-waived
@@ -474,8 +478,6 @@ async function addAnotherSchool(
 
 // ============================================================
 // ⚙️ MANAGE MY SCHOOL
-// Super admin picks one of their own schools
-// and enters it as the real admin
 // ============================================================
 
 async function manageMySuperAdminSchool(
@@ -548,7 +550,8 @@ async function manageMySuperAdminSchool(
     return {
       id:    `SA_SWITCH_SCHOOL_${s.school_id}`,
       title: `${icon} ${
-        String(school?.name ?? 'School').substring(0, 20)
+        String(school?.name ?? 'School')
+          .substring(0, 20)
       }`,
       description,
     };
@@ -571,11 +574,11 @@ async function switchToMySuperAdminSchool(
   schoolId: string,
   wa:       WhatsApp
 ): Promise<void> {
-  // Get school details
   const { data: school } = await db
     .from('schools')
     .select(
-      'id, name, is_active, onboarding_status, setup_fee_paid'
+      'id, name, is_active, onboarding_status, ' +
+      'setup_fee_paid'
     )
     .eq('id', schoolId)
     .single();
@@ -595,26 +598,22 @@ async function switchToMySuperAdminSchool(
     );
     await delay(500);
 
-    const { getOnboardingSession } =
-      await import('../../onboarding/engine.ts');
-    const obSession =
-      await getOnboardingSession(phone);
+    const obSession = await getOnboardingSession(phone);
 
     if (!obSession) {
-      // Restart onboarding for this school
       await launchSuperAdminOnboarding(phone);
       await wa.text(
         phone,
         `What is your *full name*?`
       );
     }
-    // handler.ts will pick up onboarding session
+    // handler.ts picks up onboarding session
     // automatically on next message
     return;
   }
 
-  // ── Fee paid but WA not connected ──────────────────────
-  const { data: waAccount } = await db
+  // ── Get or create WA account ────────────────────────────
+  let { data: waAccount } = await db
     .from('whatsapp_accounts')
     .select('*')
     .eq('school_id', schoolId)
@@ -630,7 +629,7 @@ async function switchToMySuperAdminSchool(
       `to *${school.name}*...`
     );
 
-    await db
+    const { data: newWa } = await db
       .from('whatsapp_accounts')
       .upsert(
         {
@@ -647,7 +646,11 @@ async function switchToMySuperAdminSchool(
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'school_id' }
-      );
+      )
+      .select()
+      .single();
+
+    waAccount = newWa;
 
     // Mark school as fully active
     await db
@@ -677,14 +680,6 @@ async function switchToMySuperAdminSchool(
     await delay(800);
   }
 
-  // ── Get fresh WA account ───────────────────────────────
-  const { data: freshWa } = await db
-    .from('whatsapp_accounts')
-    .select('*')
-    .eq('school_id', schoolId)
-    .eq('status', 'active')
-    .single();
-
   // ── Create real admin session ──────────────────────────
   const adminUser = {
     id:        `sa-own-${schoolId}`,
@@ -704,7 +699,7 @@ async function switchToMySuperAdminSchool(
   const adminSession = await sessions.createAdminSession(
     phone,
     adminUser as never,
-    freshWa as never,
+    waAccount as never,
     'admin'
   );
 
@@ -725,10 +720,7 @@ async function switchToMySuperAdminSchool(
 
   await delay(800);
 
-  // Show the real admin menu
-  const { showAdminMenu } =
-    await import('../admin/admin.menu.ts');
-  const schoolWa = new WhatsApp(freshWa as never);
+  const schoolWa = new WhatsApp(waAccount as never);
   await showAdminMenu(phone, adminSession, schoolWa);
 }
 
@@ -751,8 +743,8 @@ async function showTestOptions(
     `⚠️ Type *EXIT* at any time\n` +
     `to return to your admin panel.`,
     [
-      { id: 'TEST_AS_PARENT',  title: '👨‍👩‍👧 Test as Parent'   },
-      { id: 'TEST_AS_ADMIN',   title: '👨‍💼 Test as Admin'    },
+      { id: 'TEST_AS_PARENT',  title: '👨‍👩‍👧 Test as Parent'    },
+      { id: 'TEST_AS_ADMIN',   title: '👨‍💼 Test as Admin'     },
       { id: 'TEST_MARKETING',  title: '🎯 Test Marketing Bot' },
     ],
     '🧪 Test Mode'
@@ -779,8 +771,14 @@ async function activateParentTest(
       `school to test the parent bot.\n\n` +
       `Register your own school first!`,
       [
-        { id: 'SA_REGISTER_MY_SCHOOL', title: '🏫 Register School' },
-        { id: 'SA_TEST_BOT',           title: '↩️ Back'            },
+        {
+          id:    'SA_REGISTER_MY_SCHOOL',
+          title: '🏫 Register School',
+        },
+        {
+          id:    'SA_TEST_BOT',
+          title: '↩️ Back',
+        },
       ]
     );
     return;
@@ -854,26 +852,20 @@ async function activateParentTestForSchool(
 
   await setTestMode(phone, 'parent', schoolId);
 
-  const { ParentService } =
-    await import('../../services/parent.service.ts');
   const parentSvc = new ParentService();
-  const students  =
-    await parentSvc.getStudents(parent.id);
+  const students  = await parentSvc.getStudents(parent.id);
 
-  const testSession =
-    await sessions.createParentSession(
-      phone,
-      {
-        ...parent,
-        school_id: schoolId,
-        schools: { name: schoolName } as never,
-      } as never,
-      students,
-      waAccount as never
-    );
+  const testSession = await sessions.createParentSession(
+    phone,
+    {
+      ...parent,
+      school_id: schoolId,
+      schools: { name: schoolName } as never,
+    } as never,
+    students,
+    waAccount as never
+  );
 
-  const { showMainMenu } =
-    await import('../menu.ts');
   const schoolWa = new WhatsApp(waAccount as never);
 
   await wa.text(
@@ -911,8 +903,14 @@ async function activateAdminTest(
       `❌ *No Active Schools*\n\n` +
       `Register your own school first!`,
       [
-        { id: 'SA_REGISTER_MY_SCHOOL', title: '🏫 Register School' },
-        { id: 'SA_TEST_BOT',           title: '↩️ Back'            },
+        {
+          id:    'SA_REGISTER_MY_SCHOOL',
+          title: '🏫 Register School',
+        },
+        {
+          id:    'SA_TEST_BOT',
+          title: '↩️ Back',
+        },
       ]
     );
     return;
@@ -981,13 +979,12 @@ async function activateAdminTestForSchool(
     },
   };
 
-  const testSession =
-    await sessions.createAdminSession(
-      phone,
-      fakeAdminUser as never,
-      waAccount as never,
-      'admin'
-    );
+  const testSession = await sessions.createAdminSession(
+    phone,
+    fakeAdminUser as never,
+    waAccount as never,
+    'admin'
+  );
 
   const schoolWa = new WhatsApp(waAccount as never);
 
@@ -1003,9 +1000,6 @@ async function activateAdminTestForSchool(
   );
 
   await delay(1000);
-
-  const { showAdminMenu } =
-    await import('../admin/admin.menu.ts');
   await showAdminMenu(phone, testSession, schoolWa);
 }
 
@@ -1033,9 +1027,6 @@ async function activateMarketingTest(
   );
 
   await delay(1000);
-
-  const { handleMarketingMessage } =
-    await import('../marketing/marketing.handler.ts');
 
   await handleMarketingMessage({
     id:        'test-message',
@@ -1136,9 +1127,9 @@ async function showSchoolDebug(
       .limit(3),
   ]);
 
-  const s          = school.data;
-  const wa_        = waAccount.data;
-  const activeSes  = sessions_.data ?? [];
+  const s         = school.data;
+  const wa_       = waAccount.data;
+  const activeSes = sessions_.data ?? [];
 
   const recentLogs = (logs.data ?? [])
     .map((l) => {
@@ -1237,9 +1228,14 @@ async function showSystemHealth(
     const phoneId =
       Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
 
-    const res = await fetch(`${apiUrl}/${phoneId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetch(
+      `${apiUrl}/${phoneId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
     checks.push({
       name:   'WhatsApp API',
       status: res.ok,
@@ -1262,7 +1258,9 @@ async function showSystemHealth(
     const res = await fetch(
       'https://api.paystack.co/bank?currency=NGN&perPage=1',
       {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: {
+          Authorization: `Bearer ${key}`,
+        },
       }
     );
     checks.push({
@@ -1582,7 +1580,7 @@ async function showSchools(
 
   const lines = schools
     .map((s, i) => {
-      const status  = s.is_active     ? '🟢' : '🔴';
+      const status  = s.is_active      ? '🟢' : '🔴';
       const feePaid = s.setup_fee_paid ? '✅' : '⏳';
       return (
         `${i + 1}. ${status} *${s.name}*\n` +
@@ -1723,10 +1721,10 @@ async function showActiveSessions(
     teacher: '👨‍🏫',
   };
 
-  const parents  =
+  const parents =
     (activeSessions ?? [])
       .filter((s) => s.role === 'parent').length;
-  const admins   =
+  const admins =
     (activeSessions ?? [])
       .filter((s) => s.role === 'admin').length;
   const teachers =
@@ -2008,8 +2006,8 @@ async function getQuickStats(): Promise<{
     const schoolList = schools.data ?? [];
 
     return {
-      totalSchools:  schoolList.length,
-      activeSchools: schoolList.filter(
+      totalSchools:   schoolList.length,
+      activeSchools:  schoolList.filter(
         (s) => s.is_active
       ).length,
       totalStudents:  students.count  ?? 0,
