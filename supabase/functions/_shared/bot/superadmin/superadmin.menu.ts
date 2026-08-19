@@ -1,12 +1,13 @@
 // ============================================================
 // SCHOOLBOT - SUPER ADMIN BOT MENU
 // _shared/bot/superadmin/superadmin.menu.ts
-// ✅ Fixed: List truncated — reduced to exactly 10 rows
-// ✅ Fixed: Logs and System Health moved to Debug submenu
-// ✅ Fixed: All dynamic imports are static
-// ✅ Fixed: switchToMySuperAdminSchool uses school WA
+// ✅ Fixed: List truncated — exactly 10 rows
+// ✅ Fixed: WA connection uses insert/update not upsert
+// ✅ Fixed: Handles duplicate phone_number_id gracefully
+// ✅ Fixed: Proper error messages shown on failure
 // ✅ Fixed: setTestMode called before showing menu
 // ✅ Fixed: bot_sessions updated with correct school_id
+// ✅ Fixed: All static imports — no dynamic imports
 // ============================================================
 
 import { WhatsApp }        from '../../whatsapp.ts';
@@ -112,6 +113,159 @@ export async function clearTestMode(
     .from('super_admin_test_sessions')
     .delete()
     .eq('phone', phone);
+}
+
+// ============================================================
+// CONNECT WHATSAPP ACCOUNT TO SCHOOL
+// ✅ Uses insert/update pattern — no upsert
+// ✅ Handles duplicate phone_number_id gracefully
+// ✅ Returns the connected account or null on failure
+// ============================================================
+
+async function connectPlatformWaToSchool(
+  schoolId: string,
+  schoolName: string
+): Promise<Record<string, unknown> | null> {
+  const platformPhoneNumberId =
+    Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '';
+  const platformAccessToken =
+    Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '';
+  const platformDisplayNumber =
+    Deno.env.get('WHATSAPP_DISPLAY_NUMBER') ?? '';
+
+  if (!platformPhoneNumberId || !platformAccessToken) {
+    console.error(
+      '[SuperAdmin] Missing WA env vars: ' +
+      'WHATSAPP_PHONE_NUMBER_ID or ' +
+      'WHATSAPP_ACCESS_TOKEN not set'
+    );
+    return null;
+  }
+
+  console.log(
+    `[SuperAdmin] Connecting platform WA to ` +
+    `school: ${schoolName} (${schoolId})`
+  );
+
+  try {
+    // Step 1: Check if WA account already exists
+    // for this school (any status)
+    const { data: existingForSchool } = await db
+      .from('whatsapp_accounts')
+      .select('id')
+      .eq('school_id', schoolId)
+      .maybeSingle();
+
+    if (existingForSchool) {
+      // Update existing row with platform credentials
+      const { data: updated, error: updateErr } =
+        await db
+          .from('whatsapp_accounts')
+          .update({
+            phone_number_id: platformPhoneNumberId,
+            access_token:    platformAccessToken,
+            display_number:  platformDisplayNumber,
+            status:          'active',
+            updated_at:      new Date().toISOString(),
+          })
+          .eq('id', existingForSchool.id)
+          .select()
+          .single();
+
+      if (updateErr) {
+        console.error(
+          '[SuperAdmin] WA update error:',
+          updateErr.message
+        );
+        return null;
+      }
+
+      console.log(
+        `[SuperAdmin] ✅ WA updated for ` +
+        `school: ${schoolName}`
+      );
+      return updated as Record<string, unknown>;
+    }
+
+    // Step 2: Try to insert new row
+    const { data: inserted, error: insertErr } =
+      await db
+        .from('whatsapp_accounts')
+        .insert({
+          school_id:       schoolId,
+          phone_number_id: platformPhoneNumberId,
+          access_token:    platformAccessToken,
+          display_number:  platformDisplayNumber,
+          status:          'active',
+          created_at:      new Date().toISOString(),
+          updated_at:      new Date().toISOString(),
+        })
+        .select()
+        .single();
+
+    if (!insertErr) {
+      console.log(
+        `[SuperAdmin] ✅ WA inserted for ` +
+        `school: ${schoolName}`
+      );
+      return inserted as Record<string, unknown>;
+    }
+
+    // Step 3: If insert failed due to unique constraint
+    // on phone_number_id — update the existing row
+    // to point to this school instead
+    if (
+      insertErr.code === '23505' ||
+      insertErr.message?.includes('unique') ||
+      insertErr.message?.includes('duplicate')
+    ) {
+      console.log(
+        `[SuperAdmin] phone_number_id already exists ` +
+        `— reassigning to school: ${schoolName}`
+      );
+
+      const { data: reassigned, error: reassignErr } =
+        await db
+          .from('whatsapp_accounts')
+          .update({
+            school_id:  schoolId,
+            access_token: platformAccessToken,
+            display_number: platformDisplayNumber,
+            status:     'active',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('phone_number_id', platformPhoneNumberId)
+          .select()
+          .single();
+
+      if (reassignErr) {
+        console.error(
+          '[SuperAdmin] WA reassign error:',
+          reassignErr.message
+        );
+        return null;
+      }
+
+      console.log(
+        `[SuperAdmin] ✅ WA reassigned to ` +
+        `school: ${schoolName}`
+      );
+      return reassigned as Record<string, unknown>;
+    }
+
+    // Step 4: Unknown error
+    console.error(
+      '[SuperAdmin] WA insert error:',
+      insertErr.message
+    );
+    return null;
+  } catch (err) {
+    console.error(
+      '[SuperAdmin] connectPlatformWaToSchool error:',
+      err
+    );
+    return null;
+  }
 }
 
 // ============================================================
@@ -286,12 +440,10 @@ export async function handleSuperAdminMenu(
       break;
 
     // ── Testing & Debug ───────────────────────────────────
-    // SA_DEBUG now shows a submenu with 3 options
     case 'sa_debug':
       await showDebugAndHealthMenu(phone, wa);
       break;
 
-    // Sub-options from debug menu
     case 'sa_debug_school':
       await promptDebug(phone, wa);
       break;
@@ -304,7 +456,6 @@ export async function handleSuperAdminMenu(
       await showLogs(phone, wa);
       break;
 
-    // ── Test bot selections ───────────────────────────────
     case 'sa_test_bot':
       await showTestOptions(phone, session, wa);
       break;
@@ -328,7 +479,9 @@ export async function handleSuperAdminMenu(
         await switchToMySuperAdminSchool(
           phone, schoolId, wa
         );
-      } else if (input.startsWith('test_school_parent_')) {
+      } else if (
+        input.startsWith('test_school_parent_')
+      ) {
         const schoolId =
           input.replace('test_school_parent_', '');
         const { data: schoolData } = await db
@@ -363,8 +516,6 @@ export async function handleSuperAdminMenu(
 
 // ============================================================
 // 🔍 DEBUG & HEALTH SUBMENU
-// Replaces the old separate SA_LOGS and SA_SYSTEM_TEST
-// menu items — now accessible from one tap
 // ============================================================
 
 async function showDebugAndHealthMenu(
@@ -394,8 +545,6 @@ async function showDebugAndHealthMenu(
 
 // ============================================================
 // 🏫 REGISTER MY OWN SCHOOL
-// Super admin goes through REAL onboarding
-// Setup fee auto-waived, platform WA auto-connected
 // ============================================================
 
 async function startSuperAdminSchoolRegistration(
@@ -484,7 +633,7 @@ async function startSuperAdminSchoolRegistration(
 async function launchSuperAdminOnboarding(
   phone: string
 ): Promise<void> {
-  // Clear any existing onboarding session first
+  // Clear any existing onboarding session
   await db
     .from('onboarding_sessions')
     .delete()
@@ -578,7 +727,7 @@ async function manageMySuperAdminSchool(
   const rows = mySchools.slice(0, 9).map((s) => {
     const school =
       s.schools as Record<string, unknown> | null;
-    const isActive  = school?.is_active as boolean;
+    const isActive  = school?.is_active  as boolean;
     const feePaid   =
       school?.setup_fee_paid as boolean;
 
@@ -615,10 +764,12 @@ async function manageMySuperAdminSchool(
 }
 
 // ─── Switch super admin into their own real school ─────────
+// ✅ Fixed: Uses insert/update not upsert
+// ✅ Fixed: Handles duplicate phone_number_id
+// ✅ Fixed: Proper error messages with details
 // ✅ Fixed: setTestMode called FIRST
 // ✅ Fixed: bot_sessions updated with school_id
 // ✅ Fixed: Uses school WhatsApp not platform wa
-// ✅ Fixed: Clear confirmation message shown
 async function switchToMySuperAdminSchool(
   phone:    string,
   schoolId: string,
@@ -659,7 +810,7 @@ async function switchToMySuperAdminSchool(
     return;
   }
 
-  // ── Get or create WA account ────────────────────────────
+  // ── Get existing WA account for this school ─────────────
   let { data: waAccount } = await db
     .from('whatsapp_accounts')
     .select('*')
@@ -667,36 +818,37 @@ async function switchToMySuperAdminSchool(
     .eq('status', 'active')
     .maybeSingle();
 
+  // ── Connect platform WA if not already connected ────────
   if (!waAccount) {
-    // Auto-connect platform WA number to this school
-    const { data: newWa } = await db
-      .from('whatsapp_accounts')
-      .upsert(
-        {
-          school_id:
-            schoolId,
-          phone_number_id:
-            Deno.env.get(
-              'WHATSAPP_PHONE_NUMBER_ID'
-            ) ?? '',
-          access_token:
-            Deno.env.get(
-              'WHATSAPP_ACCESS_TOKEN'
-            ) ?? '',
-          display_number:
-            Deno.env.get(
-              'WHATSAPP_DISPLAY_NUMBER'
-            ) ?? '',
-          status:     'active',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'school_id' }
-      )
-      .select()
-      .single();
+    await wa.text(
+      phone,
+      `🔌 *Connecting WhatsApp...*\n\n` +
+      `Linking platform number to\n` +
+      `*${school.name}*...`
+    );
 
-    waAccount = newWa;
+    waAccount = await connectPlatformWaToSchool(
+      schoolId,
+      school.name
+    );
+
+    if (!waAccount) {
+      // Give detailed error to super admin
+      await wa.text(
+        phone,
+        `❌ *WhatsApp Connection Failed*\n\n` +
+        `Could not connect the platform\n` +
+        `WhatsApp number to this school.\n\n` +
+        `*Possible reasons:*\n` +
+        `• Missing env vars:\n` +
+        `  WHATSAPP_PHONE_NUMBER_ID\n` +
+        `  WHATSAPP_ACCESS_TOKEN\n` +
+        `• Database constraint error\n\n` +
+        `*Check Supabase logs for details.*\n\n` +
+        `Type *0* to go back.`
+      );
+      return;
+    }
 
     // Mark school as fully active
     await db
@@ -718,21 +870,12 @@ async function switchToMySuperAdminSchool(
       .eq('school_id', schoolId);
   }
 
-  if (!waAccount) {
-    await wa.text(
-      phone,
-      `❌ Could not connect WhatsApp.\n\n` +
-      `Please try again or contact support.`
-    );
-    return;
-  }
-
   // ✅ Step 1: Set test mode FIRST
   // This ensures next message goes to school panel
   await setTestMode(phone, 'admin', schoolId);
 
   // ✅ Step 2: Update bot_sessions with school_id
-  // This is critical for routeAdmin() to work correctly
+  // Critical for routeAdmin() to work correctly
   await db
     .from('bot_sessions')
     .upsert(
@@ -900,7 +1043,9 @@ async function activateParentTestForSchool(
 ): Promise<void> {
   const { data: parent } = await db
     .from('parents')
-    .select('id, full_name, phone, whatsapp_number')
+    .select(
+      'id, full_name, phone, whatsapp_number'
+    )
     .eq('school_id', schoolId)
     .limit(1)
     .maybeSingle();
@@ -1456,9 +1601,9 @@ async function showSystemHealth(
         : '⚠️ *Some systems need attention*'
     }`,
     [
-      { id: 'SA_LOGS',        title: '📋 View Logs'  },
+      { id: 'SA_LOGS',         title: '📋 View Logs'    },
       { id: 'SA_DEBUG_SCHOOL', title: '🔍 Debug School' },
-      { id: '0',              title: '↩️ Menu'        },
+      { id: '0',               title: '↩️ Menu'         },
     ]
   );
 }
