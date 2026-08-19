@@ -207,57 +207,99 @@ export class WhatsApp {
     }
   }
 
-  // ─── Download media from WhatsApp ─────────────────────
-  async downloadMedia(
-    mediaId: string
-  ): Promise<string | null> {
-    try {
-      const baseUrl =
-        Deno.env.get('WHATSAPP_API_URL') ??
-        'https://graph.facebook.com/v18.0';
+  // ─── Download media from WhatsApp ─────────────────────────
+async downloadMedia(
+  mediaId: string
+): Promise<string | null> {
+  try {
+    const baseUrl =
+      Deno.env.get('WHATSAPP_API_URL') ??
+      'https://graph.facebook.com/v18.0';
 
-      // Step 1: Get media URL
-      const urlRes = await fetch(
-        `${baseUrl}/${mediaId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.token}`,
-          },
-        }
-      );
+    console.log(
+      `[WhatsApp] Downloading media: ${mediaId}`
+    );
 
-      if (!urlRes.ok) {
-        console.error(
-          '[WhatsApp] Failed to get media URL'
-        );
-        return null;
-      }
-
-      const urlData = await urlRes.json();
-
-      // Step 2: Download the file
-      const fileRes = await fetch(urlData.url, {
+    // Step 1: Get media URL from Meta API
+    const urlRes = await fetch(
+      `${baseUrl}/${mediaId}`,
+      {
         headers: {
           Authorization: `Bearer ${this.token}`,
         },
-      });
-
-      if (!fileRes.ok) {
-        console.error(
-          '[WhatsApp] Failed to download media file'
-        );
-        return null;
       }
+    );
 
-      const buffer = await fileRes.arrayBuffer();
-      return new TextDecoder().decode(buffer);
-    } catch (err) {
+    if (!urlRes.ok) {
+      const errText = await urlRes.text();
       console.error(
-        '[WhatsApp] downloadMedia error:', err
+        `[WhatsApp] Failed to get media URL:\n` +
+        `  status: ${urlRes.status}\n` +
+        `  body: ${errText.substring(0, 200)}`
       );
       return null;
     }
+
+    const urlData = await urlRes.json();
+
+    console.log(
+      `[WhatsApp] Media URL received:\n` +
+      `  url: ${String(urlData.url).substring(0, 60)}...`
+    );
+
+    if (!urlData.url) {
+      console.error(
+        '[WhatsApp] No URL in media response:',
+        JSON.stringify(urlData)
+      );
+      return null;
+    }
+
+    // Step 2: Download the actual file
+    const fileRes = await fetch(urlData.url, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+      },
+    });
+
+    if (!fileRes.ok) {
+      console.error(
+        `[WhatsApp] Failed to download file:\n` +
+        `  status: ${fileRes.status}`
+      );
+      return null;
+    }
+
+    const buffer = await fileRes.arrayBuffer();
+
+    console.log(
+      `[WhatsApp] File downloaded:\n` +
+      `  size: ${buffer.byteLength} bytes`
+    );
+
+    if (buffer.byteLength === 0) {
+      console.error('[WhatsApp] Downloaded empty file');
+      return null;
+    }
+
+    // Decode as UTF-8 text (works for CSV)
+    const text = new TextDecoder('utf-8').decode(buffer);
+
+    console.log(
+      `[WhatsApp] Decoded text:\n` +
+      `  length: ${text.length} chars\n` +
+      `  preview: "${text.substring(0, 100)}"`
+    );
+
+    return text;
+  } catch (err) {
+    console.error(
+      '[WhatsApp] downloadMedia error:',
+      err instanceof Error ? err.message : String(err)
+    );
+    return null;
   }
+}
 
   // ─── Format phone number ──────────────────────────────
   formatPhone(phone: string): string {
