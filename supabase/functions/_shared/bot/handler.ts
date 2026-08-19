@@ -1,14 +1,10 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
-// ✅ V3 - Merged best of V1 + V2
-// ✅ Fixed: School selector loop bug
-// ✅ Fixed: routeAdmin undefined `message` variable
-// ✅ Fixed: Missing state handlers
-// ✅ Fixed: Token expiry check
-// ✅ Restored: Payment form handler
-// ✅ Restored: Marketing session mid-flow check
-// ✅ Added: Structured logging
+// ✅ Fixed: Onboarding check BEFORE super admin check
+// ✅ Fixed: Super admin can now go through full onboarding
+// ✅ Fixed: routeAdmin missing score upload states
+// ✅ Fixed: All state handlers present
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -162,7 +158,9 @@ const RESET_KEYWORDS = new Set([
 // ============================================================
 
 function getSuperAdminPhone(): string {
-  return formatPhone(Deno.env.get('SUPER_ADMIN_PHONE') ?? '');
+  return formatPhone(
+    Deno.env.get('SUPER_ADMIN_PHONE') ?? ''
+  );
 }
 
 function isSuperAdminPhone(phone: string): boolean {
@@ -206,6 +204,7 @@ export async function handleMessage(
   const wa = new WhatsApp(waAccount);
 
   // ── Staff invite token ──────────────────────────────────
+  // Check this first before anything else
   if (message.type === 'text' && isInviteToken(rawText)) {
     await handleInvitationToken(
       phone,
@@ -215,7 +214,24 @@ export async function handleMessage(
     return;
   }
 
-  // ── Super admin check FIRST ─────────────────────────────
+  // ── ✅ FIXED: Onboarding check BEFORE super admin ───────
+  // This allows super admin to register their own school
+  // through the exact same onboarding flow as any school owner
+  const obSession = await getOnboardingSession(phone);
+  if (obSession) {
+    console.log(
+      `[Bot] Onboarding active | ` +
+      `step: ${obSession.step} | ` +
+      `phone: ${phone}`
+    );
+    const handled = await handleOnboardingInput(
+      phone, input, rawText, wa, obSession.source
+    );
+    if (handled) return;
+  }
+
+  // ── Super admin check ───────────────────────────────────
+  // Only runs if NOT in an active onboarding session
   if (isSuperAdminPhone(phone)) {
     console.log('[Bot] ✅ Super admin detected');
     await handleSuperAdminFlow(
@@ -224,32 +240,24 @@ export async function handleMessage(
     return;
   }
 
-  // ── Onboarding session check ────────────────────────────
-  const obSession = await getOnboardingSession(phone);
-  if (obSession) {
-    console.log(`[Bot] Onboarding | step: ${obSession.step}`);
-    const handled = await handleOnboardingInput(
-      phone, input, rawText, wa, obSession.source
-    );
-    if (handled) return;
-  }
-
-  // ── ✅ Payment form buttons (restored from V1) ──────────
+  // ── Payment form buttons ────────────────────────────────
   if (['form_confirm', 'form_restart'].includes(input)) {
     const { handleFormButton } =
       await import('./payment-forms.handler.ts');
     if (await handleFormButton(phone, input, wa)) return;
   }
 
-  // ── ✅ Payment form commands / active sessions ──────────
+  // ── Payment form commands / active sessions ─────────────
   const {
     checkPaymentFormCommand,
     hasActiveFormSession,
     handlePaymentFormMessage,
   } = await import('./payment-forms.handler.ts');
 
-  const isFormCmd    = await checkPaymentFormCommand(input);
-  const isFormActive = await hasActiveFormSession(phone);
+  const isFormCmd    =
+    await checkPaymentFormCommand(input);
+  const isFormActive =
+    await hasActiveFormSession(phone);
 
   if (isFormCmd || isFormActive) {
     if (await handlePaymentFormMessage(
@@ -257,13 +265,14 @@ export async function handleMessage(
     )) return;
   }
 
-  // ── ✅ Marketing session mid-flow check (restored V1) ───
+  // ── Marketing session mid-flow check ────────────────────
   if (isPlatformNumber) {
     const isMarketingActive =
-      await hasActiveMarketingSession(formatPhone(phone));
+      await hasActiveMarketingSession(
+        formatPhone(phone)
+      );
 
     if (isMarketingActive) {
-      // Only route to marketing if no real school session
       const existingSession = await sessions.get(phone);
       const hasRealSession  =
         existingSession &&
@@ -281,7 +290,9 @@ export async function handleMessage(
   if (message.type === 'document') {
     const session = await sessions.get(phone);
     if (session && session.role !== 'parent') {
-      await handleDocumentUpload(phone, session, message, wa);
+      await handleDocumentUpload(
+        phone, session, message, wa
+      );
     } else {
       await wa.text(
         phone,
@@ -294,7 +305,9 @@ export async function handleMessage(
   }
 
   // ── Only text and interactive beyond this ───────────────
-  if (!['text', 'interactive'].includes(message.type)) {
+  if (
+    !['text', 'interactive'].includes(message.type)
+  ) {
     await wa.text(
       phone,
       `I can only understand text messages\n` +
@@ -322,8 +335,7 @@ export async function handleMessage(
   }
 
   // ── Reset keywords ──────────────────────────────────────
-  // ✅ School ownership check lives INSIDE handleReset only
-  // NOT here — prevents school selector loop
+  // School ownership check lives INSIDE handleReset only
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
       phone, message, wa, waAccount, isPlatformNumber
@@ -335,7 +347,7 @@ export async function handleMessage(
   const session = await sessions.get(phone);
 
   if (!session) {
-    // No session — check if school owner (session may have expired)
+    // No session — check if school owner
     const ownedSchools = await getSchoolsByPhone(phone);
 
     if (ownedSchools.length > 0) {
@@ -355,11 +367,15 @@ export async function handleMessage(
         await checkAndGuideOnboarding(
           phone,
           ownedSchools[0],
-          await parentSvc.getWaAccount(ownedSchools[0].id),
+          await parentSvc.getWaAccount(
+            ownedSchools[0].id
+          ),
           wa
         );
       } else {
-        await showSchoolSelector(phone, ownedSchools, wa);
+        await showSchoolSelector(
+          phone, ownedSchools, wa
+        );
       }
       return;
     }
@@ -367,7 +383,9 @@ export async function handleMessage(
     // Not a school owner — marketing or reset
     if (isPlatformNumber) {
       const isMarketingUser =
-        await hasActiveMarketingSession(formatPhone(phone));
+        await hasActiveMarketingSession(
+          formatPhone(phone)
+        );
       if (isMarketingUser) {
         await handleMarketingMessage(message);
         return;
@@ -394,7 +412,9 @@ export async function handleMessage(
 
   // ── Route by role ───────────────────────────────────────
   if (session.role === 'parent') {
-    await routeParent(phone, session, input, rawText, wa);
+    await routeParent(
+      phone, session, input, rawText, wa
+    );
   } else {
     await routeAdmin(
       phone, session, input, rawText, wa, waAccount
@@ -404,6 +424,8 @@ export async function handleMessage(
 
 // ============================================================
 // SUPER ADMIN FLOW
+// ✅ Onboarding is handled BEFORE this in handleMessage()
+// ✅ This only runs when NOT in active onboarding
 // ============================================================
 
 async function handleSuperAdminFlow(
@@ -415,7 +437,7 @@ async function handleSuperAdminFlow(
   wa:        WhatsApp
 ): Promise<void> {
 
-  // EXIT test mode
+  // ── EXIT test mode ──────────────────────────────────────
   if (rawText.trim().toUpperCase() === 'EXIT') {
     const testMode = await isSuperAdminTestMode(phone);
     if (testMode.active) {
@@ -430,6 +452,7 @@ async function handleSuperAdminFlow(
     }
   }
 
+  // ── Check test mode ─────────────────────────────────────
   const testMode = await isSuperAdminTestMode(phone);
 
   if (testMode.active) {
@@ -468,7 +491,7 @@ async function handleSuperAdminFlow(
     }
   }
 
-  // Build / fetch super admin session
+  // ── Build super admin session ───────────────────────────
   let dbSession = await sessions.get(phone);
 
   if (!dbSession) {
@@ -494,7 +517,8 @@ async function handleSuperAdminFlow(
 
     if (error) {
       console.error(
-        '[SuperAdmin] Session upsert error:', error.message
+        '[SuperAdmin] Session upsert error:',
+        error.message
       );
     }
 
@@ -538,16 +562,19 @@ async function handleSuperAdminFlow(
     waAccount,
   } as BotSession;
 
+  // ── Reset keywords → show super admin menu ──────────────
   if (!input || RESET_KEYWORDS.has(input)) {
     await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
+  // ── Back / menu shortcuts ───────────────────────────────
   if (['0', 'back', 'main_menu'].includes(input)) {
     await showSuperAdminMenu(phone, session, wa);
     return;
   }
 
+  // ── Broadcast compose ───────────────────────────────────
   if (session.sub_state === 'SA_BROADCAST_COMPOSE') {
     await handleSuperAdminBroadcast(
       phone, session, rawText, wa
@@ -555,6 +582,7 @@ async function handleSuperAdminFlow(
     return;
   }
 
+  // ── Route to super admin menu handler ───────────────────
   await handleSuperAdminMenu(
     phone, session, input, rawText, wa
   );
@@ -563,7 +591,6 @@ async function handleSuperAdminFlow(
 // ============================================================
 // RESET / IDENTIFY USER
 // ✅ School ownership check lives HERE only
-// ✅ Runs only on reset keywords — prevents selector loop
 // ============================================================
 
 async function handleReset(
@@ -578,10 +605,11 @@ async function handleReset(
   const parent = await parentSvc.findByPhone(phone);
 
   if (parent) {
-    const [students, schoolWaAccount] = await Promise.all([
-      parentSvc.getStudents(parent.id),
-      parentSvc.getWaAccount(parent.school_id),
-    ]);
+    const [students, schoolWaAccount] =
+      await Promise.all([
+        parentSvc.getStudents(parent.id),
+        parentSvc.getWaAccount(parent.school_id),
+      ]);
 
     const contactId =
       await parentSvc.ensureContact(parent, phone);
@@ -599,7 +627,11 @@ async function handleReset(
       phone, parent, students, schoolWaAccount
     );
 
-    await showMainMenu(phone, session, new WhatsApp(schoolWaAccount));
+    await showMainMenu(
+      phone,
+      session,
+      new WhatsApp(schoolWaAccount)
+    );
     return;
   }
 
@@ -608,7 +640,8 @@ async function handleReset(
 
   if (ownedSchools.length > 0) {
     console.log(
-      `[Bot] ✅ School owner — ${ownedSchools.length} school(s)`
+      `[Bot] ✅ School owner — ` +
+      `${ownedSchools.length} school(s)`
     );
 
     try {
@@ -622,7 +655,9 @@ async function handleReset(
       await checkAndGuideOnboarding(
         phone,
         ownedSchools[0],
-        await parentSvc.getWaAccount(ownedSchools[0].id),
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
         wa
       );
     } else {
@@ -632,11 +667,14 @@ async function handleReset(
   }
 
   // 3. Staff / admin
-  const schoolUser = await adminSvc.findStaffByPhone(phone);
+  const schoolUser =
+    await adminSvc.findStaffByPhone(phone);
 
   if (schoolUser) {
     const schoolWaAccount =
-      await parentSvc.getWaAccount(schoolUser.school_id);
+      await parentSvc.getWaAccount(
+        schoolUser.school_id
+      );
 
     const isAdmin   = adminSvc.isAdmin(schoolUser);
     const isTeacher = adminSvc.isTeacher(schoolUser);
@@ -660,7 +698,9 @@ async function handleReset(
     );
 
     await showAdminMenu(
-      phone, session, new WhatsApp(schoolWaAccount)
+      phone,
+      session,
+      new WhatsApp(schoolWaAccount)
     );
     return;
   }
@@ -700,7 +740,9 @@ async function getSchoolsByPhone(
 
   return data
     .map((r) => r.schools as unknown as SchoolInfo)
-    .filter((s) => s !== null && s.id !== undefined);
+    .filter(
+      (s) => s !== null && s.id !== undefined
+    );
 }
 
 async function checkAndGuideOnboarding(
@@ -747,8 +789,14 @@ async function checkAndGuideOnboarding(
       phone,
       `Would you like to complete your setup?`,
       [
-        { id: 'RESUME_SETUP_FEE',  title: '💳 Pay Setup Fee'    },
-        { id: 'CONTACT_SUPPORT',   title: '📞 Contact Support'  },
+        {
+          id:    'RESUME_SETUP_FEE',
+          title: '💳 Pay Setup Fee',
+        },
+        {
+          id:    'CONTACT_SUPPORT',
+          title: '📞 Contact Support',
+        },
       ]
     );
 
@@ -777,7 +825,7 @@ async function checkAndGuideOnboarding(
   if (!waConnected) {
     const appUrl = Deno.env.get('APP_URL') ?? '';
 
-    // ✅ Check for valid (non-expired) token first
+    // Check for valid non-expired token first
     const { data: existingToken } = await db
       .from('school_activation_tokens')
       .select('token, expires_at')
@@ -812,7 +860,8 @@ async function checkAndGuideOnboarding(
 
       if (tokenError) {
         console.error(
-          '[Bot] Token insert error:', tokenError.message
+          '[Bot] Token insert error:',
+          tokenError.message
         );
       }
 
@@ -885,7 +934,9 @@ async function checkAndGuideOnboarding(
   );
 
   await showAdminMenu(
-    phone, session, new WhatsApp(schoolWaAccount as never)
+    phone,
+    session,
+    new WhatsApp(schoolWaAccount as never)
   );
 }
 
@@ -957,14 +1008,16 @@ async function switchToSchool(
   const { data: school } = await db
     .from('schools')
     .select(
-      'id, name, is_active, onboarding_status, setup_fee_paid'
+      'id, name, is_active, ' +
+      'onboarding_status, setup_fee_paid'
     )
     .eq('id', schoolId)
     .single();
 
   if (!school) {
     await wa.text(
-      phone, `❌ School not found. Please try again.`
+      phone,
+      `❌ School not found. Please try again.`
     );
     return;
   }
@@ -973,7 +1026,10 @@ async function switchToSchool(
     await parentSvc.getWaAccount(schoolId);
 
   await checkAndGuideOnboarding(
-    phone, school as SchoolInfo, schoolWaAccount, wa
+    phone,
+    school as SchoolInfo,
+    schoolWaAccount,
+    wa
   );
 }
 
@@ -1004,7 +1060,7 @@ async function showSchoolUnknownUser(
     `Your number is not registered yet.\n\n` +
     `Are you a:`,
     [
-      { id: 'IM_A_PARENT',       title: '👨‍👩‍👧 Parent'      },
+      { id: 'IM_A_PARENT',       title: '👨‍👩‍👧 Parent'       },
       { id: 'ENTER_INVITE_CODE', title: '🔑 I Have a Code' },
     ],
     schoolName,
@@ -1036,31 +1092,45 @@ async function routeParent(
   switch (session.state) {
 
     case 'MAIN_MENU':
-      await handleParentMainMenu(phone, session, input, wa);
+      await handleParentMainMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ATTENDANCE_SELECT_STUDENT':
-      await attStudentSelect(phone, session, input, wa);
+      await attStudentSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'ATTENDANCE_OPTIONS':
-      await handleAttendanceOption(phone, session, input, wa);
+      await handleAttendanceOption(
+        phone, session, input, wa
+      );
       break;
 
     case 'FEES_SELECT_STUDENT':
-      await feesStudentSelect(phone, session, input, wa);
+      await feesStudentSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'FEES_OPTIONS':
-      await handleFeesOption(phone, session, input, wa);
+      await handleFeesOption(
+        phone, session, input, wa
+      );
       break;
 
     case 'FEES_SELECT_INVOICE':
-      await handleInvoiceSelect(phone, session, input, wa);
+      await handleInvoiceSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'FEES_CONFIRM_PAY':
-      await handleConfirmPay(phone, session, input, wa);
+      await handleConfirmPay(
+        phone, session, input, wa
+      );
       break;
 
     case 'PAYMENT_PENDING':
@@ -1068,7 +1138,9 @@ async function routeParent(
       break;
 
     case 'PICKUP_SELECT_STUDENT':
-      await pickupStudentSelect(phone, session, input, wa);
+      await pickupStudentSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'PICKUP_VIEW':
@@ -1077,7 +1149,9 @@ async function routeParent(
 
     case 'ALERT_PLAN_SELECT':
       if (input.startsWith('plan_')) {
-        await handlePlanSelect(phone, session, input, wa);
+        await handlePlanSelect(
+          phone, session, input, wa
+        );
       } else {
         await showAlertPlans(phone, session, wa);
       }
@@ -1094,8 +1168,10 @@ async function showParentNotRegistered(
   session: BotSession
 ): Promise<void> {
   const schoolName =
-    (session.parent?.schools?.name as string | undefined) ??
-    'the school';
+    (
+      session.parent?.schools?.name as
+        string | undefined
+    ) ?? 'the school';
 
   await wa.text(
     phone,
@@ -1144,7 +1220,9 @@ async function handleParentMainMenu(
     case 'plan':
     case 'upgrade':
       await showAlertPlans(phone, session, wa);
-      await sessions.setState(phone, 'ALERT_PLAN_SELECT');
+      await sessions.setState(
+        phone, 'ALERT_PLAN_SELECT'
+      );
       break;
 
     case 'menu_help':
@@ -1170,9 +1248,8 @@ async function handleParentMainMenu(
 
 // ============================================================
 // ADMIN ROUTING
-// ✅ `message` variable removed — document handled separately
-// ✅ All states from V2 preserved
-// ✅ AWAITING_WA_CONNECTION state handler added
+// ✅ Added missing score upload states
+// ✅ All states from types.ts covered
 // ============================================================
 
 async function routeAdmin(
@@ -1231,14 +1308,19 @@ async function routeAdmin(
         phone:             formatPhone(phone),
         step:              'SHOW_SETUP_FEE' as const,
         source:            'main'            as const,
-        contactName:       onboarding?.admin_name    ?? null,
-        schoolName:        schoolData?.name          ?? null,
-        studentCount:      schoolData?.student_count ?? null,
+        contactName:
+          onboarding?.admin_name    ?? null,
+        schoolName:
+          schoolData?.name          ?? null,
+        studentCount:
+          schoolData?.student_count ?? null,
         studentCountRange: null,
         schoolType:        null,
         location:          null,
-        email:             onboarding?.admin_email   ?? null,
-        schoolId:          session.school_id          ?? null,
+        email:
+          onboarding?.admin_email   ?? null,
+        schoolId:
+          session.school_id          ?? null,
         setupFeePaid:      false,
         tempData:          {},
         lastActivity:      Date.now(),
@@ -1263,13 +1345,15 @@ async function routeAdmin(
       return;
     }
 
-    // Recheck status for any other input
+    // Recheck status
     const ownedSchools = await getSchoolsByPhone(phone);
     if (ownedSchools.length >= 1) {
       await checkAndGuideOnboarding(
         phone,
         ownedSchools[0],
-        await parentSvc.getWaAccount(ownedSchools[0].id),
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
         wa
       );
     }
@@ -1292,13 +1376,15 @@ async function routeAdmin(
       return;
     }
 
-    // Recheck connection for any other input
+    // Recheck connection
     const ownedSchools = await getSchoolsByPhone(phone);
     if (ownedSchools.length >= 1) {
       await checkAndGuideOnboarding(
         phone,
         ownedSchools[0],
-        await parentSvc.getWaAccount(ownedSchools[0].id),
+        await parentSvc.getWaAccount(
+          ownedSchools[0].id
+        ),
         wa
       );
     }
@@ -1309,34 +1395,50 @@ async function routeAdmin(
   switch (session.state) {
 
     case 'ADMIN_MAIN_MENU':
-      await handleAdminMainMenu(phone, session, input, wa);
+      await handleAdminMainMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_ATTENDANCE_MENU':
-      await handleAdminAttMenu(phone, session, input, wa);
+      await handleAdminAttMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_ATTENDANCE_SELECT_CLASS':
-      await handleClassSelect(phone, session, input, wa);
+      await handleClassSelect(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_ATTENDANCE_MARKING':
-      await handleMarking(phone, session, input, wa);
+      await handleMarking(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_FEES_MENU':
-      await handleAdminFeesMenu(phone, session, input, wa);
+      await handleAdminFeesMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_STUDENTS_SEARCH':
-      await handleStudentSearch(phone, session, rawText, wa);
+      await handleStudentSearch(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_FEES_SELECT_STUDENT':
       if (input.startsWith('student_')) {
-        await handleFeesStudentSelect(phone, session, input, wa);
+        await handleFeesStudentSelect(
+          phone, session, input, wa
+        );
       } else if (input.startsWith('record_pay_')) {
-        await handleRecordPayment(phone, session, input, wa);
+        await handleRecordPayment(
+          phone, session, input, wa
+        );
       } else {
         await startAdminFees(phone, session, wa);
       }
@@ -1344,9 +1446,13 @@ async function routeAdmin(
 
     case 'ADMIN_FEES_RECORD_PAYMENT':
       if (input.startsWith('paymethod_')) {
-        await handlePayMethod(phone, session, input, wa);
+        await handlePayMethod(
+          phone, session, input, wa
+        );
       } else if (input.startsWith('record_pay_')) {
-        await handleRecordPayment(phone, session, input, wa);
+        await handleRecordPayment(
+          phone, session, input, wa
+        );
       } else {
         await startAdminFees(phone, session, wa);
       }
@@ -1354,53 +1460,75 @@ async function routeAdmin(
 
     case 'ADMIN_FEES_AWAITING_CONFIRM':
       if (input.startsWith('confirm_pay_')) {
-        await confirmPayment(phone, session, input, wa);
+        await confirmPayment(
+          phone, session, input, wa
+        );
       } else if (input.startsWith('paymethod_')) {
-        await handlePayMethod(phone, session, input, wa);
+        await handlePayMethod(
+          phone, session, input, wa
+        );
       } else {
         await startAdminFees(phone, session, wa);
       }
       break;
 
     case 'ADMIN_STAFF_MENU':
-      await handleStaffMenu(phone, session, input, wa);
+      await handleStaffMenu(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_ADDING_STAFF_NAME':
-      await handleAddStaffName(phone, session, rawText, wa);
+      await handleAddStaffName(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_ADDING_STAFF_PHONE':
-      await handleAddStaffPhone(phone, session, rawText, wa);
+      await handleAddStaffPhone(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_ADDING_STAFF_ROLE':
-      await handleAddStaffRole(phone, session, input, wa);
+      await handleAddStaffRole(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_BROADCAST_MENU':
       if (input.startsWith('bcast_class_')) {
-        await handleBroadcastTarget(phone, session, input, wa);
+        await handleBroadcastTarget(
+          phone, session, input, wa
+        );
       } else {
-        await handleBroadcastMenu(phone, session, input, wa);
+        await handleBroadcastMenu(
+          phone, session, input, wa
+        );
       }
       break;
 
     case 'ADMIN_BROADCAST_COMPOSE':
-      await handleBroadcastCompose(phone, session, rawText, wa);
+      await handleBroadcastCompose(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_BROADCAST_CONFIRM':
-      await handleBroadcastConfirm(phone, session, input, wa);
+      await handleBroadcastConfirm(
+        phone, session, input, wa
+      );
       break;
 
     case 'ADMIN_UPLOAD_MENU':
-      await handleUploadMenu(phone, session, input, wa);
+      await handleUploadMenu(
+        phone, session, input, wa
+      );
       break;
 
-    // ✅ Document states — just prompt; file handled
-    // by handleDocumentUpload() when message.type === 'document'
     case 'ADMIN_AWAITING_CSV':
+      // Document handled by handleDocumentUpload()
+      // This fires when user sends TEXT in this state
       await wa.text(
         phone,
         `📤 Please send your *CSV file*\n` +
@@ -1410,9 +1538,12 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_CONFIRM_UPLOAD':
-      await handleConfirmUpload(phone, session, input, wa);
+      await handleConfirmUpload(
+        phone, session, input, wa
+      );
       break;
 
+    // ✅ FIXED: Score upload states now handled
     case 'ADMIN_SCORE_UPLOAD_TERM_SELECT':
       await handleScoreUploadTermSelect(
         phone, session, input, wa
@@ -1420,6 +1551,8 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_SCORE_CSV':
+      // Document handled by handleDocumentUpload()
+      // This fires when user sends TEXT in this state
       await wa.text(
         phone,
         `📤 Please send your *score CSV*\n` +
@@ -1436,11 +1569,17 @@ async function routeAdmin(
 
     case 'ADMIN_REPORTS_MENU':
       if (input.startsWith('report_term_')) {
-        await handleReportTermSelect(phone, session, input, wa);
+        await handleReportTermSelect(
+          phone, session, input, wa
+        );
       } else if (input.startsWith('rpt_class_sel_')) {
-        await handleClassReportSelect(phone, session, input, wa);
+        await handleClassReportSelect(
+          phone, session, input, wa
+        );
       } else if (input.startsWith('rpt_')) {
-        await handleReportTypeSelect(phone, session, input, wa);
+        await handleReportTypeSelect(
+          phone, session, input, wa
+        );
       } else {
         await startReports(phone, session, wa);
       }
@@ -1465,14 +1604,20 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_RECEIPT_SEARCH':
-      await handleReceiptSearch(phone, session, rawText, wa);
+      await handleReceiptSearch(
+        phone, session, rawText, wa
+      );
       break;
 
     case 'ADMIN_RECEIPT_VIEW':
       if (input.startsWith('gen_receipt_')) {
-        await handleGenerateReceipt(phone, session, input, wa);
+        await handleGenerateReceipt(
+          phone, session, input, wa
+        );
       } else if (input.startsWith('send_receipt_')) {
-        await handleSendReceipt(phone, session, input, wa);
+        await handleSendReceipt(
+          phone, session, input, wa
+        );
       } else {
         await startReceiptMgmt(phone, session, wa);
       }
@@ -1552,9 +1697,12 @@ async function handleAdminMainMenu(
       break;
 
     case 'switch_school': {
-      const ownedSchools = await getSchoolsByPhone(phone);
+      const ownedSchools =
+        await getSchoolsByPhone(phone);
       if (ownedSchools.length > 1) {
-        await showSchoolSelector(phone, ownedSchools, wa);
+        await showSchoolSelector(
+          phone, ownedSchools, wa
+        );
       } else {
         await wa.text(
           phone,
@@ -1573,7 +1721,6 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // DOCUMENT UPLOAD HANDLER
-// ✅ Receives message object correctly — no scope issues
 // ============================================================
 
 async function handleDocumentUpload(
@@ -1583,8 +1730,12 @@ async function handleDocumentUpload(
   wa:      WhatsApp
 ): Promise<void> {
   if (session.state === 'ADMIN_AWAITING_CSV') {
-    await handleCSVDocument(phone, session, message, wa);
-  } else if (session.state === 'ADMIN_AWAITING_SCORE_CSV') {
+    await handleCSVDocument(
+      phone, session, message, wa
+    );
+  } else if (
+    session.state === 'ADMIN_AWAITING_SCORE_CSV'
+  ) {
     await handleScoreCSVDocument(
       phone, session, message, wa
     );
@@ -1642,12 +1793,16 @@ export function extractInput(
   message: IncomingMessage
 ): string {
   if (message.type === 'text') {
-    return message.text?.body?.trim().toLowerCase() ?? '';
+    return (
+      message.text?.body?.trim().toLowerCase() ?? ''
+    );
   }
   if (message.type === 'interactive') {
     return (
-      message.interactive?.button_reply?.id?.toLowerCase() ??
-      message.interactive?.list_reply?.id?.toLowerCase() ??
+      message.interactive?.button_reply?.id
+        ?.toLowerCase() ??
+      message.interactive?.list_reply?.id
+        ?.toLowerCase() ??
       ''
     );
   }
