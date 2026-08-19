@@ -1976,8 +1976,14 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // DOCUMENT UPLOAD HANDLER
-// ✅ CRITICAL FIX: Uses PLATFORM token for media download
-// ✅ Uses SCHOOL WA token for sending replies
+// ✅ FIX: Downloads media using the WhatsApp account that
+//    actually RECEIVED the message (platform OR the school's
+//    own connected number), instead of always assuming the
+//    platform number. WhatsApp media IDs are scoped to the
+//    WABA/app that received them — using the wrong token
+//    returns 401 and downloadMedia() silently returns null,
+//    which is why CSV uploads were failing for any school
+//    using its own connected WhatsApp number.
 // ✅ Auto-routes CSV in any admin state
 // ✅ Detailed logging
 // ============================================================
@@ -2002,19 +2008,14 @@ async function handleDocumentUpload(
     `  isCSV: ${isCSV}`
   );
 
-  // ✅ CRITICAL: Always use PLATFORM WhatsApp
-  // for media downloads.
-  //
-  // WHY: WhatsApp media files are tied to the
-  // phone_number_id that RECEIVED the message.
-  // The webhook always comes through the PLATFORM
-  // number. So the platform token must be used
-  // to download the file — the school token
-  // will return 401 Unauthorized.
-  //
-  // wa (school token)     → send replies
-  // platformWa (platform) → download files
-  const platformWa = getPlatformWhatsApp();
+  // ✅ FIX: `wa` was already built (in handleMessage) from the
+  // waAccount that received this specific message — platform
+  // account if it came through the shared platform number,
+  // or the school's own account if they connected their own
+  // WhatsApp Business number. That token is always the correct
+  // one for downloading media tied to this message, so we use
+  // it for both the download and the reply. No separate
+  // "platform-only" token needed.
 
   // ── Direct state matches ────────────────────────────────
   if (session.state === 'ADMIN_AWAITING_CSV') {
@@ -2022,8 +2023,8 @@ async function handleDocumentUpload(
       phone,
       session,
       message,
-      platformWa,   // platform token for download
-      wa            // school token for replies
+      wa,   // correct account token for download
+      wa    // same account for replies
     );
     return;
   }
@@ -2033,8 +2034,8 @@ async function handleDocumentUpload(
       phone,
       session,
       message,
-      platformWa,   // platform token for download
-      wa            // school token for replies
+      wa,   // correct account token for download
+      wa    // same account for replies
     );
     return;
   }
@@ -2064,8 +2065,8 @@ async function handleDocumentUpload(
       phone,
       updatedSession,
       message,
-      platformWa,   // platform token for download
-      wa            // school token for replies
+      wa,   // correct account token for download
+      wa    // same account for replies
     );
     return;
   }
