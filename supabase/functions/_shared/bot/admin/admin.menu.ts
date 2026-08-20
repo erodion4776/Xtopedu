@@ -2,6 +2,7 @@
 // SCHOOLBOT - ADMIN MAIN MENU
 // supabase/functions/_shared/bot/admin/admin.menu.ts
 // ✅ Added: Create/Manage Fees option
+// ✅ Added: School Branding customization option
 // ✅ Added: Switch School for multi-school owners
 // ============================================================
 
@@ -101,7 +102,7 @@ export async function showAdminMenu(
             {
               id:          'ADMIN_MORE',
               title:       '➡️ More Features',
-              description: 'Reports, upload & help',
+              description: 'Branding, reports, upload',
             },
           ],
         },
@@ -156,6 +157,7 @@ export async function showAdminMenu(
 }
 
 // ─── More features menu ────────────────────────────────────
+// ✅ Now includes School Branding as a top option
 // ✅ Shows Switch School if admin owns multiple schools
 export async function showAdminMoreMenu(
   phone:   string,
@@ -180,7 +182,13 @@ export async function showAdminMoreMenu(
     });
   }
 
+  // ✅ NEW: School Branding (top priority for customization)
   rows.push(
+    {
+      id:          'ADMIN_CUSTOMIZATION',
+      title:       '🎨 School Branding',
+      description: 'Logo, stamp, colors & photos',
+    },
     {
       id:          'ADMIN_UPLOAD',
       title:       '📤 Upload Students',
@@ -261,6 +269,12 @@ export async function showAdminHelp(
     `• View outstanding invoices\n` +
     `• Record cash or bank payments\n` +
     `• View collection reports\n\n` +
+    `📌 *School Branding:*\n` +
+    `• Upload logo, stamp, signature\n` +
+    `• Set school motto & principal name\n` +
+    `• Upload student passport photos\n` +
+    `• Customize grade scale\n` +
+    `• Add custom document footers\n\n` +
     `📌 *Staff:*\n` +
     `• Add teacher → they get invite code\n` +
     `• Teacher sends code to this bot\n` +
