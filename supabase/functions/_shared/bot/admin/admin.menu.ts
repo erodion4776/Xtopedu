@@ -1,7 +1,8 @@
 // ============================================================
 // SCHOOLBOT - ADMIN MAIN MENU
 // supabase/functions/_shared/bot/admin/admin.menu.ts
-// ✅ Switch School button added for multi-school owners
+// ✅ Added: Create/Manage Fees option
+// ✅ Added: Switch School for multi-school owners
 // ============================================================
 
 import { WhatsApp }       from '../../whatsapp.ts';
@@ -39,7 +40,7 @@ export async function showAdminMenu(
   );
 
   if (isAdmin) {
-    // ✅ 8 rows max
+    // ✅ 10 rows max — split across sections
     await wa.list(
       phone,
       `🏫 ${schoolName} — Admin`,
@@ -68,14 +69,14 @@ export async function showAdminMenu(
           title: '💰 Finance',
           rows: [
             {
-              id:          'ADMIN_FEES',
-              title:       '💰 Fees & Payments',
-              description: 'View & record payments',
+              id:          'ADMIN_FEE_SETUP',
+              title:       '💰 Create/Manage Fees',
+              description: 'Tuition, uniform, books, etc.',
             },
             {
-              id:          'ADMIN_FEE_STATS',
-              title:       '📊 Fee Report',
-              description: 'Collection summary',
+              id:          'ADMIN_FEES',
+              title:       '💳 Record Payments',
+              description: 'Search & record payments',
             },
             {
               id:          'ADMIN_RECEIPTS',
@@ -161,11 +162,8 @@ export async function showAdminMoreMenu(
   session: BotSession,
   wa:      WhatsApp
 ): Promise<void> {
-  // Check how many schools this phone owns
   const schoolCount =
-    await getSchoolCountForPhone(
-      session.school_id
-    );
+    await getSchoolCountForPhone(session.school_id);
 
   const rows: Array<{
     id:          string;
@@ -197,6 +195,11 @@ export async function showAdminMoreMenu(
       id:          'ADMIN_REPORTS',
       title:       '📊 Term Reports',
       description: 'Attendance & fee reports',
+    },
+    {
+      id:          'ADMIN_FEE_STATS',
+      title:       '📊 Fee Report',
+      description: 'Collection summary',
     },
     {
       id:          'ADMIN_TODAY_REPORT',
@@ -247,7 +250,13 @@ export async function showAdminHelp(
     `• ✅ Present  ❌ Absent\n` +
     `• ⏰ Late     📋 Excused\n` +
     `• Parents notified automatically\n\n` +
-    `📌 *Fees:*\n` +
+    `📌 *Fees Setup:*\n` +
+    `• Create tuition, uniform, books, etc.\n` +
+    `• Bill entire school, one class, or\n` +
+    `  individual students\n` +
+    `• Use templates for quick setup\n` +
+    `• Parents pay via Paystack instantly\n\n` +
+    `📌 *Record Payments:*\n` +
     `• Search student by name or adm no\n` +
     `• View outstanding invoices\n` +
     `• Record cash or bank payments\n` +
@@ -311,8 +320,8 @@ export async function showTodayReport(
     `━━━━━━━━━━━━━━━━`,
     [
       { id: 'ADMIN_ATTENDANCE', title: '✅ Attendance' },
-      { id: 'ADMIN_FEES',       title: '💰 Fees' },
-      { id: 'MAIN_MENU',        title: '🏠 Menu' },
+      { id: 'ADMIN_FEES',       title: '💰 Fees'       },
+      { id: 'MAIN_MENU',        title: '🏠 Menu'       },
     ]
   );
 }
@@ -346,8 +355,9 @@ export async function showFeeStats(
     `⏳ Pending:        *${stats.pendingCount}*\n` +
     `━━━━━━━━━━━━━━━━`,
     [
-      { id: 'ADMIN_FEES', title: '💰 Manage Fees' },
-      { id: 'MAIN_MENU',  title: '🏠 Menu' },
+      { id: 'ADMIN_FEE_SETUP', title: '💰 Create Fees' },
+      { id: 'ADMIN_FEES',      title: '💳 Payments'    },
+      { id: 'MAIN_MENU',       title: '🏠 Menu'        },
     ]
   );
 }
