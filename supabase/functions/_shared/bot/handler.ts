@@ -1,12 +1,13 @@
 // ============================================================
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
+// ✅ Added: Image upload routes for branding
+// ✅ Added: Passport upload routes for students
+// ✅ Added: School customization menu routes
+// ✅ Added: Grade scale customization
 // ✅ Fixed: Platform token used for media downloads
+// ✅ Fixed: School token used for sending replies
 // ✅ Fixed: CSV auto-routed in any admin state
-// ✅ Fixed: Onboarding check BEFORE super admin
-// ✅ Fixed: Super admin school mode works correctly
-// ✅ Added: All fee setup states and handlers
-// ✅ Added: Individual student billing routes
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -73,7 +74,7 @@ import {
   confirmPayment,
 } from './admin/admin.fees.ts';
 
-// ✅ NEW: Fee setup imports
+// ✅ Fee setup imports
 import {
   startFeeSetup,
   handleFeeSetupMenu,
@@ -88,6 +89,18 @@ import {
   handleIndividualFeeAmount,
   confirmIndividualFee,
 } from './admin/admin.fee.setup.ts';
+
+// ✅ NEW: Customization imports
+import {
+  startCustomization,
+  handleCustomizationMenu,
+  handleImageUpload,
+  handleTextInput,
+  handleGradeScaleSelect,
+  handlePassportStudentSearch,
+  handlePassportStudentSelect,
+  handlePassportUpload,
+} from './admin/admin.customization.ts';
 
 import {
   startStaffMgmt,
@@ -224,6 +237,20 @@ function isCSVFile(
 }
 
 // ============================================================
+// GET PLATFORM WHATSAPP INSTANCE
+// ============================================================
+
+function getPlatformWhatsApp(): WhatsApp {
+  return new WhatsApp({
+    phone_number_id:
+      Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
+    access_token:
+      Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
+    status: 'active',
+  });
+}
+
+// ============================================================
 // MAIN ENTRY POINT
 // ============================================================
 
@@ -274,8 +301,6 @@ export async function handleMessage(
 
   // ── 2. Super admin ──────────────────────────────────────
   // Must be BEFORE reset keywords
-  // When super admin is in school mode,
-  // "hi"/"menu" must go to school panel not handleReset()
   if (isSuperAdminPhone(phone)) {
     console.log('[Bot] ✅ Super admin detected');
     await handleSuperAdminFlow(
@@ -300,7 +325,7 @@ export async function handleMessage(
     handlePaymentFormMessage,
   } = await import('./payment-forms.handler.ts');
 
-  const isFormCmd    =
+  const isFormCmd =
     await checkPaymentFormCommand(input);
   const isFormActive =
     await hasActiveFormSession(phone);
@@ -332,7 +357,38 @@ export async function handleMessage(
     }
   }
 
-  // ── Document uploads ────────────────────────────────────
+  // ✅ NEW: Image uploads (for branding, passports) ────────
+  if (message.type === 'image') {
+    const session = await sessions.get(phone);
+    if (
+      session &&
+      session.role !== 'parent' &&
+      (session.state === 'ADMIN_AWAITING_IMAGE' ||
+       session.state === 'ADMIN_AWAITING_PASSPORT')
+    ) {
+      if (session.state === 'ADMIN_AWAITING_IMAGE') {
+        await handleImageUpload(
+          phone, session, message, wa, wa
+        );
+      } else {
+        await handlePassportUpload(
+          phone, session, message, wa, wa
+        );
+      }
+      return;
+    }
+
+    await wa.text(
+      phone,
+      `📷 Image received but not expected.\n\n` +
+      `Go to *Admin Menu → More Features → ` +
+      `School Branding* to upload logos or\n` +
+      `student photos.`
+    );
+    return;
+  }
+
+  // ── Document uploads (CSVs, images-as-documents) ────────
   if (message.type === 'document') {
     const session = await sessions.get(phone);
     if (session && session.role !== 'parent') {
@@ -381,7 +437,6 @@ export async function handleMessage(
   }
 
   // ── Reset keywords ──────────────────────────────────────
-  // Super admin never reaches here — handled above
   if (!input || RESET_KEYWORDS.has(input)) {
     await handleReset(
       phone, message, wa, waAccount, isPlatformNumber
@@ -479,7 +534,6 @@ async function handleSuperAdminFlow(
   wa:        WhatsApp
 ): Promise<void> {
 
-  // ── EXIT school / test mode ─────────────────────────────
   if (rawText.trim().toUpperCase() === 'EXIT') {
     const testMode = await isSuperAdminTestMode(phone);
     if (testMode.active) {
@@ -532,7 +586,6 @@ async function handleSuperAdminFlow(
   );
 }
 
-// ─── Build super admin session and handle input ────────────
 async function buildAndShowSuperAdminMenu(
   phone:     string,
   waAccount: WhatsAppAccount | null,
@@ -670,7 +723,6 @@ async function handleSuperAdminSchoolMode(
 
   const schoolWa = new WhatsApp(schoolWaData as never);
 
-  // ── PARENT MODE ─────────────────────────────────────────
   if (role === 'parent') {
     const { data: parent } = await db
       .from('parents')
@@ -777,15 +829,18 @@ async function handleSuperAdminSchoolMode(
       .eq('phone', formatPhone(phone));
   }
 
+  const virtualProfileId = crypto.randomUUID();
+  const virtualUserId    = crypto.randomUUID();
+
   const adminUser = {
-    id:        `sa-own-${schoolId}`,
+    id:        virtualProfileId,
     school_id: schoolId,
-    user_id:   `sa-own-${schoolId}`,
+    user_id:   virtualUserId,
     role_id:   'admin',
     status:    'active',
     roles:     { id: 'admin', name: 'admin' },
     profiles: {
-      id:         `sa-own-${schoolId}`,
+      id:         virtualProfileId,
       full_name:  'School Admin',
       phone,
       avatar_url: null,
@@ -811,8 +866,31 @@ async function handleSuperAdminSchoolMode(
     waAccount:  schoolWaData as never,
   };
 
+  // ✅ Image uploads in school mode
+  if (message.type === 'image') {
+    if (
+      adminSession.state === 'ADMIN_AWAITING_IMAGE'
+    ) {
+      await handleImageUpload(
+        phone, adminSession, message, schoolWa, schoolWa
+      );
+    } else if (
+      adminSession.state === 'ADMIN_AWAITING_PASSPORT'
+    ) {
+      await handlePassportUpload(
+        phone, adminSession, message, schoolWa, schoolWa
+      );
+    } else {
+      await schoolWa.text(
+        phone,
+        `📷 Image received but not expected.\n\n` +
+        `Go to School Branding to upload.`
+      );
+    }
+    return;
+  }
+
   // Document uploads in school mode
-  // Checked BEFORE the empty-input fallback below
   if (message.type === 'document') {
     await handleDocumentUpload(
       phone, adminSession, message, schoolWa
@@ -1014,7 +1092,6 @@ async function checkAndGuideOnboarding(
     `wa_connected=${waConnected}`
   );
 
-  // ── Setup fee NOT paid ────────────────────────────────
   if (!school.setup_fee_paid) {
     await wa.text(
       phone,
@@ -1069,7 +1146,6 @@ async function checkAndGuideOnboarding(
     return;
   }
 
-  // ── Fee paid but WhatsApp not connected ───────────────
   if (!waConnected) {
     const appUrl = Deno.env.get('APP_URL') ?? '';
 
@@ -1153,7 +1229,6 @@ async function checkAndGuideOnboarding(
     return;
   }
 
-  // ── Fully set up — create admin session ───────────────
   const adminUser = {
     id:        `admin-${school.id}`,
     school_id: school.id,
@@ -1495,6 +1570,8 @@ async function handleParentMainMenu(
 // ADMIN ROUTING
 // ✅ Added: All fee setup states
 // ✅ Added: Individual student billing states
+// ✅ Added: All customization states
+// ✅ Added: Image and passport upload states
 // ============================================================
 
 async function routeAdmin(
@@ -1506,7 +1583,6 @@ async function routeAdmin(
   waAccount?: WhatsAppAccount | null
 ): Promise<void> {
 
-  // ── School selector ─────────────────────────────────────
   if (session.state === 'SELECT_SCHOOL') {
     if (input.startsWith('select_school_')) {
       await switchToSchool(
@@ -1533,7 +1609,6 @@ async function routeAdmin(
     return;
   }
 
-  // ── Awaiting setup fee ──────────────────────────────────
   if (session.state === 'AWAITING_SETUP_FEE') {
     if (input === 'resume_setup_fee') {
       const { data: schoolData } = await db
@@ -1603,7 +1678,6 @@ async function routeAdmin(
     return;
   }
 
-  // ── Awaiting WhatsApp connection ────────────────────────
   if (session.state === 'AWAITING_WA_CONNECTION') {
     if (input === 'contact_support') {
       const superPhone =
@@ -1714,7 +1788,7 @@ async function routeAdmin(
       }
       break;
 
-    // ✅ NEW: Fee setup states ─────────────────────────────
+    // ✅ Fee setup states ─────────────────────────────────
     case 'ADMIN_FEE_SETUP_MENU':
       await handleFeeSetupMenu(
         phone, session, input, wa
@@ -1789,13 +1863,61 @@ async function routeAdmin(
 
     case 'ADMIN_FEE_VIEW_LIST':
       if (input.startsWith('fee_view_')) {
-        // View individual fee — for now go back to menu
         await startFeeSetup(phone, session, wa);
       } else {
         await handleFeeSetupMenu(
           phone, session, input, wa
         );
       }
+      break;
+
+    // ✅ NEW: Customization states ────────────────────────
+    case 'ADMIN_CUSTOMIZATION_MENU':
+      await handleCustomizationMenu(
+        phone, session, input, wa
+      );
+      break;
+
+    case 'ADMIN_AWAITING_IMAGE':
+      // Text input while awaiting image
+      await wa.text(
+        phone,
+        `📷 Please send an image (photo).\n\n` +
+        `Type *0* to go back.`
+      );
+      break;
+
+    case 'ADMIN_AWAITING_TEXT_INPUT':
+      await handleTextInput(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_GRADE_SCALE_MENU':
+      await handleGradeScaleSelect(
+        phone, session, input, wa
+      );
+      break;
+
+    case 'ADMIN_PASSPORT_SEARCH_STUDENT':
+      await handlePassportStudentSearch(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_PASSPORT_SELECT_STUDENT':
+      await handlePassportStudentSelect(
+        phone, session, input, wa
+      );
+      break;
+
+    case 'ADMIN_AWAITING_PASSPORT':
+      // Text input while awaiting passport photo
+      await wa.text(
+        phone,
+        `📸 Please send the passport photo.\n\n` +
+        `Type *0* to go back.`
+      );
       break;
 
     // ── Existing admin states ──────────────────────────────
@@ -1967,9 +2089,13 @@ async function handleAdminMainMenu(
       await startAdminFees(phone, session, wa);
       break;
 
-    // ✅ NEW: Fee setup entry point
     case 'admin_fee_setup':
       await startFeeSetup(phone, session, wa);
+      break;
+
+    // ✅ NEW: Customization entry point
+    case 'admin_customization':
+      await startCustomization(phone, session, wa);
       break;
 
     case 'admin_students':
@@ -2048,8 +2174,8 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // DOCUMENT UPLOAD HANDLER
-// ✅ Uses school WA for both download and replies
-// ✅ Auto-routes CSV in any admin state
+// ✅ Routes images sent as documents to image handlers
+// ✅ Routes CSVs to CSV handlers
 // ============================================================
 
 async function handleDocumentUpload(
@@ -2063,39 +2189,51 @@ async function handleDocumentUpload(
   const mimeType = doc?.mime_type ?? '';
 
   const isCSV = isCSVFile(filename, mimeType);
+  const isImage =
+    mimeType.startsWith('image/') ||
+    /\.(jpe?g|png|webp|gif)$/i.test(filename);
 
   console.log(
     `[Bot] handleDocumentUpload:\n` +
     `  state: ${session.state}\n` +
     `  filename: "${filename}"\n` +
     `  mimeType: "${mimeType}"\n` +
-    `  isCSV: ${isCSV}`
+    `  isCSV: ${isCSV}\n` +
+    `  isImage: ${isImage}`
   );
 
-  // ── Direct state matches ────────────────────────────────
+  // ✅ Route images to image handlers
+  if (isImage) {
+    if (session.state === 'ADMIN_AWAITING_IMAGE') {
+      await handleImageUpload(
+        phone, session, message, wa, wa
+      );
+      return;
+    }
+    if (session.state === 'ADMIN_AWAITING_PASSPORT') {
+      await handlePassportUpload(
+        phone, session, message, wa, wa
+      );
+      return;
+    }
+  }
+
+  // ── Direct state matches for CSV ────────────────────────
   if (session.state === 'ADMIN_AWAITING_CSV') {
     await handleCSVDocument(
-      phone,
-      session,
-      message,
-      wa,
-      wa
+      phone, session, message, wa, wa
     );
     return;
   }
 
   if (session.state === 'ADMIN_AWAITING_SCORE_CSV') {
     await handleScoreCSVDocument(
-      phone,
-      session,
-      message,
-      wa,
-      wa
+      phone, session, message, wa, wa
     );
     return;
   }
 
-  // ✅ Auto-route: CSV sent but state drifted
+  // ✅ Auto-route CSV in any admin state
   if (isCSV && session.role !== 'parent') {
     console.log(
       `[Bot] CSV in state "${session.state}" ` +
@@ -2112,21 +2250,18 @@ async function handleDocumentUpload(
     };
 
     await handleCSVDocument(
-      phone,
-      updatedSession,
-      message,
-      wa,
-      wa
+      phone, updatedSession, message, wa, wa
     );
     return;
   }
 
-  // Fallback — non-CSV or parent sending document
+  // Fallback for non-CSV or parent sending document
   await wa.text(
     phone,
     `📤 To upload students go to:\n\n` +
     `*Admin Menu → More Features → Upload Students*\n\n` +
-    `Then send your CSV file here.\n\n` +
+    `To upload logos/photos go to:\n\n` +
+    `*Admin Menu → More Features → School Branding*\n\n` +
     `_File received: ${filename || 'unknown'}_`
   );
 }
