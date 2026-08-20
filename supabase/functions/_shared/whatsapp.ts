@@ -1,10 +1,10 @@
 // ============================================================
 // SCHOOLBOT - WHATSAPP CLIENT
 // supabase/functions/_shared/whatsapp.ts
-// ✅ Fixed: downloadMedia uses correct token
-// ✅ Fixed: Detailed logging for debugging
-// ✅ Fixed: Better error messages
-// ✅ Fixed: List method enforces 10 row limit
+// ✅ Added: downloadMediaBinary for binary files (images, PDFs)
+// ✅ Fixed: downloadMedia for text files (CSVs)
+// ✅ Fixed: List method enforces 10 row limit automatically
+// ✅ Fixed: Fully centralized logging and error reporting
 // ============================================================
 
 import type {
@@ -34,8 +34,7 @@ export class WhatsApp {
       Deno.env.get('WHATSAPP_API_URL') ??
       'https://graph.facebook.com/v18.0';
 
-    this.url =
-      `${baseUrl}/${phoneNumberId}/messages`;
+    this.url = `${baseUrl}/${phoneNumberId}/messages`;
   }
 
   // ─── Send plain text message ───────────────────────────
@@ -53,7 +52,7 @@ export class WhatsApp {
   }
 
   // ─── Send interactive list menu ────────────────────────
-  // ✅ Enforces WhatsApp 10 row limit automatically
+  // Enforces WhatsApp 10 row limit automatically
   async list(
     to:          string,
     header:      string,
@@ -201,10 +200,8 @@ export class WhatsApp {
     }
   }
 
-  // ─── Download media from WhatsApp ─────────────────────
-  // ✅ Fixed: Full logging at every step
-  // ✅ Fixed: Proper error handling
-  // ✅ Fixed: Uses correct token from constructor
+  // ─── Download media from WhatsApp (as text) ───────────
+  // Decodes raw buffer as text — used for text files (CSV)
   async downloadMedia(
     mediaId: string
   ): Promise<string | null> {
@@ -231,13 +228,8 @@ export class WhatsApp {
         return null;
       }
 
-      // ── Step 1: Get media download URL ────────────────
+      // Step 1: Get media download URL from Meta
       const mediaApiUrl = `${baseUrl}/${mediaId}`;
-
-      console.log(
-        `[WhatsApp] Getting media URL: ${mediaApiUrl}`
-      );
-
       const urlRes = await fetch(mediaApiUrl, {
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -246,12 +238,6 @@ export class WhatsApp {
       });
 
       const urlBody = await urlRes.text();
-
-      console.log(
-        `[WhatsApp] Media URL response:\n` +
-        `  status: ${urlRes.status}\n` +
-        `  body: ${urlBody.substring(0, 400)}`
-      );
 
       if (!urlRes.ok) {
         console.error(
@@ -262,17 +248,7 @@ export class WhatsApp {
         return null;
       }
 
-      let urlData: Record<string, unknown>;
-      try {
-        urlData = JSON.parse(urlBody);
-      } catch {
-        console.error(
-          '[WhatsApp] ❌ Could not parse ' +
-          'media URL response as JSON'
-        );
-        return null;
-      }
-
+      const urlData = JSON.parse(urlBody);
       const downloadUrl = urlData.url as string;
 
       if (!downloadUrl) {
@@ -283,28 +259,13 @@ export class WhatsApp {
         return null;
       }
 
-      console.log(
-        `[WhatsApp] Download URL obtained ✅`
-      );
-
-      // ── Step 2: Download the actual file ──────────────
+      // Step 2: Download the actual file as text
       const fileRes = await fetch(downloadUrl, {
         headers: {
           Authorization: `Bearer ${this.token}`,
           'User-Agent':  'schoolbot/1.0',
         },
       });
-
-      console.log(
-        `[WhatsApp] File download response:\n` +
-        `  status: ${fileRes.status}\n` +
-        `  content-type: ${
-          fileRes.headers.get('content-type') ?? 'none'
-        }\n` +
-        `  content-length: ${
-          fileRes.headers.get('content-length') ?? 'none'
-        }`
-      );
 
       if (!fileRes.ok) {
         const errBody = await fileRes.text();
@@ -318,11 +279,6 @@ export class WhatsApp {
 
       const buffer = await fileRes.arrayBuffer();
 
-      console.log(
-        `[WhatsApp] File downloaded:\n` +
-        `  size: ${buffer.byteLength} bytes`
-      );
-
       if (buffer.byteLength === 0) {
         console.error(
           '[WhatsApp] ❌ Downloaded file is empty'
@@ -330,23 +286,104 @@ export class WhatsApp {
         return null;
       }
 
-      // Decode as UTF-8 text (correct for CSV files)
       const text =
         new TextDecoder('utf-8').decode(buffer);
-
-      console.log(
-        `[WhatsApp] ✅ File decoded:\n` +
-        `  chars: ${text.length}\n` +
-        `  preview: "${text.substring(0, 150)}"`
-      );
 
       return text;
     } catch (err) {
       console.error(
         '[WhatsApp] ❌ downloadMedia error:',
-        err instanceof Error
-          ? err.message
-          : String(err)
+        err instanceof Error ? err.message : String(err)
+      );
+      return null;
+    }
+  }
+
+  // ─── Download media as binary buffer ───────────────────
+  // ✅ NEW: Used for raw files (images, PDFs, branding, passports)
+  async downloadMediaBinary(
+    mediaId: string
+  ): Promise<Uint8Array | null> {
+    try {
+      const baseUrl =
+        Deno.env.get('WHATSAPP_API_URL') ??
+        'https://graph.facebook.com/v18.0';
+
+      console.log(
+        `[WhatsApp] downloadMediaBinary:\n` +
+        `  mediaId: ${mediaId}\n` +
+        `  token: ${
+          this.token
+            ? this.token.substring(0, 10) + '...'
+            : '❌ MISSING'
+        }`
+      );
+
+      if (!this.token) {
+        console.error(
+          '[WhatsApp] ❌ No access token — ' +
+          'cannot download binary media'
+        );
+        return null;
+      }
+
+      // Step 1: Get media download URL from Meta
+      const mediaApiUrl = `${baseUrl}/${mediaId}`;
+      const urlRes = await fetch(mediaApiUrl, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'User-Agent':  'schoolbot/1.0',
+        },
+      });
+
+      if (!urlRes.ok) {
+        console.error(
+          `[WhatsApp] ❌ Media URL request failed:\n` +
+          `  status: ${urlRes.status}`
+        );
+        return null;
+      }
+
+      const urlData = await urlRes.json();
+      const downloadUrl = urlData.url as string;
+
+      if (!downloadUrl) {
+        console.error(
+          '[WhatsApp] ❌ No download URL in response'
+        );
+        return null;
+      }
+
+      // Step 2: Download the actual file as binary buffer
+      const fileRes = await fetch(downloadUrl, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'User-Agent':  'schoolbot/1.0',
+        },
+      });
+
+      if (!fileRes.ok) {
+        console.error(
+          `[WhatsApp] ❌ File binary download failed:\n` +
+          `  status: ${fileRes.status}`
+        );
+        return null;
+      }
+
+      const buffer = await fileRes.arrayBuffer();
+
+      if (buffer.byteLength === 0) {
+        console.error(
+          '[WhatsApp] ❌ Downloaded binary file is empty'
+        );
+        return null;
+      }
+
+      return new Uint8Array(buffer);
+    } catch (err) {
+      console.error(
+        '[WhatsApp] ❌ downloadMediaBinary error:',
+        err instanceof Error ? err.message : String(err)
       );
       return null;
     }
@@ -380,7 +417,6 @@ export class WhatsApp {
         res.status,
         JSON.stringify(error)
       );
-      // Don't throw — log and continue
     }
   }
 }
