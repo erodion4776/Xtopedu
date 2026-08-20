@@ -1,8 +1,10 @@
 // ============================================================
 // SCHOOLBOT - ALL TYPES
 // supabase/functions/_shared/types.ts
-// ✅ Added: All fee setup state types
-// ✅ Added: Individual student billing states
+// ✅ Added: All custom fee setup state types
+// ✅ Added: All school branding and customization state types
+// ✅ Added: Parent upgrade/alerts state types
+// ✅ Added: Super admin state types
 // ============================================================
 
 // ─── User Roles ────────────────────────────────────────────────────────────
@@ -23,7 +25,7 @@ export type BotState =
   | 'PICKUP_VIEW'
   | 'ALERT_PLAN_SELECT'
 
-  // ── Admin states ──────────────────────────────────────
+  // ── Admin core states ─────────────────────────────────
   | 'ADMIN_MAIN_MENU'
   | 'ADMIN_ATTENDANCE_MENU'
   | 'ADMIN_ATTENDANCE_SELECT_CLASS'
@@ -34,7 +36,7 @@ export type BotState =
   | 'ADMIN_FEES_RECORD_PAYMENT'
   | 'ADMIN_FEES_AWAITING_CONFIRM'
 
-  // ── ✅ NEW: Fee setup states ─────────────────────────
+  // ── Admin custom fee setup states ─────────────────────
   | 'ADMIN_FEE_SETUP_MENU'
   | 'ADMIN_FEE_ENTER_NAME'
   | 'ADMIN_FEE_ENTER_AMOUNT'
@@ -47,6 +49,15 @@ export type BotState =
   | 'ADMIN_FEE_IND_ENTER_AMOUNT'
   | 'ADMIN_FEE_IND_CONFIRM'
   | 'ADMIN_FEE_VIEW_LIST'
+
+  // ── Admin customization & branding states ──────────────
+  | 'ADMIN_CUSTOMIZATION_MENU'
+  | 'ADMIN_AWAITING_IMAGE'
+  | 'ADMIN_AWAITING_TEXT_INPUT'
+  | 'ADMIN_GRADE_SCALE_MENU'
+  | 'ADMIN_PASSPORT_SEARCH_STUDENT'
+  | 'ADMIN_PASSPORT_SELECT_STUDENT'
+  | 'ADMIN_AWAITING_PASSPORT'
 
   // ── Broadcast states ──────────────────────────────────
   | 'ADMIN_BROADCAST_MENU'
@@ -97,6 +108,13 @@ export interface School {
   onboarding_status:   string;
   subscription_status: string;
   student_count:       number;
+  stamp_url?:          string | null;
+  signature_url?:      string | null;
+  motto?:              string | null;
+  website?:            string | null;
+  principal_name?:     string | null;
+  receipt_footer?:     string | null;
+  result_footer?:      string | null;
 }
 
 // ─── Parent ────────────────────────────────────────────────────────────────
@@ -155,7 +173,7 @@ export interface Invoice {
   is_overdue:     boolean;
 }
 
-// ─── Fee Structure (NEW) ───────────────────────────────────────────────────
+// ─── Fee Structure ─────────────────────────────────────────────────────────
 export interface FeeStructure {
   id:               string;
   school_id:        string;
