@@ -1,31 +1,36 @@
 // ============================================================
 // SCHOOLBOT - ADMIN FEES FLOW
 // supabase/functions/_shared/bot/admin/admin.fees.ts
+// ✅ Fixed: handleStudentSearch handles full name search
+// ✅ Fixed: Better "not found" message with search tips
+// ✅ Fixed: showStudentFees uses maybeSingle not single
 // ============================================================
 
-import { WhatsApp } from '../../whatsapp.ts';
+import { WhatsApp }      from '../../whatsapp.ts';
 import { SessionService } from '../../session.ts';
-import { AdminService } from '../../services/admin.service.ts';
-import { FeesService } from '../../services/fees.service.ts';
+import { AdminService }  from '../../services/admin.service.ts';
+import { FeesService }   from '../../services/fees.service.ts';
 import { showAdminMenu } from './admin.menu.ts';
+import { getSupabase }   from '../../supabase.ts';
 import type { BotSession } from '../../types.ts';
 
-const sessions = new SessionService();
-const adminSvc = new AdminService();
-const feesSvc = new FeesService();
+const sessions  = new SessionService();
+const adminSvc  = new AdminService();
+const feesSvc   = new FeesService();
+const db        = getSupabase();
 
 // ─── Start admin fees flow ─────────────────────────────────────────────────
 export async function startAdminFees(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.buttons(
     phone,
     `💰 *Fee Management*\n\n` +
     `What would you like to do?`,
     [
-      { id: 'FEES_SEARCH_STUDENT', title: '🔍 Find Student' },
+      { id: 'FEES_SEARCH_STUDENT',   title: '🔍 Find Student'     },
       { id: 'FEES_COLLECTION_STATS', title: '📊 Collection Stats' },
       { id: 'FEES_OUTSTANDING_LIST', title: '⚠️ Outstanding List' },
     ],
@@ -37,10 +42,10 @@ export async function startAdminFees(
 
 // ─── Handle fees menu ──────────────────────────────────────────────────────
 export async function handleAdminFeesMenu(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
     case 'fees_search_student':
@@ -62,16 +67,20 @@ export async function handleAdminFeesMenu(
 
 // ─── Prompt admin to search student ───────────────────────────────────────
 async function promptStudentSearch(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
   await wa.text(
     phone,
     `🔍 *Search Student*\n\n` +
     `Type the student's name or\n` +
     `admission number:\n\n` +
-    `_Example: John or ADM/2024/001_\n\n` +
+    `*Examples:*\n` +
+    `• First name only: _John_\n` +
+    `• Last name only: _Okafor_\n` +
+    `• Full name: _John Okafor_\n` +
+    `• Admission no: _ADM/2024/001_\n\n` +
     `Type *0* to go back.`
   );
 
@@ -79,18 +88,21 @@ async function promptStudentSearch(
 }
 
 // ─── Handle student search text input ─────────────────────────────────────
+// ✅ Fixed: Full name search works
+// ✅ Fixed: Better not-found message with tips
 export async function handleStudentSearch(
-  phone: string,
-  session: BotSession,
+  phone:      string,
+  session:    BotSession,
   searchText: string,
-  wa: WhatsApp
+  wa:         WhatsApp
 ): Promise<void> {
   const text = searchText.trim();
 
   if (text.length < 2) {
     await wa.text(
       phone,
-      `⚠️ Please type at least *2 characters* to search.`
+      `⚠️ Please type at least *2 characters*.\n\n` +
+      `_Example: John or ADM/2024/001_`
     );
     return;
   }
@@ -105,29 +117,35 @@ export async function handleStudentSearch(
     await wa.buttons(
       phone,
       `❌ *No students found*\n\n` +
-      `No students found for *"${text}"*\n\n` +
-      `Try a different name or\n` +
-      `admission number.`,
+      `No results for *"${text}"*\n\n` +
+      `*Tips:*\n` +
+      `• Try first name only: _John_\n` +
+      `• Try last name only: _Okafor_\n` +
+      `• Try full name: _John Okafor_\n` +
+      `• Try admission number`,
       [
         { id: 'FEES_SEARCH_STUDENT', title: '🔍 Search Again' },
-        { id: 'MAIN_MENU', title: '🏠 Menu' },
+        { id: 'MAIN_MENU',           title: '🏠 Menu'         },
       ]
     );
     return;
   }
 
-  // Single result - go directly to fees
+  // Single result — go directly to fees
   if (results.length === 1) {
-    await showStudentFees(phone, session, results[0].id, wa);
+    await showStudentFees(
+      phone, session, results[0].id, wa
+    );
     return;
   }
 
-  // Multiple results - show list
+  // Multiple results — show list
   const rows = results.map((s) => ({
-    id: `STUDENT_${s.id}`,
-    title: s.full_name.substring(0, 24),
+    id:          `STUDENT_${s.id}`,
+    title:       s.full_name.substring(0, 24),
     description:
-      `${s.class_name} ${s.arm_name} • ${s.admission_number}`,
+      `${s.class_name} ${s.arm_name} • ` +
+      `${s.admission_number}`,
   }));
 
   await wa.list(
@@ -141,15 +159,17 @@ export async function handleStudentSearch(
     [{ title: 'Students Found', rows }]
   );
 
-  await sessions.setState(phone, 'ADMIN_FEES_SELECT_STUDENT');
+  await sessions.setState(
+    phone, 'ADMIN_FEES_SELECT_STUDENT'
+  );
 }
 
 // ─── Handle student selection from search results ──────────────────────────
 export async function handleFeesStudentSelect(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   if (!input.startsWith('student_')) {
     await startAdminFees(phone, session, wa);
@@ -161,42 +181,47 @@ export async function handleFeesStudentSelect(
 }
 
 // ─── Show student fees ─────────────────────────────────────────────────────
+// ✅ Fixed: Uses maybeSingle to avoid crash if not found
 async function showStudentFees(
-  phone: string,
-  session: BotSession,
+  phone:     string,
+  session:   BotSession,
   studentId: string,
-  wa: WhatsApp
+  wa:        WhatsApp
 ): Promise<void> {
-  // Get student details
-  const db = (await import('../../supabase.ts')).getSupabase();
   const { data: student } = await db
     .from('students')
     .select(`
-      first_name,
-      last_name,
-      admission_number,
+      id, first_name, last_name, admission_number,
       classes ( name ),
       class_arms ( name )
     `)
     .eq('id', studentId)
-    .single();
+    .maybeSingle();
 
   if (!student) {
-    await wa.text(phone, `❌ Student not found.`);
+    await wa.text(
+      phone,
+      `❌ Student not found.\n\n` +
+      `Type *0* to go back.`
+    );
     return;
   }
 
-  const studentName = `${student.first_name} ${student.last_name}`;
+  const studentName =
+    `${student.first_name} ${student.last_name}`;
   const className =
-    (student.classes as Record<string, string> | null)?.name ?? '';
+    (student.classes as Record<string, string> | null)
+      ?.name ?? '';
   const armName =
-    (student.class_arms as Record<string, string> | null)?.name ?? '';
+    (student.class_arms as Record<string, string> | null)
+      ?.name ?? '';
 
   // Get outstanding invoices
-  const { invoices, total } = await adminSvc.getStudentOutstandingFees(
-    studentId,
-    session.school_id
-  );
+  const { invoices, total } =
+    await adminSvc.getStudentOutstandingFees(
+      studentId,
+      session.school_id
+    );
 
   if (!invoices.length) {
     await wa.buttons(
@@ -210,7 +235,7 @@ async function showStudentFees(
       `All fees are paid up.`,
       [
         { id: 'FEES_SEARCH_STUDENT', title: '🔍 Search Again' },
-        { id: 'MAIN_MENU', title: '🏠 Menu' },
+        { id: 'MAIN_MENU',           title: '🏠 Menu'         },
       ]
     );
     return;
@@ -221,21 +246,25 @@ async function showStudentFees(
     .map((inv, i) =>
       `${i + 1}. *${inv.title as string}*\n` +
       `   💵 ${feesSvc.currency(inv.balance as number)}\n` +
-      `   ${feesSvc.dueLabel(inv.due_date as string | null)}`
+      `   ${feesSvc.dueLabel(
+        inv.due_date as string | null
+      )}`
     )
     .join('\n\n');
 
   // Build rows for payment selection
   const payRows = [
     {
-      id: `RECORD_PAY_ALL_${studentId}`,
-      title: '💳 Record Full Payment',
+      id:          `RECORD_PAY_ALL_${studentId}`,
+      title:       '💳 Record Full Payment',
       description: `Total: ${feesSvc.currency(total)}`,
     },
     ...invoices.map((inv) => ({
-      id: `RECORD_PAY_${inv.id}_${studentId}`,
-      title: (inv.title as string).substring(0, 24),
-      description: feesSvc.currency(inv.balance as number),
+      id:          `RECORD_PAY_${inv.id}_${studentId}`,
+      title:       (inv.title as string).substring(0, 24),
+      description: feesSvc.currency(
+        inv.balance as number
+      ),
     })),
   ];
 
@@ -253,7 +282,6 @@ async function showStudentFees(
     [{ title: 'Outstanding Invoices', rows: payRows }]
   );
 
-  // Save to session
   await sessions.setState(
     phone,
     'ADMIN_FEES_SELECT_STUDENT',
@@ -271,59 +299,61 @@ async function showStudentFees(
 
 // ─── Handle payment method selection ──────────────────────────────────────
 export async function handleRecordPayment(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   if (!input.startsWith('record_pay_')) {
     await startAdminFees(phone, session, wa);
     return;
   }
 
-  const isAll = input.startsWith('record_pay_all_');
-  let invoiceId: string | null = null;
-  let studentId: string;
+  const isAll     = input.startsWith('record_pay_all_');
+  let invoiceId:    string | null = null;
+  let studentId:    string;
 
   if (isAll) {
     studentId = input.replace('record_pay_all_', '');
   } else {
-    // Format: record_pay_{invoiceId}_{studentId}
     const parts = input.replace('record_pay_', '').split('_');
-    invoiceId = parts[0];
-    studentId = parts.slice(1).join('_');
+    invoiceId   = parts[0];
+    studentId   = parts.slice(1).join('_');
   }
 
   const storedInvoices = (
     session.data?.invoices ?? []
   ) as Record<string, unknown>[];
-  const storedTotal = (session.data?.total ?? 0) as number;
+  const storedTotal =
+    (session.data?.total ?? 0) as number;
   const studentName =
     (session.data?.studentName as string) ?? 'Student';
 
-  // Determine which invoice and amount
   let targetInvoiceId: string;
-  let targetAmount: number;
-  let targetTitle: string;
+  let targetAmount:    number;
+  let targetTitle:     string;
 
   if (isAll) {
-    targetInvoiceId = storedInvoices[0]?.id as string;
-    targetAmount = storedTotal;
-    targetTitle = 'All Outstanding Fees';
+    targetInvoiceId =
+      storedInvoices[0]?.id as string;
+    targetAmount    = storedTotal;
+    targetTitle     = 'All Outstanding Fees';
   } else {
     const invoice = storedInvoices.find(
       (inv) => inv.id === invoiceId
     );
     if (!invoice) {
-      await wa.text(phone, `❌ Invoice not found. Please try again.`);
+      await wa.text(
+        phone,
+        `❌ Invoice not found. Please try again.`
+      );
       return;
     }
     targetInvoiceId = invoice.id as string;
-    targetAmount = invoice.balance as number;
-    targetTitle = invoice.title as string;
+    targetAmount    = invoice.balance as number;
+    targetTitle     = invoice.title as string;
   }
 
-  // Show payment method selection
   await wa.list(
     phone,
     `💳 Payment Method`,
@@ -339,23 +369,23 @@ export async function handleRecordPayment(
         title: 'Payment Methods',
         rows: [
           {
-            id: `PAYMETHOD_CASH_${targetInvoiceId}_${studentId}`,
-            title: '💵 Cash',
+            id:          `PAYMETHOD_CASH_${targetInvoiceId}_${studentId}`,
+            title:       '💵 Cash',
             description: 'Physical cash payment',
           },
           {
-            id: `PAYMETHOD_TRANSFER_${targetInvoiceId}_${studentId}`,
-            title: '🏦 Bank Transfer',
+            id:          `PAYMETHOD_TRANSFER_${targetInvoiceId}_${studentId}`,
+            title:       '🏦 Bank Transfer',
             description: 'Direct bank transfer',
           },
           {
-            id: `PAYMETHOD_POS_${targetInvoiceId}_${studentId}`,
-            title: '💳 POS / Card',
+            id:          `PAYMETHOD_POS_${targetInvoiceId}_${studentId}`,
+            title:       '💳 POS / Card',
             description: 'Card payment via POS',
           },
           {
-            id: `PAYMETHOD_CHEQUE_${targetInvoiceId}_${studentId}`,
-            title: '📄 Cheque',
+            id:          `PAYMETHOD_CHEQUE_${targetInvoiceId}_${studentId}`,
+            title:       '📄 Cheque',
             description: 'Cheque payment',
           },
         ],
@@ -363,7 +393,6 @@ export async function handleRecordPayment(
     ]
   );
 
-  // Save to session
   await sessions.setState(
     phone,
     'ADMIN_FEES_RECORD_PAYMENT',
@@ -382,19 +411,18 @@ export async function handleRecordPayment(
 
 // ─── Handle payment method chosen ─────────────────────────────────────────
 export async function handlePayMethod(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   if (!input.startsWith('paymethod_')) {
     await startAdminFees(phone, session, wa);
     return;
   }
 
-  // Format: paymethod_{method}_{invoiceId}_{studentId}
-  const parts = input.replace('paymethod_', '').split('_');
-  const method = parts[0];
+  const parts    = input.replace('paymethod_', '').split('_');
+  const method   = parts[0];
   const invoiceId = parts[1];
   const studentId = parts.slice(2).join('_');
 
@@ -412,7 +440,6 @@ export async function handlePayMethod(
   const studentName =
     (session.data?.studentName as string) ?? 'Student';
 
-  // Show confirmation before recording
   await wa.buttons(
     phone,
     `💳 *Confirm Payment*\n` +
@@ -426,14 +453,13 @@ export async function handlePayMethod(
     `Confirm this payment?`,
     [
       {
-        id: `CONFIRM_PAY_${method}_${invoiceId}_${studentId}`,
+        id:    `CONFIRM_PAY_${method}_${invoiceId}_${studentId}`,
         title: '✅ Confirm',
       },
       { id: 'ADMIN_FEES', title: '❌ Cancel' },
     ]
   );
 
-  // Save method to session
   await sessions.setState(
     phone,
     'ADMIN_FEES_AWAITING_CONFIRM',
@@ -441,7 +467,7 @@ export async function handlePayMethod(
     {
       data: {
         ...session.data,
-        paymentMethod: method,
+        paymentMethod:   method,
         targetInvoiceId: invoiceId,
         targetStudentId: studentId,
       },
@@ -451,19 +477,18 @@ export async function handlePayMethod(
 
 // ─── Confirm and record payment ────────────────────────────────────────────
 export async function confirmPayment(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  input: string,
-  wa: WhatsApp
+  input:   string,
+  wa:      WhatsApp
 ): Promise<void> {
   if (!input.startsWith('confirm_pay_')) {
     await startAdminFees(phone, session, wa);
     return;
   }
 
-  // Format: confirm_pay_{method}_{invoiceId}_{studentId}
-  const parts = input.replace('confirm_pay_', '').split('_');
-  const method = parts[0];
+  const parts     = input.replace('confirm_pay_', '').split('_');
+  const method    = parts[0];
   const invoiceId = parts[1];
   const studentId = parts.slice(2).join('_');
 
@@ -475,12 +500,11 @@ export async function confirmPayment(
     (session.data?.studentName as string) ?? 'Student';
 
   try {
-    // Generate reference
-    const reference = `MANUAL-${Date.now().toString(36).toUpperCase()}`;
+    const reference =
+      `MANUAL-${Date.now().toString(36).toUpperCase()}`;
 
-    // Record payment in DB
     await adminSvc.recordManualPayment({
-      schoolId: session.school_id,
+      schoolId:   session.school_id,
       studentId,
       invoiceId,
       amount,
@@ -489,21 +513,13 @@ export async function confirmPayment(
       recordedBy: session.school_user_id ?? session.school_id,
     });
 
-    // Log admin action
     await adminSvc.logAction(
       session.school_id,
       session.school_user_id ?? '',
       'record_manual_payment',
-      {
-        student_id: studentId,
-        invoice_id: invoiceId,
-        amount,
-        method,
-        reference,
-      }
+      { student_id: studentId, invoice_id: invoiceId, amount, method, reference }
     );
 
-    // Send success message
     await wa.buttons(
       phone,
       `✅ *Payment Recorded!*\n` +
@@ -518,11 +534,10 @@ export async function confirmPayment(
       `Parent has been notified via WhatsApp. 📱`,
       [
         { id: 'FEES_SEARCH_STUDENT', title: '🔍 New Search' },
-        { id: 'MAIN_MENU', title: '🏠 Menu' },
+        { id: 'MAIN_MENU',           title: '🏠 Menu'       },
       ]
     );
 
-    // Notify parent
     await adminSvc.notifyParentOfPayment(
       studentId,
       session.school_id,
@@ -532,7 +547,9 @@ export async function confirmPayment(
       title
     );
   } catch (err) {
-    console.error('[AdminFees] confirmPayment error:', err);
+    console.error(
+      '[AdminFees] confirmPayment error:', err
+    );
     await wa.text(
       phone,
       `❌ *Payment failed to record*\n\n` +
@@ -544,18 +561,16 @@ export async function confirmPayment(
 
 // ─── Show fee collection stats ─────────────────────────────────────────────
 async function showCollectionStats(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  const stats = await adminSvc.getFeeStats(session.school_id);
+  const stats =
+    await adminSvc.getFeeStats(session.school_id);
 
   const rateIcon =
-    stats.collectionRate >= 80
-      ? '🟢'
-      : stats.collectionRate >= 60
-      ? '🟡'
-      : '🔴';
+    stats.collectionRate >= 80 ? '🟢' :
+    stats.collectionRate >= 60 ? '🟡' : '🔴';
 
   await wa.buttons(
     phone,
@@ -574,21 +589,22 @@ async function showCollectionStats(
     `━━━━━━━━━━━━━━━━`,
     [
       { id: 'FEES_OUTSTANDING_LIST', title: '⚠️ Outstanding' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'MAIN_MENU',             title: '🏠 Menu'        },
     ]
   );
 }
 
 // ─── Show list of students with outstanding fees ───────────────────────────
 async function showOutstandingList(
-  phone: string,
+  phone:   string,
   session: BotSession,
-  wa: WhatsApp
+  wa:      WhatsApp
 ): Promise<void> {
-  const list = await adminSvc.getStudentsWithOutstandingFees(
-    session.school_id,
-    8
-  );
+  const list =
+    await adminSvc.getStudentsWithOutstandingFees(
+      session.school_id,
+      8
+    );
 
   if (!list.length) {
     await wa.buttons(
@@ -603,15 +619,15 @@ async function showOutstandingList(
 
   const lines = (list as Record<string, unknown>[])
     .map((item, i) => {
-      const s = item.students as Record<string, unknown> | null;
-      const fs = item.fee_structures as Record<
-        string,
-        string
-      > | null;
+      const s =
+        item.students as
+          Record<string, unknown> | null;
       const cls =
-        (s?.classes as Record<string, string> | null)?.name ?? '';
+        (s?.classes as Record<string, string> | null)
+          ?.name ?? '';
       const arm =
-        (s?.class_arms as Record<string, string> | null)?.name ?? '';
+        (s?.class_arms as Record<string, string> | null)
+          ?.name ?? '';
       const balance = feesSvc.currency(
         parseFloat(String(item.balance ?? 0))
       );
@@ -633,7 +649,7 @@ async function showOutstandingList(
     `_Showing top 8 by amount_`,
     [
       { id: 'FEES_SEARCH_STUDENT', title: '🔍 Find Student' },
-      { id: 'MAIN_MENU', title: '🏠 Menu' },
+      { id: 'MAIN_MENU',           title: '🏠 Menu'         },
     ]
   );
 }
