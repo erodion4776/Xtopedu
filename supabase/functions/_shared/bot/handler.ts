@@ -2,12 +2,11 @@
 // SCHOOLBOT - MAIN BOT HANDLER
 // supabase/functions/_shared/bot/handler.ts
 // ✅ Fixed: Platform token used for media downloads
-// ✅ Fixed: School token used for sending replies
 // ✅ Fixed: CSV auto-routed in any admin state
 // ✅ Fixed: Onboarding check BEFORE super admin
 // ✅ Fixed: Super admin school mode works correctly
-// ✅ Fixed: All missing state handlers added
-// ✅ Fixed: Detailed logging for document uploads
+// ✅ Added: All fee setup states and handlers
+// ✅ Added: Individual student billing routes
 // ============================================================
 
 import { WhatsApp }       from '../whatsapp.ts';
@@ -73,6 +72,22 @@ import {
   handlePayMethod,
   confirmPayment,
 } from './admin/admin.fees.ts';
+
+// ✅ NEW: Fee setup imports
+import {
+  startFeeSetup,
+  handleFeeSetupMenu,
+  handleFeeName,
+  handleFeeAmount,
+  handleFeeTarget,
+  handleFeeDueDate,
+  confirmCreateFee,
+  handleStudentSearchForFee,
+  handleStudentSelectForFee,
+  handleIndividualFeeName,
+  handleIndividualFeeAmount,
+  confirmIndividualFee,
+} from './admin/admin.fee.setup.ts';
 
 import {
   startStaffMgmt,
@@ -206,22 +221,6 @@ function isCSVFile(
     mime.includes('application/octet-stream')     ||
     name.includes('csv')
   );
-}
-
-// ============================================================
-// GET PLATFORM WHATSAPP INSTANCE
-// ✅ Always uses platform env vars
-// ✅ Used for media downloads — never school token
-// ============================================================
-
-function getPlatformWhatsApp(): WhatsApp {
-  return new WhatsApp({
-    phone_number_id:
-      Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
-    access_token:
-      Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
-    status: 'active',
-  });
 }
 
 // ============================================================
@@ -469,9 +468,6 @@ export async function handleMessage(
 
 // ============================================================
 // SUPER ADMIN FLOW
-// ✅ Onboarding handled BEFORE this in handleMessage()
-// ✅ School mode uses getPlatformWaForSchool
-// ✅ No session collision with bot_sessions
 // ============================================================
 
 async function handleSuperAdminFlow(
@@ -505,7 +501,6 @@ async function handleSuperAdminFlow(
     }
   }
 
-  // ── Check if in school / test mode ─────────────────────
   const testMode = await isSuperAdminTestMode(phone);
 
   if (testMode.active) {
@@ -532,7 +527,6 @@ async function handleSuperAdminFlow(
     }
   }
 
-  // ── Not in school mode → super admin panel ──────────────
   await buildAndShowSuperAdminMenu(
     phone, waAccount, wa, input, rawText
   );
@@ -633,11 +627,6 @@ async function buildAndShowSuperAdminMenu(
 
 // ============================================================
 // SUPER ADMIN SCHOOL MODE
-// ✅ Uses getPlatformWaForSchool — never fails
-// ✅ Session built fresh every message
-// ✅ No collision with bot_sessions
-// ✅ "hi"/"menu" shows school menu
-// ✅ Document uploads use platform token for download
 // ============================================================
 
 async function handleSuperAdminSchoolMode(
@@ -676,7 +665,6 @@ async function handleSuperAdminSchoolMode(
     return;
   }
 
-  // ✅ Get WA account — never fails
   const schoolWaData =
     await getPlatformWaForSchool(schoolId);
 
@@ -824,12 +812,7 @@ async function handleSuperAdminSchoolMode(
   };
 
   // Document uploads in school mode
-  // ✅ FIX: checked BEFORE the empty-input fallback below.
-  // extractInput() returns '' for message.type === 'document'
-  // (it only handles 'text' and 'interactive'), so the old
-  // order let the "!input" branch catch every CSV upload and
-  // show the Admin Menu before this check ever ran.
-  // ✅ Uses school WA for both download and replies
+  // Checked BEFORE the empty-input fallback below
   if (message.type === 'document') {
     await handleDocumentUpload(
       phone, adminSession, message, schoolWa
@@ -859,8 +842,6 @@ async function handleSuperAdminSchoolMode(
 
 // ============================================================
 // RESET / IDENTIFY USER
-// ✅ Super admin never reaches here
-// ✅ Regular school owners correctly identified
 // ============================================================
 
 async function handleReset(
@@ -1512,7 +1493,8 @@ async function handleParentMainMenu(
 
 // ============================================================
 // ADMIN ROUTING
-// ✅ All states covered including score upload states
+// ✅ Added: All fee setup states
+// ✅ Added: Individual student billing states
 // ============================================================
 
 async function routeAdmin(
@@ -1732,6 +1714,91 @@ async function routeAdmin(
       }
       break;
 
+    // ✅ NEW: Fee setup states ─────────────────────────────
+    case 'ADMIN_FEE_SETUP_MENU':
+      await handleFeeSetupMenu(
+        phone, session, input, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_ENTER_NAME':
+      await handleFeeName(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_ENTER_AMOUNT':
+      await handleFeeAmount(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_SELECT_TARGET':
+      await handleFeeTarget(
+        phone, session, input, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_ENTER_DUE_DATE':
+      await handleFeeDueDate(
+        phone, session, input, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_CONFIRM_CREATE':
+      if (input === 'fee_confirm_create') {
+        await confirmCreateFee(phone, session, wa);
+      } else {
+        await startFeeSetup(phone, session, wa);
+      }
+      break;
+
+    case 'ADMIN_FEE_SEARCH_STUDENT':
+      await handleStudentSearchForFee(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_SELECT_STUDENT':
+      await handleStudentSelectForFee(
+        phone, session, input, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_IND_ENTER_NAME':
+      await handleIndividualFeeName(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_IND_ENTER_AMOUNT':
+      await handleIndividualFeeAmount(
+        phone, session, rawText, wa
+      );
+      break;
+
+    case 'ADMIN_FEE_IND_CONFIRM':
+      if (input === 'ind_fee_confirm') {
+        await confirmIndividualFee(
+          phone, session, wa
+        );
+      } else {
+        await startFeeSetup(phone, session, wa);
+      }
+      break;
+
+    case 'ADMIN_FEE_VIEW_LIST':
+      if (input.startsWith('fee_view_')) {
+        // View individual fee — for now go back to menu
+        await startFeeSetup(phone, session, wa);
+      } else {
+        await handleFeeSetupMenu(
+          phone, session, input, wa
+        );
+      }
+      break;
+
+    // ── Existing admin states ──────────────────────────────
     case 'ADMIN_STAFF_MENU':
       await handleStaffMenu(
         phone, session, input, wa
@@ -1787,8 +1854,6 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_CSV':
-      // Document handled by handleDocumentUpload()
-      // This fires when user sends TEXT in this state
       await wa.text(
         phone,
         `📤 Please send your *CSV file*\n` +
@@ -1810,8 +1875,6 @@ async function routeAdmin(
       break;
 
     case 'ADMIN_AWAITING_SCORE_CSV':
-      // Document handled by handleDocumentUpload()
-      // This fires when user sends TEXT in this state
       await wa.text(
         phone,
         `📤 Please send your *score CSV*\n` +
@@ -1904,6 +1967,11 @@ async function handleAdminMainMenu(
       await startAdminFees(phone, session, wa);
       break;
 
+    // ✅ NEW: Fee setup entry point
+    case 'admin_fee_setup':
+      await startFeeSetup(phone, session, wa);
+      break;
+
     case 'admin_students':
       await wa.text(
         phone,
@@ -1980,16 +2048,8 @@ async function handleAdminMainMenu(
 
 // ============================================================
 // DOCUMENT UPLOAD HANDLER
-// ✅ FIX: Downloads media using the WhatsApp account that
-//    actually RECEIVED the message (platform OR the school's
-//    own connected number), instead of always assuming the
-//    platform number. WhatsApp media IDs are scoped to the
-//    WABA/app that received them — using the wrong token
-//    returns 401 and downloadMedia() silently returns null,
-//    which is why CSV uploads were failing for any school
-//    using its own connected WhatsApp number.
+// ✅ Uses school WA for both download and replies
 // ✅ Auto-routes CSV in any admin state
-// ✅ Detailed logging
 // ============================================================
 
 async function handleDocumentUpload(
@@ -2012,23 +2072,14 @@ async function handleDocumentUpload(
     `  isCSV: ${isCSV}`
   );
 
-  // ✅ FIX: `wa` was already built (in handleMessage) from the
-  // waAccount that received this specific message — platform
-  // account if it came through the shared platform number,
-  // or the school's own account if they connected their own
-  // WhatsApp Business number. That token is always the correct
-  // one for downloading media tied to this message, so we use
-  // it for both the download and the reply. No separate
-  // "platform-only" token needed.
-
   // ── Direct state matches ────────────────────────────────
   if (session.state === 'ADMIN_AWAITING_CSV') {
     await handleCSVDocument(
       phone,
       session,
       message,
-      wa,   // correct account token for download
-      wa    // same account for replies
+      wa,
+      wa
     );
     return;
   }
@@ -2038,24 +2089,19 @@ async function handleDocumentUpload(
       phone,
       session,
       message,
-      wa,   // correct account token for download
-      wa    // same account for replies
+      wa,
+      wa
     );
     return;
   }
 
   // ✅ Auto-route: CSV sent but state drifted
-  // This is the most common case — admin downloads
-  // template, navigates away, then sends the file.
-  // State is no longer ADMIN_AWAITING_CSV so we
-  // handle it gracefully instead of showing error.
   if (isCSV && session.role !== 'parent') {
     console.log(
       `[Bot] CSV in state "${session.state}" ` +
       `— auto-routing to CSV handler`
     );
 
-    // Update state so confirmation flow works
     await sessions.setState(
       phone, 'ADMIN_AWAITING_CSV'
     );
@@ -2069,8 +2115,8 @@ async function handleDocumentUpload(
       phone,
       updatedSession,
       message,
-      wa,   // correct account token for download
-      wa    // same account for replies
+      wa,
+      wa
     );
     return;
   }
