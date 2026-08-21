@@ -1,8 +1,8 @@
 // ============================================================
 // SCHOOLBOT - SUPER ADMIN BOT MENU
 // _shared/bot/superadmin/superadmin.menu.ts
-// ✅ Fixed: Prefixed virtual IDs with "virtual-" to trigger safe DB nullification
-// ✅ Fixed: Resolved bot_sessions_school_user_id_fkey constraints
+// ✅ All functions exported properly
+// ✅ Uses virtual profile IDs that safely nullify in DB
 // ============================================================
 
 import { WhatsApp }        from '../../whatsapp.ts';
@@ -24,7 +24,6 @@ import type { BotSession } from '../../types.ts';
 const db       = getSupabase();
 const sessions = new SessionService();
 
-// ─── Sum amount helper ─────────────────────────────────────
 function sumAmount(
   rows: Array<{ amount: unknown }>
 ): number {
@@ -35,7 +34,7 @@ function sumAmount(
 }
 
 // ============================================================
-// GET PLATFORM WA ACCOUNT
+// EXPORT 1: GET PLATFORM WA ACCOUNT
 // ============================================================
 
 export async function getPlatformWaForSchool(
@@ -54,10 +53,6 @@ export async function getPlatformWaForSchool(
     .maybeSingle();
 
   if (schoolWa) {
-    console.log(
-      `[SuperAdmin] Found school-specific WA ` +
-      `for school: ${schoolId}`
-    );
     return schoolWa as Record<string, unknown>;
   }
 
@@ -70,10 +65,6 @@ export async function getPlatformWaForSchool(
       .maybeSingle();
 
     if (platformWa) {
-      console.log(
-        `[SuperAdmin] Using platform WA virtually ` +
-        `for school: ${schoolId}`
-      );
       return {
         ...platformWa,
         school_id: schoolId,
@@ -81,10 +72,6 @@ export async function getPlatformWaForSchool(
     }
   }
 
-  console.log(
-    `[SuperAdmin] Building WA from env vars ` +
-    `for school: ${schoolId}`
-  );
   return {
     id:              'platform',
     school_id:       schoolId,
@@ -93,10 +80,6 @@ export async function getPlatformWaForSchool(
     status:          'active',
   };
 }
-
-// ============================================================
-// CONNECT PLATFORM WA TO SCHOOL
-// ============================================================
 
 async function connectPlatformWaToSchool(
   schoolId:   string,
@@ -107,17 +90,6 @@ async function connectPlatformWaToSchool(
   const platformAccessToken =
     Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '';
 
-  console.log(
-    `[SuperAdmin] connectPlatformWaToSchool:\n` +
-    `  schoolId: ${schoolId}\n` +
-    `  schoolName: ${schoolName}\n` +
-    `  phoneNumberId: ${
-      platformPhoneNumberId
-        ? platformPhoneNumberId.substring(0, 8) + '...'
-        : '❌ MISSING'
-    }`
-  );
-
   const fallbackWa: Record<string, unknown> = {
     id:              'platform',
     school_id:       schoolId,
@@ -127,9 +99,6 @@ async function connectPlatformWaToSchool(
   };
 
   if (!platformPhoneNumberId || !platformAccessToken) {
-    console.error(
-      '[SuperAdmin] ❌ Missing env vars — using fallback WA'
-    );
     return fallbackWa;
   }
 
@@ -137,20 +106,13 @@ async function connectPlatformWaToSchool(
     const { data: allAccounts } = await db
       .from('whatsapp_accounts')
       .select('id, school_id, phone_number_id, status')
-      .or(
-        `school_id.eq.${schoolId},` +
-        `phone_number_id.eq.${platformPhoneNumberId}`
-      );
+      .or(`school_id.eq.${schoolId},phone_number_id.eq.${platformPhoneNumberId}`);
 
-    const existingForSchool = (allAccounts ?? []).find(
-      (a) => a.school_id === schoolId
-    );
-    const existingForPhoneId = (allAccounts ?? []).find(
-      (a) => a.phone_number_id === platformPhoneNumberId
-    );
+    const existingForSchool = (allAccounts ?? []).find((a) => a.school_id === schoolId);
+    const existingForPhoneId = (allAccounts ?? []).find((a) => a.phone_number_id === platformPhoneNumberId);
 
     if (existingForSchool) {
-      const { data: updated, error: updateErr } = await db
+      const { data: updated } = await db
         .from('whatsapp_accounts')
         .update({
           phone_number_id: platformPhoneNumberId,
@@ -162,13 +124,7 @@ async function connectPlatformWaToSchool(
         .select()
         .single();
 
-      if (updateErr) {
-        return {
-          ...fallbackWa,
-          id: existingForSchool.id,
-        };
-      }
-      return updated as Record<string, unknown>;
+      return (updated ?? fallbackWa) as Record<string, unknown>;
     }
 
     if (existingForPhoneId) {
@@ -178,7 +134,7 @@ async function connectPlatformWaToSchool(
       } as Record<string, unknown>;
     }
 
-    const { data: inserted, error: insertErr } = await db
+    const { data: inserted } = await db
       .from('whatsapp_accounts')
       .insert({
         school_id:       schoolId,
@@ -191,18 +147,14 @@ async function connectPlatformWaToSchool(
       .select()
       .single();
 
-    if (insertErr) {
-      return fallbackWa;
-    }
-
-    return inserted as Record<string, unknown>;
+    return (inserted ?? fallbackWa) as Record<string, unknown>;
   } catch {
     return fallbackWa;
   }
 }
 
 // ============================================================
-// CHECK IF SUPER ADMIN IS IN TEST / SCHOOL MODE
+// EXPORT 2: CHECK IF SUPER ADMIN IS IN TEST / SCHOOL MODE
 // ============================================================
 
 export async function isSuperAdminTestMode(
@@ -219,25 +171,16 @@ export async function isSuperAdminTestMode(
     .maybeSingle();
 
   if (!data) {
-    return {
-      active:   false,
-      testRole: null,
-      schoolId: null,
-    };
+    return { active: false, testRole: null, schoolId: null };
   }
 
-  const age =
-    Date.now() - new Date(data.created_at).getTime();
+  const age = Date.now() - new Date(data.created_at).getTime();
   if (age > 2 * 60 * 60 * 1000) {
     await db
       .from('super_admin_test_sessions')
       .delete()
       .eq('phone', phone);
-    return {
-      active:   false,
-      testRole: null,
-      schoolId: null,
-    };
+    return { active: false, testRole: null, schoolId: null };
   }
 
   return {
@@ -246,6 +189,10 @@ export async function isSuperAdminTestMode(
     schoolId: data.school_id,
   };
 }
+
+// ============================================================
+// EXPORT 3: SET TEST / SCHOOL MODE
+// ============================================================
 
 export async function setTestMode(
   phone:    string,
@@ -265,6 +212,10 @@ export async function setTestMode(
     );
 }
 
+// ============================================================
+// EXPORT 4: CLEAR TEST / SCHOOL MODE
+// ============================================================
+
 export async function clearTestMode(
   phone: string
 ): Promise<void> {
@@ -275,7 +226,7 @@ export async function clearTestMode(
 }
 
 // ============================================================
-// MAIN SUPER ADMIN MENU (10 rows)
+// EXPORT 5: MAIN SUPER ADMIN MENU (10 rows)
 // ============================================================
 
 export async function showSuperAdminMenu(
@@ -376,6 +327,10 @@ export async function showSuperAdminMenu(
   );
 }
 
+// ============================================================
+// EXPORT 6: HANDLE SUPER ADMIN MENU SELECTIONS
+// ============================================================
+
 export async function handleSuperAdminMenu(
   phone:   string,
   session: BotSession,
@@ -460,6 +415,37 @@ export async function handleSuperAdminMenu(
   }
 }
 
+// ============================================================
+// EXPORT 7: HANDLE SUPER ADMIN BROADCAST
+// ============================================================
+
+export async function handleSuperAdminBroadcast(
+  phone:   string,
+  session: BotSession,
+  rawText: string,
+  wa:      WhatsApp
+): Promise<void> {
+  const text = rawText.trim();
+
+  if (text.toLowerCase() === 'cancel') {
+    await showSuperAdminMenu(phone, session, wa);
+    return;
+  }
+
+  if (text.length < 5) {
+    await wa.text(phone, `⚠️ Message too short. Please type a proper announcement.`);
+    return;
+  }
+
+  await wa.buttons(phone, `📢 *Preview Broadcast*\n━━━━━━━━━━━━━━━━\n\n📨 *To:* All School Admins\n\n💬 *Message:*\n${text}\n\n━━━━━━━━━━━━━━━━\nSend this message?`, [
+    { id: 'SA_BROADCAST_CONFIRM', title: '✅ Send Now' },
+    { id: 'SA_BROADCAST_CANCEL',  title: '❌ Cancel'  },
+  ]);
+
+  await sessions.setState(phone, 'ADMIN_MAIN_MENU', 'SA_BROADCAST_CONFIRM', { data: { broadcastMessage: text } });
+}
+
+// ─── Internal Submenu Handlers ──────────────────────────────
 async function showDebugAndHealthMenu(phone: string, wa: WhatsApp): Promise<void> {
   await wa.buttons(phone, `🔍 *Debug & Health*\n\nWhat would you like to check?`, [
     { id: 'SA_DEBUG_SCHOOL', title: '🔍 Debug a School' },
@@ -573,8 +559,6 @@ async function manageMySuperAdminSchool(phone: string, session: BotSession, wa: 
   ]);
 }
 
-// ─── Switch super admin into their own real school ─────────
-// ✅ Fixed: Pre-flagged as virtual- ID so SessionService bypasses DB foreign key checks
 async function switchToMySuperAdminSchool(
   phone:    string,
   schoolId: string,
@@ -629,7 +613,7 @@ async function switchToMySuperAdminSchool(
       {
         phone:               formatPhone(phone),
         parent_id:           null,
-        school_user_id:      null, // ✅ Starts as null here, createAdminSession will verify
+        school_user_id:      null,
         school_id:           schoolId,
         role:                'admin',
         state:               'ADMIN_MAIN_MENU',
@@ -641,7 +625,6 @@ async function switchToMySuperAdminSchool(
       { onConflict: 'phone' }
     );
 
-  // ✅ FIX: Prefix mock UUIDs with 'virtual-' to let SessionService write null safely
   const virtualProfileId = 'virtual-' + crypto.randomUUID();
   const virtualUserId = 'virtual-' + crypto.randomUUID();
 
@@ -688,10 +671,7 @@ async function switchToMySuperAdminSchool(
   await showAdminMenu(phone, adminSession, schoolWa);
 }
 
-// ============================================================
-// 🧪 TEST BOT FEATURES
-// ============================================================
-
+// ─── Test Options ───────────────────────────────────────────
 async function showTestOptions(phone: string, session: BotSession, wa: WhatsApp): Promise<void> {
   await wa.buttons(phone, `🧪 *Test Bot Features*\n━━━━━━━━━━━━━━━━\n\nChoose what you want to test.\n\nYou will experience the bot *exactly as real users do.*\n\n⚠️ Type *EXIT* at any time to return to your admin panel.`, [
     { id: 'TEST_AS_PARENT',  title: '👨‍👩‍👧 Test as Parent' },
@@ -835,7 +815,6 @@ async function activateAdminTestForSchool(
       { onConflict: 'phone' }
     );
 
-  // ✅ FIXED: Prefix mock UUIDs with 'virtual-' to let SessionService write null safely
   const virtualProfileId = 'virtual-' + crypto.randomUUID();
   const virtualUserId = 'virtual-' + crypto.randomUUID();
 
@@ -915,7 +894,7 @@ async function showSchoolDebug(phone: string, schoolId: string, wa: WhatsApp): P
   ] = await Promise.all([
     db.from('schools').select('name, is_active, onboarding_status, setup_fee_paid, student_count, created_at').eq('id', schoolId).single(),
     db.from('bot_sessions').select('phone, role, state, last_activity').eq('school_id', schoolId).gte('last_activity', new Date(Date.now() - 3600000).toISOString()),
-    db.from('whatsapp_accounts').select('status, phone_number_id, display_number').eq('school_id', schoolId).maybeSingle(),
+    db.from('whatsapp_accounts').select('status, phone_number_id').eq('school_id', schoolId).maybeSingle(),
     db.from('students').select('id', { count: 'exact' }).eq('school_id', schoolId).eq('status', 'active'),
     db.from('parents').select('id', { count: 'exact' }).eq('school_id', schoolId),
     db.from('staff').select('id', { count: 'exact' }).eq('school_id', schoolId).eq('employment_status', 'active'),
@@ -944,8 +923,7 @@ async function showSchoolDebug(phone: string, schoolId: string, wa: WhatsApp): P
     `Setup Fee: ${s?.setup_fee_paid ? '✅ Paid' : '❌ Not Paid'}\n` +
     `Onboarding: ${s?.onboarding_status ?? 'N/A'}\n\n` +
     `📱 *WhatsApp:*\n` +
-    `Status: ${wa_?.status === 'active' ? '✅ Connected' : '❌ Not Connected'}\n` +
-    `Number: ${wa_?.display_number ?? 'Not set'}\n\n` +
+    `Status: ${wa_?.status === 'active' ? '✅ Connected' : '❌ Not Connected'}\n\n` +
     `👥 *Users:*\n` +
     `Students: *${students.count ?? 0}*\n` +
     `Parents:  *${parents.count ?? 0}*\n` +
@@ -1192,10 +1170,6 @@ async function showActiveSessions(phone: string, wa: WhatsApp): Promise<void> {
   ]);
 }
 
-// ============================================================
-// SYSTEM LOGS
-// ============================================================
-
 async function showLogs(phone: string, wa: WhatsApp): Promise<void> {
   const { data: logs } = await db.from('platform_logs').select('level, category, message, created_at').in('level', ['error', 'warning']).order('created_at', { ascending: false }).limit(5);
 
@@ -1221,13 +1195,30 @@ async function showLogs(phone: string, wa: WhatsApp): Promise<void> {
   ]);
 }
 
-// ============================================================
-// BROADCAST
-// ============================================================
-
 async function promptBroadcast(phone: string, session: BotSession, wa: WhatsApp): Promise<void> {
   await wa.text(phone, `📢 *Broadcast to All School Admins*\n\nType your message below.\n\nIt will be sent to ALL school admin WhatsApp numbers.\n\nType *CANCEL* to go back.`);
   await sessions.setState(phone, 'ADMIN_MAIN_MENU', 'SA_BROADCAST_COMPOSE');
+}
+
+export async function handleSuperAdminBroadcast(phone: string, session: BotSession, rawText: string, wa: WhatsApp): Promise<void> {
+  const text = rawText.trim();
+
+  if (text.toLowerCase() === 'cancel') {
+    await showSuperAdminMenu(phone, session, wa);
+    return;
+  }
+
+  if (text.length < 5) {
+    await wa.text(phone, `⚠️ Message too short. Please type a proper announcement.`);
+    return;
+  }
+
+  await wa.buttons(phone, `📢 *Preview Broadcast*\n━━━━━━━━━━━━━━━━\n\n📨 *To:* All School Admins\n\n💬 *Message:*\n${text}\n\n━━━━━━━━━━━━━━━━\nSend this message?`, [
+    { id: 'SA_BROADCAST_CONFIRM', title: '✅ Send Now' },
+    { id: 'SA_BROADCAST_CANCEL',  title: '❌ Cancel'  },
+  ]);
+
+  await sessions.setState(phone, 'ADMIN_MAIN_MENU', 'SA_BROADCAST_CONFIRM', { data: { broadcastMessage: text } });
 }
 
 async function confirmBroadcast(phone: string, session: BotSession, wa: WhatsApp): Promise<void> {
