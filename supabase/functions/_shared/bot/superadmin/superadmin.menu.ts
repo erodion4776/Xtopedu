@@ -1,8 +1,9 @@
 // ============================================================
 // SCHOOLBOT - SUPER ADMIN BOT MENU
 // _shared/bot/superadmin/superadmin.menu.ts
-// ✅ All functions exported properly
-// ✅ Uses virtual profile IDs that safely nullify in DB
+// ✅ Fixed: Removed duplicate declarations of handleSuperAdminBroadcast
+// ✅ Fixed: All functions declared exactly once
+// ✅ Fixed: All exports needed by handler.ts are present
 // ============================================================
 
 import { WhatsApp }        from '../../whatsapp.ts';
@@ -24,6 +25,7 @@ import type { BotSession } from '../../types.ts';
 const db       = getSupabase();
 const sessions = new SessionService();
 
+// ─── Sum amount helper ─────────────────────────────────────
 function sumAmount(
   rows: Array<{ amount: unknown }>
 ): number {
@@ -81,6 +83,7 @@ export async function getPlatformWaForSchool(
   };
 }
 
+// ─── Connect Platform WA to School ─────────────────────────
 async function connectPlatformWaToSchool(
   schoolId:   string,
   schoolName: string
@@ -445,7 +448,10 @@ export async function handleSuperAdminBroadcast(
   await sessions.setState(phone, 'ADMIN_MAIN_MENU', 'SA_BROADCAST_CONFIRM', { data: { broadcastMessage: text } });
 }
 
-// ─── Internal Submenu Handlers ──────────────────────────────
+// ============================================================
+// INTERNAL SUBMENU & ACTION HANDLERS
+// ============================================================
+
 async function showDebugAndHealthMenu(phone: string, wa: WhatsApp): Promise<void> {
   await wa.buttons(phone, `🔍 *Debug & Health*\n\nWhat would you like to check?`, [
     { id: 'SA_DEBUG_SCHOOL', title: '🔍 Debug a School' },
@@ -671,7 +677,7 @@ async function switchToMySuperAdminSchool(
   await showAdminMenu(phone, adminSession, schoolWa);
 }
 
-// ─── Test Options ───────────────────────────────────────────
+// ─── Testing Helpers ────────────────────────────────────────
 async function showTestOptions(phone: string, session: BotSession, wa: WhatsApp): Promise<void> {
   await wa.buttons(phone, `🧪 *Test Bot Features*\n━━━━━━━━━━━━━━━━\n\nChoose what you want to test.\n\nYou will experience the bot *exactly as real users do.*\n\n⚠️ Type *EXIT* at any time to return to your admin panel.`, [
     { id: 'TEST_AS_PARENT',  title: '👨‍👩‍👧 Test as Parent' },
@@ -866,6 +872,7 @@ async function activateMarketingTest(phone: string, session: BotSession, wa: Wha
   });
 }
 
+// ─── Debug and Health Helpers ───────────────────────────────
 async function promptDebug(phone: string, wa: WhatsApp): Promise<void> {
   const { data: schools } = await db.from('schools').select('id, name, is_active').order('created_at', { ascending: false }).limit(8);
 
@@ -1090,7 +1097,7 @@ async function showSchools(phone: string, wa: WhatsApp): Promise<void> {
     })
     .join('\n\n');
 
-  await wa.buttons(phone, `🏫 *Schools (Latest 10)*\n━━━━━━━━━━━━━━━━\n\n${lines}\n\n━━━━━━━━━━━━━━━━\n🟢 Active  🔴 Inactive\n` + (failed > 0 ? `❌ Failed: *${failed}* schools\n` : '') + `✅ Fee Paid  ⏳ Pending`, [
+  await wa.buttons(phone, `🏫 *Schools (Latest 10)*\n━━━━━━━━━━━━━━━━\n\n${lines}\n\n━━━━━━━━━━━━━━━━\n🟢 Active  🔴 Inactive\n✅ Fee Paid  ⏳ Pending`, [
     { id: 'SA_DEBUG_SCHOOL', title: '🔍 Debug School' },
     { id: 'SA_SYSTEM_TEST',  title: '🤖 Health Check' },
     { id: '0',               title: '↩️ Menu'         },
@@ -1198,27 +1205,6 @@ async function showLogs(phone: string, wa: WhatsApp): Promise<void> {
 async function promptBroadcast(phone: string, session: BotSession, wa: WhatsApp): Promise<void> {
   await wa.text(phone, `📢 *Broadcast to All School Admins*\n\nType your message below.\n\nIt will be sent to ALL school admin WhatsApp numbers.\n\nType *CANCEL* to go back.`);
   await sessions.setState(phone, 'ADMIN_MAIN_MENU', 'SA_BROADCAST_COMPOSE');
-}
-
-export async function handleSuperAdminBroadcast(phone: string, session: BotSession, rawText: string, wa: WhatsApp): Promise<void> {
-  const text = rawText.trim();
-
-  if (text.toLowerCase() === 'cancel') {
-    await showSuperAdminMenu(phone, session, wa);
-    return;
-  }
-
-  if (text.length < 5) {
-    await wa.text(phone, `⚠️ Message too short. Please type a proper announcement.`);
-    return;
-  }
-
-  await wa.buttons(phone, `📢 *Preview Broadcast*\n━━━━━━━━━━━━━━━━\n\n📨 *To:* All School Admins\n\n💬 *Message:*\n${text}\n\n━━━━━━━━━━━━━━━━\nSend this message?`, [
-    { id: 'SA_BROADCAST_CONFIRM', title: '✅ Send Now' },
-    { id: 'SA_BROADCAST_CANCEL',  title: '❌ Cancel'  },
-  ]);
-
-  await sessions.setState(phone, 'ADMIN_MAIN_MENU', 'SA_BROADCAST_CONFIRM', { data: { broadcastMessage: text } });
 }
 
 async function confirmBroadcast(phone: string, session: BotSession, wa: WhatsApp): Promise<void> {
