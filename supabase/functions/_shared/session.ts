@@ -1,6 +1,9 @@
 // ============================================================
 // SCHOOLBOT - SESSION MANAGER
 // supabase/functions/_shared/session.ts
+// ✅ Fixed: Safe null fallback for virtual admin/owner IDs
+// ✅ Fixed: Prevents bot_sessions_school_user_id_fkey violations
+// ✅ Centralized phone formatting using utils
 // ============================================================
 
 import { getSupabase } from './supabase.ts';
@@ -27,14 +30,13 @@ export class SessionService {
       .from('bot_sessions')
       .select('*')
       .eq('phone', this.fmt(phone))
-      .single();
+      .maybeSingle();
 
     if (error || !data) return null;
 
     // Check if session has expired
     const lastActivity = new Date(data.last_activity).getTime();
     if (Date.now() - lastActivity > SESSION_TTL_MS) {
-      // Delete expired session
       await this.delete(phone);
       return null;
     }
@@ -72,7 +74,6 @@ export class SessionService {
       throw new Error(`Failed to create parent session: ${error.message}`);
     }
 
-    // Attach runtime data (not stored in DB)
     return {
       ...(data as BotSession),
       parent,
@@ -82,16 +83,28 @@ export class SessionService {
   }
 
   // ─── Create admin or teacher session ──────────────────────────────────
+  // ✅ Fixed: Automatically intercepts virtual/mock IDs
+  // ✅ Saves NULL in DB to satisfy foreign key constraints
+  // ✅ Keeps mock profiles attached in runtime memory
   async createAdminSession(
     phone: string,
     schoolUser: SchoolUser,
     waAccount: WhatsAppAccount | null,
     role: 'admin' | 'teacher' = 'admin'
   ): Promise<BotSession> {
+    // Detect virtual/mock users (Super Admin, Onboarded Owner, etc.)
+    const isVirtual =
+      !schoolUser.id ||
+      schoolUser.id.startsWith('virtual-') ||
+      schoolUser.id.startsWith('admin-') ||
+      schoolUser.id.startsWith('sa-own-') ||
+      schoolUser.id === 'super_admin';
+
     const record = {
       phone: this.fmt(phone),
       parent_id: null,
-      school_user_id: schoolUser.id,
+      // If virtual, we write NULL to DB to bypass foreign key constraint
+      school_user_id: isVirtual ? null : schoolUser.id,
       school_id: schoolUser.school_id,
       role: role as UserRole,
       state: 'ADMIN_MAIN_MENU' as BotState,
@@ -111,7 +124,7 @@ export class SessionService {
       throw new Error(`Failed to create admin session: ${error.message}`);
     }
 
-    // Attach runtime data (not stored in DB)
+    // Return session object with full runtime metadata
     return {
       ...(data as BotSession),
       schoolUser,
@@ -135,12 +148,10 @@ export class SessionService {
       last_activity: new Date().toISOString(),
     };
 
-    // Update selected student if provided
     if (options?.selectedStudentId !== undefined) {
       update.selected_student_id = options.selectedStudentId;
     }
 
-    // Merge new data with existing data
     if (options?.data) {
       const { data: current } = await db
         .from('bot_sessions')
@@ -165,14 +176,12 @@ export class SessionService {
     phone: string,
     newData: Record<string, unknown>
   ): Promise<void> {
-    // Get current data first
     const { data: current } = await db
       .from('bot_sessions')
       .select('data')
       .eq('phone', this.fmt(phone))
       .single();
 
-    // Merge and save
     await db
       .from('bot_sessions')
       .update({
@@ -182,7 +191,7 @@ export class SessionService {
       .eq('phone', this.fmt(phone));
   }
 
-  // ─── Touch session (update last activity time) ─────────────────────────
+  // ─── Touch session (update activity) ───────────────────────────────────
   async touch(phone: string): Promise<void> {
     await db
       .from('bot_sessions')
@@ -199,11 +208,8 @@ export class SessionService {
   }
 
   // ─── Get all active sessions for a school ─────────────────────────────
-  // Used by admin to see who is online
   async getActiveForSchool(schoolId: string): Promise<BotSession[]> {
-    const since = new Date(
-      Date.now() - SESSION_TTL_MS
-    ).toISOString();
+    const since = new Date(Date.now() - SESSION_TTL_MS).toISOString();
 
     const { data } = await db
       .from('bot_sessions')
