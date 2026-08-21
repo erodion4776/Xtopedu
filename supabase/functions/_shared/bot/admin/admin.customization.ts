@@ -6,12 +6,15 @@
 // ✅ Customize grade scale
 // ✅ Customize receipt/result footer
 // ✅ Set primary/secondary brand colors
+// ✅ NEW: Live PDF preview generation for Receipt & Result Sheet
 // ============================================================
 
 import { WhatsApp }       from '../../whatsapp.ts';
 import { SessionService } from '../../session.ts';
 import { AdminService }   from '../../services/admin.service.ts';
 import { getSupabase }    from '../../supabase.ts';
+import { PdfService }     from '../../pdf.service.ts';
+import { delay }          from '../../utils.ts';
 import type {
   BotSession,
   IncomingMessage,
@@ -19,7 +22,14 @@ import type {
 
 const sessions = new SessionService();
 const adminSvc = new AdminService();
+const pdfSvc   = new PdfService();
 const db       = getSupabase();
+
+const fmt = (n: number) =>
+  new Intl.NumberFormat('en-NG', {
+    style:    'currency',
+    currency: 'NGN',
+  }).format(n);
 
 // ============================================================
 // START CUSTOMIZATION MENU
@@ -83,7 +93,7 @@ export async function startCustomization(
         ],
       },
       {
-        title: 'Advanced',
+        title: 'Advanced & Previews',
         rows: [
           {
             id:          'CUSTOM_GRADE_SCALE',
@@ -96,9 +106,14 @@ export async function startCustomization(
             description: 'Upload student photos',
           },
           {
+            id:          'CUSTOM_PREVIEW_DOCS',
+            title:       '📄 Preview Documents',
+            description: 'See sample branded Receipt & Result',
+          },
+          {
             id:          'CUSTOM_VIEW_CURRENT',
-            title:       '👀 View Current Setup',
-            description: 'See what is currently set',
+            title:       '👀 View Setup Summary',
+            description: 'See what is currently active',
           },
         ],
       },
@@ -174,9 +189,11 @@ export async function handleCustomizationMenu(
       break;
 
     case 'custom_student_photo':
-      await startStudentPassportUpload(
-        phone, session, wa
-      );
+      await startStudentPassportUpload(phone, session, wa);
+      break;
+
+    case 'custom_preview_docs':
+      await showPreviewOptions(phone, session, wa);
       break;
 
     case 'custom_view_current':
@@ -253,8 +270,6 @@ async function promptImageUpload(
 
 // ============================================================
 // HANDLE IMAGE UPLOAD
-// ✅ Downloads image, uploads to Supabase storage
-// ✅ Saves URL to schools table
 // ============================================================
 
 export async function handleImageUpload(
@@ -268,7 +283,6 @@ export async function handleImageUpload(
   const category =
     (session.data?.imageCategory as string) ?? 'logo';
 
-  // Get media ID from image or document
   const mediaId =
     message.image?.id ?? message.document?.id;
 
@@ -288,7 +302,6 @@ export async function handleImageUpload(
   );
 
   try {
-    // Download image binary from WhatsApp
     const imageBuffer =
       await downloadWa.downloadMediaBinary(mediaId);
 
@@ -301,13 +314,6 @@ export async function handleImageUpload(
       return;
     }
 
-    console.log(
-      `[Customization] Image downloaded:\n` +
-      `  category: ${category}\n` +
-      `  size: ${imageBuffer.byteLength} bytes`
-    );
-
-    // Determine file extension
     const mimeType =
       message.image?.mime_type ??
       message.document?.mime_type ??
@@ -317,7 +323,6 @@ export async function handleImageUpload(
                 mimeType.includes('png') ? 'png' :
                 mimeType.includes('webp') ? 'webp' : 'png';
 
-    // Upload to Supabase Storage
     const fileName =
       `${session.school_id}/${category}.${ext}`;
 
@@ -342,18 +347,16 @@ export async function handleImageUpload(
       return;
     }
 
-    // Get public URL
     const { data: urlData } = db.storage
       .from('school-branding')
       .getPublicUrl(fileName);
 
     const publicUrl = urlData.publicUrl;
 
-    // Update school record
     const columnMap: Record<string, string> = {
       logo:      'logo_url',
       stamp:     'stamp_url',
-      signature: 'signature_url',
+      signature: 'principal_signature_url',
     };
 
     const column = columnMap[category];
@@ -373,7 +376,6 @@ export async function handleImageUpload(
       { category, file_name: fileName }
     );
 
-    // Success confirmation
     await sendWa.buttons(
       phone,
       `✅ *${
@@ -391,8 +393,8 @@ export async function handleImageUpload(
           title: '🎨 Upload More',
         },
         {
-          id:    'CUSTOM_VIEW_CURRENT',
-          title: '👀 View Setup',
+          id:    'CUSTOM_PREVIEW_DOCS',
+          title: '📄 Preview Docs',
         },
         {
           id:    'MAIN_MENU',
@@ -500,7 +502,7 @@ export async function handleTextInput(
     `official documents.`,
     [
       { id: 'ADMIN_CUSTOMIZATION',  title: '🎨 Customize More' },
-      { id: 'CUSTOM_VIEW_CURRENT',  title: '👀 View Setup'     },
+      { id: 'CUSTOM_PREVIEW_DOCS',  title: '📄 Preview Docs'   },
       { id: 'MAIN_MENU',            title: '🏠 Menu'           },
     ]
   );
@@ -542,12 +544,12 @@ async function showGradeScaleMenu(
     `🎓 *Grade Scale*\n` +
     `━━━━━━━━━━━━━━━━\n` +
     `Current grading system:\n\n` +
-    `🅰️ A (${scale.A.min}+): ${scale.A.remark}\n` +
-    `🅱️ B (${scale.B.min}+): ${scale.B.remark}\n` +
-    `🆑 C (${scale.C.min}+): ${scale.C.remark}\n` +
-    `🇩 D (${scale.D.min}+): ${scale.D.remark}\n` +
-    `🇪 E (${scale.E.min}+): ${scale.E.remark}\n` +
-    `❌ F (<${scale.E.min}): ${scale.F.remark}\n\n` +
+    `A (${scale.A.min}+): ${scale.A.remark}\n` +
+    `B (${scale.B.min}+): ${scale.B.remark}\n` +
+    `C (${scale.C.min}+): ${scale.C.remark}\n` +
+    `D (${scale.D.min}+): ${scale.D.remark}\n` +
+    `E (${scale.E.min}+): ${scale.E.remark}\n` +
+    `F (<${scale.E.min}): ${scale.F.remark}\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
     `Want to change the scale?`,
     [
@@ -607,11 +609,11 @@ export async function handleGradeScaleSelect(
   await wa.buttons(
     phone,
     `✅ *Grade Scale Updated!*\n\n` +
-    `🅰️ A (${newScale.A.min}+): ${newScale.A.remark}\n` +
-    `🅱️ B (${newScale.B.min}+): ${newScale.B.remark}\n` +
-    `🆑 C (${newScale.C.min}+): ${newScale.C.remark}\n` +
-    `🇩 D (${newScale.D.min}+): ${newScale.D.remark}\n` +
-    `🇪 E (${newScale.E.min}+): ${newScale.E.remark}\n\n` +
+    `A (${newScale.A.min}+): ${newScale.A.remark}\n` +
+    `B (${newScale.B.min}+): ${newScale.B.remark}\n` +
+    `C (${newScale.C.min}+): ${newScale.C.remark}\n` +
+    `D (${newScale.D.min}+): ${newScale.D.remark}\n` +
+    `E (${newScale.E.min}+): ${newScale.E.remark}\n\n` +
     `Applied to all future result cards.`,
     [
       { id: 'ADMIN_CUSTOMIZATION', title: '🎨 More Options' },
@@ -676,7 +678,7 @@ export async function handlePassportStudentSearch(
       phone,
       `❌ No students found for *"${text}"*`,
       [
-        { id: 'CUSTOM_STUDENT_PHOTO', title: '🔍 Search Again' },
+        { id: 'CUSTOM_STUDENT_PHOTO', title: '📸 Search Again' },
         { id: 'ADMIN_CUSTOMIZATION',  title: '↩️ Back'         },
       ]
     );
@@ -861,7 +863,7 @@ export async function handlePassportUpload(
 
     await sendWa.buttons(
       phone,
-      `✅ *Passport Uploaded!*\n\n` +
+      `✅ *Passport Photo Uploaded!*\n\n` +
       `👤 *${studentName}*\n\n` +
       `Photo will now appear on their\n` +
       `results, ID cards, and reports.`,
@@ -896,6 +898,133 @@ export async function handlePassportUpload(
 }
 
 // ============================================================
+// ✅ NEW: SAMPLE PREVIEWS FOR SCHOOLS
+// ============================================================
+
+async function showPreviewOptions(
+  phone:   string,
+  session: BotSession,
+  wa:      WhatsApp
+): Promise<void> {
+  const { data: school } = await db
+    .from('schools')
+    .select('name')
+    .eq('id', session.school_id)
+    .single();
+
+  await wa.buttons(
+    phone,
+    `📄 *Live Branding Preview*\n\n` +
+    `Want to see how your logo, stamp, brand\n` +
+    `colors, motto, and principal signature look\n` +
+    `on official school documents?\n\n` +
+    `Select a mock document type below. I will\n` +
+    `instantly build and send you the branded PDF!`,
+    [
+      { id: 'PREVIEW_RECEIPT', title: '🧾 Payment Receipt' },
+      { id: 'PREVIEW_RESULT',  title: '🎓 Student Result'  },
+      { id: 'ADMIN_CUSTOMIZATION', title: '↩️ Back' },
+    ]
+  );
+
+  await sessions.setState(phone, 'ADMIN_CUSTOM_PREVIEW');
+}
+
+export async function handlePreviewSelect(
+  phone:   string,
+  session: BotSession,
+  input:   string,
+  wa:      WhatsApp
+): Promise<void> {
+  const schoolId = session.school_id;
+
+  const { data: school } = await db
+    .from('schools')
+    .select('name, address, phone')
+    .eq('id', schoolId)
+    .single();
+
+  const schoolName = school?.name ?? 'Greenfield Academy';
+
+  if (input === 'preview_receipt') {
+    await wa.text(phone, `⏳ Generating sample branded receipt...`);
+
+    try {
+      const pdfUrl = await pdfSvc.buildReceiptPdf({
+        receiptNumber: 'SAMPLE-RCP-001',
+        schoolName,
+        schoolAddress: school?.address ?? '12, Greenfield Estate Way, Lagos',
+        schoolPhone: school?.phone ?? '08012345678',
+        studentName: 'Chidi Okonkwo (Sample)',
+        admissionNumber: 'SCH/SAMPLE/001',
+        className: 'JSS 3A',
+        feeTitle: 'First Term School Fees',
+        term: 'First Term',
+        academicYear: '2024/2025',
+        amount: 50000,
+        paymentMethod: 'Paystack Online',
+        reference: 'SAMPLE-PAYSTACK-TRX-REF',
+        paymentDate: new Date().toISOString(),
+        issuedTo: 'Mr. & Mrs. Okonkwo',
+        schoolId,
+      });
+
+      await wa.document(
+        phone,
+        pdfUrl,
+        `Sample-Receipt-Branded.pdf`,
+        `Here is your official sample receipt!`
+      );
+    } catch (err) {
+      console.error('[Preview] Receipt PDF build error:', err);
+      await wa.text(phone, `❌ Failed to build sample receipt. Verify your logo/crest dimensions.`);
+    }
+    return;
+  }
+
+  if (input === 'preview_result') {
+    await wa.text(phone, `⏳ Generating sample branded result card...`);
+
+    try {
+      const pdfUrl = await pdfSvc.buildResultPdf({
+        school_name: schoolName,
+        term: 'First Term',
+        average: 82.4,
+        position: '3rd out of 35 students',
+        student: {
+          full_name: 'Chidi Okonkwo (Sample)',
+          admission_number: 'SCH/SAMPLE/001',
+          class_name: 'JSS 3A',
+          school_id: schoolId,
+          // Attaches passport_url dynamically if they uploaded one
+          passport_url: (await db.from('students').select('passport_url').eq('school_id', schoolId).not('passport_url', 'is', null).limit(1).maybeSingle()).data?.passport_url ?? null
+        },
+        subjects: [
+          { name: 'Mathematics', ca_score: 28, exam_score: 56, total: 84, grade: 'A' },
+          { name: 'English Language', ca_score: 24, exam_score: 52, total: 76, grade: 'A' },
+          { name: 'Basic Science', ca_score: 26, exam_score: 48, total: 74, grade: 'B' },
+          { name: 'Social Studies', ca_score: 25, exam_score: 42, total: 67, grade: 'B' },
+          { name: 'Agricultural Science', ca_score: 22, exam_score: 38, total: 60, grade: 'C' }
+        ]
+      });
+
+      await wa.document(
+        phone,
+        pdfUrl,
+        `Sample-Result-Branded.pdf`,
+        `Here is your official sample result sheet!`
+      );
+    } catch (err) {
+      console.error('[Preview] Result PDF build error:', err);
+      await wa.text(phone, `❌ Failed to build result preview. Check if you uploaded stamp/signature.`);
+    }
+    return;
+  }
+
+  await startCustomization(phone, session, wa);
+}
+
+// ============================================================
 // VIEW CURRENT BRANDING
 // ============================================================
 
@@ -907,7 +1036,7 @@ async function showCurrentBranding(
   const { data: school } = await db
     .from('schools')
     .select(`
-      name, logo_url, stamp_url, signature_url,
+      name, logo_url, stamp_url, principal_signature_url,
       motto, principal_name, receipt_footer,
       grade_scale
     `)
@@ -939,7 +1068,7 @@ async function showCurrentBranding(
   );
   lines.push(
     `Signature: ${
-      school.signature_url ? '✅ Uploaded' : '❌ Missing'
+      school.principal_signature_url ? '✅ Uploaded' : '❌ Missing'
     }`
   );
   lines.push('');
@@ -971,7 +1100,6 @@ async function showCurrentBranding(
     lines.push('');
   }
 
-  // Count students with passports
   const { count: studentsWithPhotos } = await db
     .from('students')
     .select('id', { count: 'exact' })
