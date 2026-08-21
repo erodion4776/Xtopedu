@@ -1,9 +1,9 @@
 // ============================================================
 // SCHOOLBOT - SESSION MANAGER
 // supabase/functions/_shared/session.ts
-// ✅ Fixed: Safe null fallback for virtual admin/owner IDs
-// ✅ Fixed: Prevents bot_sessions_school_user_id_fkey violations
-// ✅ Centralized phone formatting using utils
+// ✅ Fixed: Validates school_user_id against DB before inserting
+// ✅ Fixed: Stores null in DB for mock/virtual admin users
+// ✅ Fixed: Completely eliminates bot_sessions_school_user_id_fkey violations
 // ============================================================
 
 import { getSupabase } from './supabase.ts';
@@ -83,28 +83,47 @@ export class SessionService {
   }
 
   // ─── Create admin or teacher session ──────────────────────────────────
-  // ✅ Fixed: Automatically intercepts virtual/mock IDs
-  // ✅ Saves NULL in DB to satisfy foreign key constraints
-  // ✅ Keeps mock profiles attached in runtime memory
+  // ✅ Bulletproof: Verifies school_user_id in DB to guarantee NO FK violation
   async createAdminSession(
     phone: string,
     schoolUser: SchoolUser,
     waAccount: WhatsAppAccount | null,
     role: 'admin' | 'teacher' = 'admin'
   ): Promise<BotSession> {
-    // Detect virtual/mock users (Super Admin, Onboarded Owner, etc.)
-    const isVirtual =
-      !schoolUser.id ||
-      schoolUser.id.startsWith('virtual-') ||
-      schoolUser.id.startsWith('admin-') ||
-      schoolUser.id.startsWith('sa-own-') ||
-      schoolUser.id === 'super_admin';
+    let validSchoolUserId: string | null = null;
+
+    // Only attempt to store school_user_id in DB if it's a real user record in school_users
+    if (
+      schoolUser?.id &&
+      !schoolUser.id.startsWith('virtual-') &&
+      !schoolUser.id.startsWith('admin-') &&
+      !schoolUser.id.startsWith('sa-') &&
+      !schoolUser.id.startsWith('test-') &&
+      schoolUser.id !== 'super_admin'
+    ) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (uuidRegex.test(schoolUser.id)) {
+        try {
+          const { data: userRecord } = await db
+            .from('school_users')
+            .select('id')
+            .eq('id', schoolUser.id)
+            .maybeSingle();
+
+          if (userRecord?.id) {
+            validSchoolUserId = userRecord.id;
+          }
+        } catch {
+          validSchoolUserId = null;
+        }
+      }
+    }
 
     const record = {
       phone: this.fmt(phone),
       parent_id: null,
-      // If virtual, we write NULL to DB to bypass foreign key constraint
-      school_user_id: isVirtual ? null : schoolUser.id,
+      // If virtual / not in school_users, store NULL in DB (immune to FK errors)
+      school_user_id: validSchoolUserId,
       school_id: schoolUser.school_id,
       role: role as UserRole,
       state: 'ADMIN_MAIN_MENU' as BotState,
@@ -124,7 +143,7 @@ export class SessionService {
       throw new Error(`Failed to create admin session: ${error.message}`);
     }
 
-    // Return session object with full runtime metadata
+    // Keep full runtime profile metadata attached in memory
     return {
       ...(data as BotSession),
       schoolUser,
@@ -157,7 +176,7 @@ export class SessionService {
         .from('bot_sessions')
         .select('data')
         .eq('phone', this.fmt(phone))
-        .single();
+        .maybeSingle();
 
       update.data = {
         ...(current?.data ?? {}),
@@ -180,7 +199,7 @@ export class SessionService {
       .from('bot_sessions')
       .select('data')
       .eq('phone', this.fmt(phone))
-      .single();
+      .maybeSingle();
 
     await db
       .from('bot_sessions')
