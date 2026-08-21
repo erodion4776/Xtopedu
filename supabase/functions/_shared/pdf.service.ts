@@ -1,10 +1,10 @@
 // ============================================================
 // SCHOOLBOT - PDF SERVICE
 // supabase/functions/_shared/pdf.service.ts
-// ✅ Fixed: Comprehensive support for dynamic school branding
+// ✅ Fixed: WinAnsi encoding error on Naira (₦) symbol -> NGN
+// ✅ Fixed: Auto-sanitizes text (em-dashes, bullets, smart quotes)
 // ✅ Fixed: Safe hex color parsing for dynamic custom layouts
 // ✅ Fixed: Stamps, signatures, logos embedded with fallback protection
-// ✅ Uses unpkg/jsdelivr instead of esm.sh for reliability
 // ============================================================
 
 import {
@@ -17,11 +17,25 @@ import { getSupabase } from './supabase.ts';
 const db = getSupabase();
 const BUCKET = 'documents';
 
+// ✅ Formatter uses ASCII-safe "NGN" for PDF WinAnsi compatibility
 const fmt = (n: number) =>
-  new Intl.NumberFormat('en-NG', {
-    style:    'currency',
-    currency: 'NGN',
-  }).format(n);
+  `NGN ${new Intl.NumberFormat('en-NG', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(n)}`;
+
+// ─── WinAnsi Text Sanitizer ─────────────────────────────────
+// Replaces characters that standard PDF fonts cannot encode
+function sanitizeText(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/₦/g, 'NGN ')
+    .replace(/[—–]/g, '-')
+    .replace(/[•·]/g, '-')
+    .replace(/[""]/g, '"')
+    .replace(/['']/g, "'")
+    .replace(/[^\x00-\x7F]/g, ''); // Strip any remaining non-ASCII glyphs
+}
 
 // ─── Hex Color Parser ──────────────────────────────────────
 function hexToRgb(hex: string): [number, number, number] {
@@ -107,7 +121,10 @@ class PdfWriter {
       ? rgb(opts.color[0], opts.color[1], opts.color[2])
       : rgb(0.1, 0.1, 0.1);
 
-    this.page.drawText(text, {
+    // ✅ Clean string to prevent WinAnsi crash
+    const safeText = sanitizeText(text);
+
+    this.page.drawText(safeText, {
       x:    this.margin,
       y:    this.y,
       size,
@@ -183,7 +200,7 @@ export class PdfService {
     reference:       string;
     paymentDate:     string;
     issuedTo:        string;
-    schoolId:        string;  // ✅ Pass schoolId for branding
+    schoolId:        string;
   }): Promise<string> {
     const w = await PdfWriter.create();
 
@@ -196,7 +213,7 @@ export class PdfService {
 
     const brandColor = school?.primary_color ? hexToRgb(school.primary_color) : [0.12, 0.25, 0.68];
 
-    // ✅ Embed School Logo if exists
+    // Embed School Logo if exists
     if (school?.logo_url) {
       await drawImageFromUrl(w.doc, w.page, school.logo_url, w.margin, w.y - 50, 50, 50);
       w.space(20);
@@ -264,7 +281,7 @@ export class PdfService {
     );
     w.divider();
 
-    // ✅ Embed Official Stamp & Signature if exists
+    // Embed Official Stamp & Signature if exists
     if (school?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, school.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
@@ -274,7 +291,7 @@ export class PdfService {
 
     w.space(14);
     
-    // ✅ Apply custom footer or default
+    // Apply custom footer or default
     const footerText = school?.receipt_footer ?? 'This is an official payment receipt. Please keep this for your records.';
     w.line(footerText, {
       size: 8, color: [0.4, 0.4, 0.4],
@@ -309,7 +326,7 @@ export class PdfService {
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
 
-    // ✅ Embed School Logo if exists
+    // Embed School Logo if exists
     if (dbSchool?.logo_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin, w.y - 50, 50, 50);
       w.space(20);
@@ -354,9 +371,9 @@ export class PdfService {
 
     if (fees) {
       w.line('FEE COLLECTION', { bold: true, gap: 12, color: brandColor });
-      w.line(`Billed:        ${fees.total_billed_fmt}`);
-      w.line(`Collected:     ${fees.total_paid_fmt}`);
-      w.line(`Outstanding:   ${fees.total_outstanding_fmt}`);
+      w.line(`Billed:        ${fees.total_billed_fmt ? sanitizeText(String(fees.total_billed_fmt)) : ''}`);
+      w.line(`Collected:     ${fees.total_paid_fmt ? sanitizeText(String(fees.total_paid_fmt)) : ''}`);
+      w.line(`Outstanding:   ${fees.total_outstanding_fmt ? sanitizeText(String(fees.total_outstanding_fmt)) : ''}`);
       w.line(`Rate:          ${fees.collection_rate}`);
       w.line(`Paid invoices: ${fees.paid_invoices}`);
       w.line(`Pending:       ${fees.pending_invoices}`);
@@ -381,7 +398,6 @@ export class PdfService {
       w.divider();
     }
 
-    // ✅ Embed Official Stamp if exists
     if (dbSchool?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
@@ -432,7 +448,6 @@ export class PdfService {
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
 
-    // ✅ Embed School Logo if exists
     if (dbSchool?.logo_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin, w.y - 50, 50, 50);
       w.space(20);
@@ -449,7 +464,6 @@ export class PdfService {
     w.space(6);
     w.divider();
 
-    // ✅ Embed Student Passport if exists
     if (student.passport_url) {
       await drawImageFromUrl(w.doc, w.page, student.passport_url, w.width - w.margin - 65, w.y - 75, 65, 75);
     }
@@ -477,13 +491,12 @@ export class PdfService {
     const fees = data.fees as Record<string, unknown> | null;
     if (fees) {
       w.line('FEES & ACCOUNTS', { bold: true, gap: 12, color: brandColor });
-      w.line(`Total Paid:  ${fees.total_paid_fmt ?? ''}`);
-      w.line(`Outstanding: ${fees.total_outstanding_fmt ?? ''}`);
+      w.line(`Total Paid:  ${fees.total_paid_fmt ? sanitizeText(String(fees.total_paid_fmt)) : ''}`);
+      w.line(`Outstanding: ${fees.total_outstanding_fmt ? sanitizeText(String(fees.total_outstanding_fmt)) : ''}`);
       w.space(10);
       w.divider();
     }
 
-    // ✅ Embed Official Stamp if exists
     if (dbSchool?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
@@ -513,7 +526,6 @@ export class PdfService {
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
 
-    // ✅ Embed School Logo if exists
     if (dbSchool?.logo_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin, w.y - 50, 50, 50);
       w.space(20);
@@ -530,7 +542,6 @@ export class PdfService {
     w.space(6);
     w.divider();
 
-    // ✅ Embed Student Passport if exists
     if (student.passport_url) {
       await drawImageFromUrl(w.doc, w.page, student.passport_url, w.width - w.margin - 65, w.y - 75, 65, 75);
     }
@@ -581,14 +592,12 @@ export class PdfService {
       }
     }
 
-    // ✅ Embed Stamp on bottom right if exists
     if (dbSchool?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
 
     w.space(10);
 
-    // ✅ Result Footer
     const footerText = dbSchool?.result_footer ?? 'This is an official academic result sheet.';
     w.line(footerText, {
       size: 8, color: [0.4, 0.4, 0.4],
