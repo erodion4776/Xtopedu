@@ -1,12 +1,13 @@
 // ============================================================
 // SCHOOLBOT - MARKETING BOT & LIVE SANDBOX HANDLER
 // _shared/bot/marketing/marketing.handler.ts
-// ✅ Fixed: Interactive button clicks execute directly without menu reset
-// ✅ Live sandbox for prospective school owners
+// ✅ Added: Comprehensive FAQ & Full Features List
 // ✅ Interactive Live Attendance Marking (with simulated parent alert)
 // ✅ Real on-the-fly Result Card PDF generation (A4 single-page design)
 // ✅ Real on-the-fly Payment Receipt PDF generation
 // ✅ Interactive Fee Split & 1.5% Commission Simulator
+// ✅ Live Parent vs Admin View Toggle
+// ✅ Conversational AI with Sabi + Direct Registration Flow
 // ============================================================
 
 import { WhatsApp }       from '../../whatsapp.ts';
@@ -121,7 +122,6 @@ export async function handleMarketingMessage(
   }
 
   // 4. Marketing / Sandbox Session
-  // ✅ FIX: Ensure session exists, but NEVER discard user's action
   let session = await getMarketingSession(formatPhone(phone));
   if (!session) {
     session = await createMarketingSession(formatPhone(phone));
@@ -177,7 +177,7 @@ async function sendWelcome(
     `🎓 *Single-Page Result Sheets:* Generate & send beautiful A4 report cards directly to WhatsApp\n` +
     `🚗 *Pickup Security:* Verified pickup logs & safety alerts\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `*Try our live interactive sandbox below — no signup needed!* 👇`
+    `*Explore features or view our FAQs below:* 👇`
   );
 
   await delay(1200);
@@ -185,7 +185,7 @@ async function sendWelcome(
 }
 
 // ============================================================
-// MAIN SANDBOX HUB MENU
+// MAIN SANDBOX HUB MENU (Max 10 rows)
 // ============================================================
 
 async function showSandboxMainMenu(
@@ -198,28 +198,28 @@ async function showSandboxMainMenu(
 
   await wa.list(
     phone,
-    `🏫 SchoolBot Live Sandbox`,
-    `Explore real features using our demo school:\n*${DEMO_SCHOOL.name}*\n\nChoose an action to try:`,
+    `🏫 SchoolBot Hub`,
+    `Explore features & answers for our demo school:\n*${DEMO_SCHOOL.name}*\n\nSelect an option below:`,
     `Powered by SchoolBot · XtopEdu`,
-    `🎯 Choose Feature`,
+    `🎯 Main Menu`,
     [
       {
-        title: '👨‍💼 Test as School Admin',
+        title: '👨‍💼 Test Admin Features',
         rows: [
           {
             id:          'sandbox_mark_att',
             title:       '📝 Mark Attendance',
-            description: 'Mark student & get simulated parent alert',
+            description: 'Mark class & trigger parent alert',
           },
           {
             id:          'sandbox_result_pdf',
             title:       '🎓 Download Result PDF',
-            description: 'Get a sample single-page A4 report card',
+            description: 'Get sample single-page A4 result card',
           },
           {
             id:          'sandbox_receipt_pdf',
             title:       '🧾 Download Receipt PDF',
-            description: 'Get a sample official payment receipt',
+            description: 'Get sample branded official receipt',
           },
           {
             id:          'sandbox_fee_calc',
@@ -229,7 +229,7 @@ async function showSandboxMainMenu(
         ],
       },
       {
-        title: '👨‍👩‍👧 Test as Parent',
+        title: '👨‍👩‍👧 Test Parent Features',
         rows: [
           {
             id:          'sandbox_parent_att',
@@ -239,7 +239,7 @@ async function showSandboxMainMenu(
           {
             id:          'sandbox_parent_fees',
             title:       '💳 Pay School Fees',
-            description: 'View outstanding balance & payment link',
+            description: 'View outstanding balance & pay link',
           },
           {
             id:          'sandbox_parent_pickup',
@@ -249,8 +249,13 @@ async function showSandboxMainMenu(
         ],
       },
       {
-        title: '🚀 Get Started',
+        title: '💡 FAQs & Registration',
         rows: [
+          {
+            id:          'show_faq_menu',
+            title:       '❓ FAQs & All Features',
+            description: 'Everything SchoolBot can do + FAQs',
+          },
           {
             id:          'see_pricing',
             title:       '💵 View Pricing',
@@ -260,11 +265,6 @@ async function showSandboxMainMenu(
             id:          'register_now',
             title:       '🚀 Register My School',
             description: 'Set up your school in 5 minutes',
-          },
-          {
-            id:          'talk_to_us',
-            title:       '📞 Talk to Our Team',
-            description: 'Speak with our team on WhatsApp',
           },
         ],
       },
@@ -283,6 +283,23 @@ async function handleSandboxSelection(
   wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
+
+    // ── FAQ & Features Overview ───────────────────────────
+    case 'show_faq_menu':
+      await showFAQOverview(phone, session, wa);
+      break;
+
+    case 'faq_all_features':
+      await showAllFeaturesList(phone, session, wa);
+      break;
+
+    case 'faq_general_questions':
+      await showGeneralFAQ(phone, session, wa);
+      break;
+
+    case 'faq_fees_payments':
+      await showFeesPaymentFAQ(phone, session, wa);
+      break;
 
     // ── Admin: Live Attendance Marking ────────────────────
     case 'sandbox_mark_att':
@@ -349,6 +366,159 @@ async function handleSandboxSelection(
         await handleAI(phone, session, input, wa);
       }
   }
+}
+
+// ============================================================
+// 💡 FAQ & ALL FEATURES SECTION
+// ============================================================
+
+async function showFAQOverview(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  session.state = 'FAQ_HUB';
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'faq_view');
+
+  await wa.buttons(
+    phone,
+    `❓ *Frequently Asked Questions & Features*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `SchoolBot turns standard WhatsApp into an all-in-one management portal for Nigerian schools.\n\n` +
+    `What would you like to explore?`,
+    [
+      { id: 'faq_all_features',      title: '📋 All Features List' },
+      { id: 'faq_general_questions', title: '❓ General FAQs'       },
+      { id: 'faq_fees_payments',     title: '💰 Fees & Paystack FAQ'},
+    ]
+  );
+}
+
+async function showAllFeaturesList(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'all_features_list');
+
+  await wa.text(
+    phone,
+    `🌟 *COMPLETE SCHOOLBOT FEATURES LIST*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `1️⃣ *ACADEMICS & DAILY ATTENDANCE:*\n` +
+    `• Mark 40 students in 2 minutes via WhatsApp buttons\n` +
+    `• Instant automated parent alerts (Present, Absent, Late)\n` +
+    `• Real-time class attendance rate & absence analytics\n` +
+    `• Term-wide summary & consecutive absence tracking\n\n` +
+    `2️⃣ *FINANCE & ONLINE FEE COLLECTION:*\n` +
+    `• Bill tuition, uniform, textbooks, PTA, sports, & custom fees\n` +
+    `• Direct settlement to school bank account via Paystack\n` +
+    `• *100% tuition received* (1.5% fee covered by parent)\n` +
+    `• Instant official branded PDF receipts sent to WhatsApp\n` +
+    `• Automated WhatsApp fee reminders for debtors\n` +
+    `• Cash / Bank Transfer manual payment recording\n\n` +
+    `3️⃣ *SINGLE-PAGE A4 RESULT SHEETS:*\n` +
+    `• Beautiful A4 result sheets tailored for Nigerian schools\n` +
+    `• Subject CA (1st & 2nd) + Exam + Grade + Remarks\n` +
+    `• Affective traits rating (Punctuality, Neatness, Honesty, etc.)\n` +
+    `• Next term fees breakdown & resumption dates\n` +
+    `• School logo, official stamp & Principal signature embedded\n\n` +
+    `4️⃣ *STUDENT PICKUP & CHILD SAFETY:*\n` +
+    `• Register authorized guardians with photos & phone numbers\n` +
+    `• Instant WhatsApp alert whenever a child is dismissed\n` +
+    `• Gatekeeper verification logs\n\n` +
+    `5️⃣ *ADMIN & STAFF MANAGEMENT:*\n` +
+    `• Add teachers & bursars via simple 8-digit invite codes\n` +
+    `• Broadcast messages to all parents or specific classes\n` +
+    `• Fast bulk CSV importer (1,500+ students in 30 seconds)\n` +
+    `• Multi-school support for proprietors with multiple branches\n` +
+    `━━━━━━━━━━━━━━━━`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Ready to test these features live or register?`,
+    [
+      { id: 'main_menu',    title: '🎯 Test Features'  },
+      { id: 'see_pricing',  title: '💵 View Pricing'   },
+      { id: 'register_now', title: '🚀 Register School' },
+    ]
+  );
+}
+
+async function showGeneralFAQ(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'general_faq');
+
+  await wa.text(
+    phone,
+    `❓ *GENERAL FREQUENTLY ASKED QUESTIONS*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `📌 *Q1: Do parents or teachers need to download a new app?*\n` +
+    `👉 *A:* No! Everything works 100% inside regular WhatsApp. Parents, teachers, and admins never need to install anything.\n\n` +
+    `📌 *Q2: Can we customize result sheets and receipts with our school logo?*\n` +
+    `👉 *A:* Yes! Upload your school logo, motto, address, stamp, and principal's signature. All PDFs are automatically branded with your school identity.\n\n` +
+    `📌 *Q3: What if we have hundreds or thousands of students?*\n` +
+    `👉 *A:* You can upload your whole student population in one click using our fast CSV spreadsheet template. 1,500 students import in under 30 seconds.\n\n` +
+    `📌 *Q4: Are there monthly subscription fees?*\n` +
+    `👉 *A:* No monthly subscription! You only pay a one-time setup fee based on student population. You get lifetime access to the platform.\n\n` +
+    `📌 *Q5: Can teachers access student fee balances or admin financial reports?*\n` +
+    `👉 *A:* No. Teacher accounts only have access to mark attendance and manage academic scores. Financial reports are restricted to Administrators and Proprietors.\n` +
+    `━━━━━━━━━━━━━━━━`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Have more questions or want to see pricing?`,
+    [
+      { id: 'faq_fees_payments', title: '💰 Fees & Pay FAQ'  },
+      { id: 'talk_to_us',        title: '📞 Speak With Us'   },
+      { id: 'register_now',      title: '🚀 Register School' },
+    ]
+  );
+}
+
+async function showFeesPaymentFAQ(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'fees_faq');
+
+  await wa.text(
+    phone,
+    `💰 *FEES & PAYMENT FAQS*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `📌 *Q1: How does the school receive fee payments?*\n` +
+    `👉 *A:* Payments are processed through Paystack and settled directly into your registered Nigerian school bank account (Access, GTBank, Zenith, First Bank, etc.).\n\n` +
+    `📌 *Q2: How does the 1.5% platform fee work?*\n` +
+    `👉 *A:* The 1.5% platform fee is added on *top* of the parent's invoice. For example, if school fee is ₦50,000, parent pays ₦50,750 (+ gateway fee), and your school receives the full ₦50,000 (100%).\n\n` +
+    `📌 *Q3: Can we still record manual cash or direct bank transfers?*\n` +
+    `👉 *A:* Yes! Admins can search any student, record Cash/Transfer/POS payments, and the bot immediately issues an official PDF receipt to the parent on WhatsApp.\n\n` +
+    `📌 *Q4: Can we bill custom items like Uniforms, Books, and Excursions?*\n` +
+    `👉 *A:* Yes! You can create any custom fee structure and bill an entire class, an arm, or a single student with customized due dates.\n` +
+    `━━━━━━━━━━━━━━━━`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Ready to get started?`,
+    [
+      { id: 'sandbox_fee_calc', title: '💰 Fee Simulator'   },
+      { id: 'see_pricing',      title: '💵 View Pricing'    },
+      { id: 'register_now',     title: '🚀 Register School' },
+    ]
+  );
 }
 
 // ============================================================
@@ -688,7 +858,7 @@ async function showParentFeesView(
     `   📅 Due: 30 Mar 2025\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
     `💵 *Total Outstanding: ${fmt(DEMO_FEES.totalOutstanding)}*\n\n` +
-    `Parent taps *Pay Now* → Secure Paystack link → Pays via Card, Transfer or USSD!`
+    `Parent taps *Pay Now* $\rightarrow$ Secure Paystack link $\rightarrow$ Pays via Card, Transfer or USSD!`
   );
 
   await delay(1500);
@@ -891,7 +1061,6 @@ async function handleTextInput(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
-  // If user enters a number while in fee simulator state
   if (session.state === 'SANDBOX_FEE_CALC' || !isNaN(parseFloat(rawText.replace(/,/g, '')))) {
     const num = parseFloat(rawText.replace(/,/g, ''));
     if (!isNaN(num) && num >= 500) {
@@ -951,7 +1120,6 @@ async function handleAI(
   await wa.text(phone, aiResponse);
   await delay(1200);
 
-  // Direct follow-up based on detected intent
   switch (intent) {
     case 'attendance_demo':
       await startLiveAttendanceDemo(phone, session, wa);
@@ -976,9 +1144,9 @@ async function handleAI(
         phone,
         `What would you like to explore next?`,
         [
-          { id: 'main_menu',    title: '🎯 Test Features'  },
-          { id: 'see_pricing',  title: '💵 See Pricing'   },
-          { id: 'register_now', title: '🚀 Register School' },
+          { id: 'main_menu',     title: '🎯 Test Features'   },
+          { id: 'show_faq_menu', title: '❓ FAQs & Details' },
+          { id: 'register_now',  title: '🚀 Register School'  },
         ]
       );
   }
