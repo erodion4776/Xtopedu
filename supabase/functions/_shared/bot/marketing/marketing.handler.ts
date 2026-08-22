@@ -1,13 +1,12 @@
 // ============================================================
 // SCHOOLBOT - MARKETING BOT & LIVE SANDBOX HANDLER
 // _shared/bot/marketing/marketing.handler.ts
+// ✅ Fixed: Interactive button clicks execute directly without menu reset
 // ✅ Live sandbox for prospective school owners
 // ✅ Interactive Live Attendance Marking (with simulated parent alert)
 // ✅ Real on-the-fly Result Card PDF generation (A4 single-page design)
 // ✅ Real on-the-fly Payment Receipt PDF generation
 // ✅ Interactive Fee Split & 1.5% Commission Simulator
-// ✅ Live Parent vs Admin View Toggle
-// ✅ Conversational AI with Sabi + Direct Registration Flow
 // ============================================================
 
 import { WhatsApp }       from '../../whatsapp.ts';
@@ -49,7 +48,7 @@ const db       = getSupabase();
 const pdfSvc   = new PdfService();
 
 const RESET_KEYWORDS = new Set([
-  'hi', 'hello', 'hey', 'start', 'menu', 'home', '00',
+  'hi', 'hello', 'hey', 'start', 'menu', 'home', '00', 'restart',
 ]);
 
 const TRIAL_CODE_REGEX =
@@ -122,10 +121,14 @@ export async function handleMarketingMessage(
   }
 
   // 4. Marketing / Sandbox Session
+  // ✅ FIX: Ensure session exists, but NEVER discard user's action
   let session = await getMarketingSession(formatPhone(phone));
-
-  if (!input || RESET_KEYWORDS.has(input) || !session) {
+  if (!session) {
     session = await createMarketingSession(formatPhone(phone));
+  }
+
+  // Only trigger welcome if user sent an explicit reset keyword or empty input
+  if (!input || RESET_KEYWORDS.has(input)) {
     await sendWelcome(phone, session, wa);
     return;
   }
@@ -588,7 +591,6 @@ async function calculateAndShowFeeSplit(
   const platformCommission = parseFloat((schoolFee * 0.015).toFixed(2));
   const subtotal = schoolFee + platformCommission;
   
-  // Paystack standard rate in Nigeria: 1.5% + ₦100 (capped at ₦2000), waived if under ₦2500
   let paystackCharge = subtotal < 2500 ? subtotal * 0.015 : subtotal * 0.015 + 100;
   paystackCharge = Math.min(paystackCharge, 2000);
   paystackCharge = parseFloat(paystackCharge.toFixed(2));
@@ -686,7 +688,7 @@ async function showParentFeesView(
     `   📅 Due: 30 Mar 2025\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
     `💵 *Total Outstanding: ${fmt(DEMO_FEES.totalOutstanding)}*\n\n` +
-    `Parent taps *Pay Now* $\rightarrow$ Secure Paystack link $\rightarrow$ Pays via Card, Transfer or USSD!`
+    `Parent taps *Pay Now* → Secure Paystack link → Pays via Card, Transfer or USSD!`
   );
 
   await delay(1500);
