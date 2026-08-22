@@ -1,6 +1,7 @@
 // ============================================================
 // SCHOOLBOT - MARKETING SESSION SERVICE
 // _shared/bot/marketing/marketing.session.ts
+// ✅ Tracks sandbox state, role mode, and lead details
 // ============================================================
 
 import { getSupabase } from '../../supabase.ts';
@@ -12,13 +13,15 @@ const SESSION_TTL_HOURS = 12;
 export type DemoSession = {
   phone:        string;
   state:        string;
+  sandboxRole:  'admin' | 'parent';
   contactName:  string | null;
   schoolName:   string | null;
   schoolType:   string | null;
   location:     string | null;
   studentCount: string | null;
   email:        string | null;
-  aiHistory:    Array<{ role: string; content: string }>;
+  aiHistory:    Array<{ role: 'user' | 'assistant'; content: string }>;
+  tempData:     Record<string, unknown>;
   registered:   boolean;
 };
 
@@ -41,6 +44,7 @@ export async function getMarketingSession(
   return {
     phone:        data.phone,
     state:        data.state         ?? 'WELCOME',
+    sandboxRole:  (data.temp_data?.sandboxRole as 'admin' | 'parent') ?? 'admin',
     contactName:  data.contact_name  ?? null,
     schoolName:   data.school_name   ?? null,
     schoolType:   data.school_type   ?? null,
@@ -48,9 +52,10 @@ export async function getMarketingSession(
     studentCount: data.student_count ?? null,
     email:        data.email         ?? null,
     aiHistory:    (data.ai_history as Array<{
-      role:    string;
+      role:    'user' | 'assistant';
       content: string;
     }>) ?? [],
+    tempData:     (data.temp_data as Record<string, unknown>) ?? {},
     registered:   data.registered    ?? false,
   };
 }
@@ -72,6 +77,7 @@ export async function saveMarketingSession(
         email:          session.email,
         ai_history:     session.aiHistory,
         registered:     session.registered,
+        temp_data:      { ...session.tempData, sandboxRole: session.sandboxRole },
         interested:     true,
         last_activity:  new Date().toISOString(),
       },
@@ -85,6 +91,7 @@ export async function createMarketingSession(
   const session: DemoSession = {
     phone,
     state:        'WELCOME',
+    sandboxRole:  'admin',
     contactName:  null,
     schoolName:   null,
     schoolType:   null,
@@ -92,6 +99,7 @@ export async function createMarketingSession(
     studentCount: null,
     email:        null,
     aiHistory:    [],
+    tempData:     {},
     registered:   false,
   };
 
@@ -99,8 +107,6 @@ export async function createMarketingSession(
   return session;
 }
 
-// ✅ Returns false for states where user should NOT
-// be routed to marketing bot
 export async function hasActiveMarketingSession(
   phone: string
 ): Promise<boolean> {
@@ -117,20 +123,7 @@ export async function hasActiveMarketingSession(
 
   if (!data) return false;
 
-  // ✅ These states should NOT route to marketing:
-  //
-  // WELCOME — new visitor, check DB identity first
-  //
-  // REGISTERING — in onboarding flow
-  //
-  // TRIAL_ACTIVE — activated trial, registering
-  //
-  // NOT_INTERESTED — ended conversation
-  //
-  // Note: After showComplete() deletes demo_sessions,
-  // this function returns false automatically ✅
   if (
-    data.state === 'WELCOME'       ||
     data.state === 'REGISTERING'   ||
     data.state === 'TRIAL_ACTIVE'  ||
     data.state === 'NOT_INTERESTED'
@@ -146,19 +139,6 @@ export async function logDemoInteraction(
   feature: string
 ): Promise<void> {
   try {
-    await db
-      .from('demo_sessions')
-      .upsert(
-        {
-          phone,
-          state:         'DEMO_MENU',
-          interested:    true,
-          registered:    false,
-          last_activity: new Date().toISOString(),
-        },
-        { onConflict: 'phone' }
-      );
-
     const { data: session } = await db
       .from('demo_sessions')
       .select('id')
@@ -167,9 +147,9 @@ export async function logDemoInteraction(
 
     if (session?.id) {
       await db.from('demo_interactions').insert({
-        session_id:  session.id,
+        session_id: session.id,
         feature,
-        created_at:  new Date().toISOString(),
+        created_at: new Date().toISOString(),
       });
     }
   } catch {
