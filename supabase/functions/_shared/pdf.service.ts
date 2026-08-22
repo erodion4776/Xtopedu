@@ -1,8 +1,8 @@
 // ============================================================
 // SCHOOLBOT - PDF SERVICE
 // supabase/functions/_shared/pdf.service.ts
-// ✅ Redesigned buildResultPdf into a high-end, single-page A4 template
-// ✅ Fixed: Horizontal side-by-side header layout with logo left, text center, avatar right
+// ✅ Fixed: Added Cache-Busting timestamps to all PDF filenames to force instant WhatsApp updates
+// ✅ Fixed: Horizontal side-by-side header layout (logo on left, text on right, no overlap)
 // ✅ Fixed: WinAnsi encoding error on Naira (₦) symbol -> NGN
 // ✅ Fixed: Auto-sanitizes text (em-dashes, bullets, smart quotes)
 // ✅ Fixed: Stamps, signatures, logos embedded with fallback protection
@@ -18,7 +18,7 @@ import { getSupabase } from './supabase.ts';
 const db = getSupabase();
 const BUCKET = 'documents';
 
-// ASCII-safe currency format for PDF WinAnsi compatibility
+// ✅ ASCII-safe currency format for PDF WinAnsi compatibility
 const fmt = (n: number) =>
   `NGN ${new Intl.NumberFormat('en-NG', {
     minimumFractionDigits: 0,
@@ -50,7 +50,7 @@ function hexToRgb(hex: string): [number, number, number] {
       isNaN(b) ? 0.376 : b,
     ];
   } catch {
-    return [0.0, 0.356, 0.376]; // default dark teal
+    return [0.0, 0.356, 0.376];
   }
 }
 
@@ -153,7 +153,7 @@ class PdfWriter {
   }
 }
 
-// ─── Reusable Branded Header (Logo Left, Text Center, Avatar Right) ────────
+// ─── Reusable Branded Header (Logo Left, Text Right) ────────
 async function drawSchoolHeader(
   w: PdfWriter,
   school: {
@@ -352,6 +352,7 @@ export class PdfService {
     );
     w.divider();
 
+    // Embed Official Stamp & Signature if exists
     if (school?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, school.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
@@ -371,7 +372,8 @@ export class PdfService {
 
     const bytes = await w.bytes();
     const safe  = params.receiptNumber.replace(/[^A-Za-z0-9-]/g, '');
-    return uploadPdf(bytes, `receipts/${safe}.pdf`);
+    const stamp = Date.now(); // ✅ Cache-Buster
+    return uploadPdf(bytes, `receipts/${safe}-${stamp}.pdf`);
   }
 
   // ─── Build Term Report PDF ──────────────────────────────
@@ -477,7 +479,7 @@ export class PdfService {
       .toString()
       .replace(/[^A-Za-z0-9]/g, '')
       .slice(0, 20);
-    const stamp = Date.now();
+    const stamp = Date.now(); // ✅ Cache-Buster
 
     return uploadPdf(
       bytes,
@@ -548,45 +550,39 @@ export class PdfService {
 
     const bytes = await w.bytes();
     const adm   = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
+    const stamp = Date.now(); // ✅ Cache-Buster
 
-    return uploadPdf(bytes, `reports/student-${adm}.pdf`);
+    return uploadPdf(bytes, `reports/student-${adm}-${stamp}.pdf`);
   }
 
   // ─── Build Highly Styled Custom Result PDF ─────────────────
-  // ✅ Complete rebuild based on A4 single-page constraints & design specifications
   async buildResultPdf(
     data: Record<string, unknown>
   ): Promise<string> {
     const student = data.student as Record<string, string> ?? {};
     const subjects = data.subjects as Array<Record<string, unknown>> ?? [];
-    
-    // Create new document with tight 50pt margins
     const w = await PdfWriter.create();
 
     const schoolId = student.school_id;
 
-    // Fetch school branding info
     const { data: dbSchool } = await db
       .from('schools')
       .select('logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, result_footer, address, phone')
       .eq('id', schoolId)
       .maybeSingle();
 
-    // ── Theme Configuration ────────────────────────────────────
-    const primaryColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376]; // #005B60 Dark Teal
+    const primaryColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376];
     const thinBorderColor = rgb(0.8, 0.8, 0.8);
     const textDarkColor = rgb(0.12, 0.15, 0.18);
     const whiteColor = rgb(1.0, 1.0, 1.0);
     const zebraColor = rgb(0.96, 0.98, 0.98);
 
-    // Initial Y tracking starting from top
-    w.y = w.height - 40; // 40pt top margin
+    w.y = w.height - 40;
 
     // ── 1. HEADER SECTION (3 Columns) ──────────────────────────
     const headerY = w.y;
     const headerHeight = 70;
 
-    // Left Column: circular school logo placeholder
     w.page.drawCircle({
       x: w.margin + 25,
       y: headerY - 30,
@@ -595,18 +591,9 @@ export class PdfService {
       borderWidth: 1.5,
     });
     if (dbSchool?.logo_url) {
-      await drawImageFromUrl(
-        w.doc,
-        w.page,
-        dbSchool.logo_url,
-        w.margin + 4,
-        headerY - 51,
-        42,
-        42
-      );
+      await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin + 4, headerY - 51, 42, 42);
     }
 
-    // Center Column: Centered school text details
     const centerX = w.width / 2;
     const schoolName = sanitizeText(dbSchool?.name ?? "SPOTLIGHT COMPREHENSIVE COLLEGE");
     const addressLine = sanitizeText(dbSchool?.address ?? "28, OVIAWEH STREET OFF AYEPE ROAD, SAGAMU, OGUN STATE");
@@ -642,7 +629,6 @@ export class PdfService {
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
-    // Right Column: Stylized avatar/student placeholder box
     const photoX = w.width - w.margin - 55;
     const photoWidth = 55;
     const photoHeight = 65;
@@ -657,17 +643,8 @@ export class PdfService {
     });
 
     if (student.passport_url) {
-      await drawImageFromUrl(
-        w.doc,
-        w.page,
-        student.passport_url,
-        photoX + 1.5,
-        headerY - photoHeight + 16.5,
-        photoWidth - 3,
-        photoHeight - 3
-      );
+      await drawImageFromUrl(w.doc, w.page, student.passport_url, photoX + 1.5, headerY - photoHeight + 16.5, photoWidth - 3, photoHeight - 3);
     } else {
-      // Draw minimal silhouette vector placeholder
       const avatarCenter = photoX + (photoWidth / 2);
       w.page.drawCircle({
         x: avatarCenter,
@@ -698,7 +675,6 @@ export class PdfService {
       borderWidth: 1,
     });
 
-    // Box Header Label
     w.page.drawText("SECOND TERM REPORT SHEET", {
       x: centerX - (w.bold.widthOfTextAtSize("SECOND TERM REPORT SHEET", 9.5) / 2),
       y: infoBoxY - 14,
@@ -707,13 +683,11 @@ export class PdfService {
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
-    // Key-value Grid Coordinate Calculator
     const drawGridField = (lbl: string, val: string, x: number, y: number, length: number) => {
       w.page.drawText(lbl, { x, y, size: 7, font: w.bold, color: rgb(0.3, 0.3, 0.3) });
       const labelOffset = w.bold.widthOfTextAtSize(lbl, 7) + 5;
       const valText = sanitizeText(val || 'N/A');
       w.page.drawText(valText, { x: x + labelOffset, y: y, size: 7, font: w.font, color: textDarkColor });
-      // Draw Underline
       w.page.drawLine({
         start: { x: x + labelOffset, y: y - 1.5 },
         end: { x: x + length, y: y - 1.5 },
@@ -725,27 +699,22 @@ export class PdfService {
     const rowH = 15;
     const gridY = infoBoxY - 32;
 
-    // Row 1
     drawGridField("NAME OF PUPIL:", `${student.full_name ?? ''}`, w.margin + 10, gridY, 230);
     drawGridField("CLASS:", `${student.class_name ?? ''}`, w.margin + 245, gridY, 130);
     drawGridField("NO. IN CLASS:", `${data.class_count ?? '0'}`, w.margin + 385, gridY, 100);
 
-    // Row 2
     drawGridField("REGISTRATION NUMBER:", `${student.admission_number ?? ''}`, w.margin + 10, gridY - rowH, 230);
     drawGridField("SESSION:", `${data.academic_year ?? '2024/2025'}`, w.margin + 245, gridY - rowH, 130);
     drawGridField("TIMES SCHOOL OPENED:", "116", w.margin + 385, gridY - rowH, 100);
 
-    // Row 3
     drawGridField("CLOSING DATE:", "18/12/2026", w.margin + 10, gridY - (rowH * 2), 230);
     drawGridField("TERM:", "SECOND TERM", w.margin + 245, gridY - (rowH * 2), 130);
     drawGridField("TIMES PRESENT:", "114", w.margin + 385, gridY - (rowH * 2), 100);
 
-    // Row 4
     drawGridField("RESUMPTION DATE:", "11/01/2027", w.margin + 10, gridY - (rowH * 3), 230);
     drawGridField("GENDER:", `${student.gender ?? 'N/A'}`, w.margin + 245, gridY - (rowH * 3), 130);
     drawGridField("TIMES ABSENT:", "2", w.margin + 385, gridY - (rowH * 3), 100);
 
-    // Metric Summary Sub-boxes
     const metricsY = infoBoxY - infoBoxHeight + 5;
     const metricsH = 18;
     const metricW = 90;
@@ -799,11 +768,10 @@ export class PdfService {
 
     w.y -= tableHeaderHeight;
 
-    const colWidths = [145, 55, 55, 55, 60, 50, 75]; // Total: 495
+    const colWidths = [145, 55, 55, 55, 60, 50, 75];
     const colAlign: Array<'left' | 'center'> = ['left', 'center', 'center', 'center', 'center', 'center', 'center'];
     const tblHeaders = ["SUBJECT", "1ST C.A (10)", "2ND C.A (20)", "EXAM (70)", "TOTAL (100)", "GRADE", "REMARKS"];
 
-    // Draw Table Header Columns
     let colX = w.margin;
     const tblSubHeaderH = 13;
     w.page.drawRectangle({
@@ -830,7 +798,6 @@ export class PdfService {
     }
     w.y -= tblSubHeaderH;
 
-    // Fixed subjects schema requirements
     const standardSubjects = [
       "Mathematics", "English Language", "Yoruba Language", "Social Studies", "Business Studies",
       "Home Economics", "Basic Science", "Basic Technology", "Literature in English", "Civic Education",
@@ -845,20 +812,15 @@ export class PdfService {
         (x) => String(x.name).trim().toLowerCase() === subName.toLowerCase()
       );
 
-      // Extract details, mapping defaults safely
       const ca1 = matchingScore ? String(matchingScore.ca_score ?? '0') : '0';
       const ca2 = matchingScore ? String(matchingScore.ca2_score ?? '0') : '0';
       const exam = matchingScore ? String(matchingScore.exam_score ?? '0') : '0';
-      const totalScoreVal = matchingScore ? parseFloat(String(matchingScore.total ?? '0')) : 0;
       const total = matchingScore ? String(matchingScore.total ?? '0') : '0';
       const grade = matchingScore ? String(matchingScore.grade ?? 'F') : 'F';
-      
-      // Determine remark based on WAEC standard or grade mapping
       const remark = matchingScore ? String(matchingScore.remark ?? 'POOR') : 'POOR';
 
       const rowY = w.y - rowHeight;
 
-      // Draw row container box
       w.page.drawRectangle({
         x: w.margin,
         y: rowY,
@@ -894,7 +856,7 @@ export class PdfService {
     const colSpace = 9;
     const colW = (w.width - (w.margin * 2) - (colSpace * 2)) / 3;
 
-    // --- COLUMN 1: AFFECTIVE TRAITS ---
+    // COLUMN 1: AFFECTIVE TRAITS
     const drawAffectiveTraits = (x: number) => {
       const traitsHeaderH = 12;
       w.page.drawRectangle({ x, y: threeColY - traitsHeaderH, width: colW, height: traitsHeaderH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
@@ -912,16 +874,13 @@ export class PdfService {
         currY -= traitRowH;
         w.page.drawRectangle({ x, y: currY, width: colW, height: traitRowH, borderColor: thinBorderColor, borderWidth: 0.3 });
         w.page.drawText(traits[t], { x: x + 6, y: currY + 3, size: 5.5, font: w.bold, color: textDarkColor });
-        // Draw Rating Box Placeholder
         w.page.drawRectangle({ x: x + colW - 24, y: currY + 1.5, width: 14, height: 6.5, borderColor: thinBorderColor, borderWidth: 0.5 });
       }
     };
 
-    // --- COLUMN 2: KEYS TO GRADING & RATINGS ---
+    // COLUMN 2: KEYS TO GRADING & RATINGS
     const drawKeys = (x: number) => {
       const headerH = 12;
-      
-      // Grading Header
       w.page.drawRectangle({ x, y: threeColY - headerH, width: colW, height: headerH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
       w.page.drawText("KEYS TO GRADING", { x: x + 6, y: threeColY - 9, size: 6.5, font: w.bold, color: whiteColor });
 
@@ -932,7 +891,6 @@ export class PdfService {
         w.page.drawText(grad, { x: x + 6, y: currY, size: 6.5, font: w.font, color: textDarkColor });
       }
 
-      // Rating Header
       currY -= 15;
       w.page.drawRectangle({ x, y: currY, width: colW, height: headerH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
       w.page.drawText("KEYS TO RATING", { x: x + 6, y: currY + 3.5, size: 6.5, font: w.bold, color: whiteColor });
@@ -945,7 +903,7 @@ export class PdfService {
       }
     };
 
-    // --- COLUMN 3: SCHOOL BILLS ---
+    // COLUMN 3: SCHOOL BILLS
     const drawSchoolBills = (x: number) => {
       const headerH = 12;
       w.page.drawRectangle({ x, y: threeColY - headerH, width: colW, height: headerH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
@@ -957,8 +915,8 @@ export class PdfService {
         { label: "BOOKS:", amount: "233" },
         { label: "LESSON FEE:", amount: "1,300" },
         { label: "DICTION/PHONICS:", amount: "4,500" },
-        { label: " ", amount: " " }, // empty padding row
-        { label: " ", amount: "3,500" }, // placeholder
+        { label: " ", amount: " " },
+        { label: " ", amount: "3,500" },
         { label: "OUTSTANDING FEE:", amount: "5,000" },
         { label: "TOTAL:", amount: "65,533", bold: true }
       ];
@@ -985,11 +943,10 @@ export class PdfService {
     drawSchoolBills(w.margin + (colW * 2) + (colSpace * 2));
 
     // ── 5. FOOTER SECTION ──────────────────────────────────────
-    w.y = threeColY - 110 - 20; // safe coordinate calculation
+    w.y = threeColY - 110 - 20;
     const footerY = w.y;
     const footerHeight = 65;
 
-    // Draw bottom dark teal border stripe
     w.page.drawRectangle({
       x: w.margin,
       y: w.margin - 10,
@@ -998,14 +955,13 @@ export class PdfService {
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
-    // Left Side: Three stacked comments lines with bordered box look
     const drawCommentLine = (lbl: string, y: number) => {
       w.page.drawText(lbl, { x: w.margin, y, size: 6.5, font: w.bold, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
       const labelW = w.bold.widthOfTextAtSize(lbl, 6.5);
       w.page.drawRectangle({
         x: w.margin + labelW + 8,
         y: y - 3,
-        width: w.width - (w.margin * 2) - labelW - 145, // leave space for right column
+        width: w.width - (w.margin * 2) - labelW - 145,
         height: 11,
         borderColor: thinBorderColor,
         borderWidth: 0.5,
@@ -1016,7 +972,6 @@ export class PdfService {
     drawCommentLine("PRINCIPAL'S COMMENT:", footerY - 26);
     drawCommentLine("PROPRIETOR'S COMMENT:", footerY - 42);
 
-    // Right Side: Rectangular Stamp & Signature box
     const sigX = w.width - w.margin - 120;
     const sigW = 120;
     const sigH = 50;
@@ -1037,7 +992,6 @@ export class PdfService {
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
-    // Embed Dynamic Principal Signature & Stamps inside the box if present
     if (dbSchool?.principal_signature_url) {
       await drawImageFromUrl(w.doc, w.page, dbSchool.principal_signature_url, sigX + 10, footerY - sigH + 15, 100, 30);
     }
@@ -1045,10 +999,10 @@ export class PdfService {
       await drawImageFromUrl(w.doc, w.page, dbSchool.stamp_url, sigX + sigW - 55, footerY - sigH + 8, 45, 45, 0.7);
     }
 
-    // Generate output
     const bytes = await w.bytes();
-    const adm = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
+    const adm   = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
+    const stamp = Date.now(); // ✅ Unique timestamp bypasses all WhatsApp/CDN caches!
 
-    return uploadPdf(bytes, `results/result-${adm}.pdf`);
+    return uploadPdf(bytes, `results/result-${adm}-${stamp}.pdf`);
   }
 }
