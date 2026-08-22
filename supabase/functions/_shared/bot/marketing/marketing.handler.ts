@@ -1,13 +1,20 @@
 // ============================================================
-// SCHOOLBOT - MARKETING BOT HANDLER
+// SCHOOLBOT - MARKETING BOT & LIVE SANDBOX HANDLER
 // _shared/bot/marketing/marketing.handler.ts
-// ✅ Checks existing schools before registration
+// ✅ Live sandbox for prospective school owners
+// ✅ Interactive Live Attendance Marking (with simulated parent alert)
+// ✅ Real on-the-fly Result Card PDF generation (A4 single-page design)
+// ✅ Real on-the-fly Payment Receipt PDF generation
+// ✅ Interactive Fee Split & 1.5% Commission Simulator
+// ✅ Live Parent vs Admin View Toggle
+// ✅ Conversational AI with Sabi + Direct Registration Flow
 // ============================================================
 
-import { WhatsApp }    from '../../whatsapp.ts';
-import { AIService }   from '../../ai.service.ts';
-import { getSupabase } from '../../supabase.ts';
-import { formatPhone } from '../../utils.ts';
+import { WhatsApp }       from '../../whatsapp.ts';
+import { AIService }      from '../../ai.service.ts';
+import { getSupabase }    from '../../supabase.ts';
+import { formatPhone, delay, fmt } from '../../utils.ts';
+import { PdfService }     from '../../pdf.service.ts';
 import {
   getOnboardingSession,
   handleOnboardingInput,
@@ -17,10 +24,10 @@ import {
 } from '../../onboarding/engine.ts';
 import {
   DEMO_SCHOOL,
-  DEMO_ATTENDANCE,
+  DEMO_STUDENTS,
+  DEMO_RESULT_DATA,
   DEMO_FEES,
   DEMO_PICKUP,
-  DEMO_REPORTS,
   SETUP_FEE_TIERS,
 } from './marketing.data.ts';
 import {
@@ -37,27 +44,16 @@ export {
 
 import type { IncomingMessage } from '../../types.ts';
 
-const ai = new AIService();
-const db = getSupabase();
+const ai       = new AIService();
+const db       = getSupabase();
+const pdfSvc   = new PdfService();
 
 const RESET_KEYWORDS = new Set([
-  'hi', 'hello', 'hey', 'start', 'menu',
+  'hi', 'hello', 'hey', 'start', 'menu', 'home', '00',
 ]);
 
-// ✅ Trial code pattern: TRIAL-XXXX-XXXX
 const TRIAL_CODE_REGEX =
   /^TRIAL-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
-
-const fmt = (n: number) =>
-  new Intl.NumberFormat('en-NG', {
-    style:                 'currency',
-    currency:              'NGN',
-    minimumFractionDigits: 0,
-  }).format(n);
-
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 function getPlatformWa(): WhatsApp {
   return new WhatsApp({
@@ -70,7 +66,7 @@ function getPlatformWa(): WhatsApp {
 }
 
 // ============================================================
-// MAIN ENTRY POINT
+// MAIN MARKETING ENTRY POINT
 // ============================================================
 
 export async function handleMarketingMessage(
@@ -86,349 +82,265 @@ export async function handleMarketingMessage(
 
   const buttonId =
     message.type === 'interactive'
-      ? message.interactive?.button_reply?.id
-          ?.toLowerCase() ?? ''
+      ? message.interactive?.button_reply?.id?.toLowerCase() ?? ''
       : '';
 
   const listId =
     message.type === 'interactive'
-      ? message.interactive?.list_reply?.id
-          ?.toLowerCase() ?? ''
+      ? message.interactive?.list_reply?.id?.toLowerCase() ?? ''
       : '';
 
-  const input =
-    buttonId || listId || rawText.toLowerCase().trim();
+  const input = buttonId || listId || rawText.toLowerCase().trim();
 
   console.log(
-    `[Marketing] from=${phone} | ` +
-    `input="${input.substring(0, 40)}" | ` +
-    `raw="${rawText.substring(0, 40)}"`
+    `[Marketing] from=${phone} | input="${input.substring(0, 40)}" | raw="${rawText.substring(0, 40)}"`
   );
 
-  // ── 1. Staff invite token (8 alphanumeric) ─────────────
+  // 1. Staff invitation token
   if (
     message.type === 'text' &&
     /^[A-Z0-9]{8}$/i.test(rawText.trim()) &&
     !TRIAL_CODE_REGEX.test(rawText.trim())
   ) {
-    await handleInvitationToken(
-      phone,
-      rawText.trim().toUpperCase(),
-      wa
-    );
+    await handleInvitationToken(phone, rawText.trim().toUpperCase(), wa);
     return;
   }
 
-  // ── 2. Trial code ───────────────────────────────────────
-  if (
-    message.type === 'text' &&
-    TRIAL_CODE_REGEX.test(rawText.trim())
-  ) {
-    console.log(
-      `[Marketing] ✅ Trial code: ${rawText.trim()}`
-    );
-    await handleTrialCode(
-      phone,
-      rawText.trim().toUpperCase(),
-      wa
-    );
+  // 2. Free trial voucher code
+  if (message.type === 'text' && TRIAL_CODE_REGEX.test(rawText.trim())) {
+    await handleTrialCode(phone, rawText.trim().toUpperCase(), wa);
     return;
   }
 
-  // ── 3. Active onboarding session ───────────────────────
+  // 3. Active onboarding session
   const obSession = await getOnboardingSession(phone);
   if (obSession) {
-    console.log(
-      `[Marketing] Onboarding | step: ${obSession.step}`
-    );
     const handled = await handleOnboardingInput(
       phone, input, rawText, wa, obSession.source
     );
     if (handled) return;
   }
 
-  // ── 4. Get demo session ─────────────────────────────────
-  let session = await getMarketingSession(
-    formatPhone(phone)
-  );
+  // 4. Marketing / Sandbox Session
+  let session = await getMarketingSession(formatPhone(phone));
 
   if (!input || RESET_KEYWORDS.has(input) || !session) {
-    session = await createMarketingSession(
-      formatPhone(phone)
-    );
+    session = await createMarketingSession(formatPhone(phone));
     await sendWelcome(phone, session, wa);
     return;
   }
 
-  // ── 5. Handle existing school buttons ──────────────────
-  if (input === 'add_another_school') {
-    session.state       = 'REGISTERING';
-    session.schoolName  = null;
-    session.contactName = session.contactName;
-    await saveMarketingSession(session);
-
-    const obSess = await startOnboardingSession(
-      phone, 'marketing',
-      {
-        contactName: session.contactName ?? undefined,
-      }
-    );
-
-    await wa.text(
-      phone,
-      `🏫 *Register New School*\n\n` +
-      `Let's add another school! 😊\n\n` +
-      `What is the name of your new school?`
-    );
-    return;
-  }
-
-  if (input === 'manage_existing') {
-    // Clear demo session and route to admin
-    try {
-      await db
-        .from('demo_sessions')
-        .delete()
-        .eq('phone', formatPhone(phone));
-    } catch {
-      // Non-critical
-    }
-
-    await wa.text(
-      phone,
-      `✅ Type *hi* to access your\n` +
-      `school admin panel!`
-    );
-    return;
-  }
-
-  // ── 6. Registration triggers ────────────────────────────
-  if ([
-    'register_now',
-    'start_onboarding',
-    'start_trial',
-  ].includes(input)) {
+  // 5. Registration shortcuts
+  if (['register_now', 'start_onboarding', 'start_trial'].includes(input)) {
     await startRegistration(phone, session, wa);
     return;
   }
 
-  // ── 7. Button or list ───────────────────────────────────
-  if (buttonId || listId) {
-    await handleMenuSelection(phone, session, input, wa);
+  if (input === 'manage_existing') {
+    try {
+      await db.from('demo_sessions').delete().eq('phone', formatPhone(phone));
+    } catch { /* Non-critical */ }
+
+    await wa.text(phone, `✅ Type *hi* to access your school admin panel!`);
     return;
   }
 
-  // ── 8. Text input ───────────────────────────────────────
-  await handleTextInput(
-    phone, session, rawText, input, wa
-  );
+  // 6. Interactive Button / List dispatcher
+  if (buttonId || listId) {
+    await handleSandboxSelection(phone, session, input, wa);
+    return;
+  }
+
+  // 7. Text input & conversational state router
+  await handleTextInput(phone, session, rawText, input, wa);
 }
 
 // ============================================================
-// TRIAL CODE HANDLER
+// WELCOME SCREEN
 // ============================================================
 
-async function handleTrialCode(
-  phone: string,
-  code:  string,
-  wa:    WhatsApp
+async function sendWelcome(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
 ): Promise<void> {
-  console.log(
-    `[Marketing] Processing trial code: ${code}`
-  );
-
-  const { data, error } = await db
-    .from('trial_codes')
-    .select('*')
-    .eq('code', code)
-    .maybeSingle();
-
-  console.log(
-    `[Marketing] Trial code DB:`,
-    JSON.stringify({ data, error })
-  );
-
-  if (error || !data) {
-    await wa.text(
-      phone,
-      `❌ *Invalid Code*\n\n` +
-      `The code *${code}* is not valid.\n\n` +
-      `Please check and try again.\n\n` +
-      `Type *hi* to see our demo.`
-    );
-    return;
-  }
-
-  if (data.used) {
-    await wa.text(
-      phone,
-      `❌ *Code Already Used*\n\n` +
-      `This trial code has already been used.\n\n` +
-      `Each code is for one school only.\n\n` +
-      `Contact us for a new code:\n` +
-      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
-    );
-    return;
-  }
-
-  if (new Date(data.expires_at) < new Date()) {
-    await wa.text(
-      phone,
-      `❌ *Code Expired*\n\n` +
-      `This trial code has expired.\n\n` +
-      `Contact us for a new code:\n` +
-      `*${Deno.env.get('SUPER_ADMIN_PHONE') ?? ''}*`
-    );
-    return;
-  }
-
-  console.log(`[Marketing] ✅ Valid trial code!`);
-
-  // Mark as used
-  await db
-    .from('trial_codes')
-    .update({
-      used:          true,
-      used_at:       new Date().toISOString(),
-      used_by_phone: formatPhone(phone),
-    })
-    .eq('id', data.id);
-
-  // Save trial session
-  await db
-    .from('trial_sessions')
-    .upsert(
-      {
-        phone:      formatPhone(phone),
-        code,
-        active:     true,
-        expires_at: new Date(
-          Date.now() + 24 * 60 * 60 * 1000
-        ).toISOString(),
-        created_at: new Date().toISOString(),
-      },
-      { onConflict: 'phone' }
-    );
-
-  // Update demo session
-  let session = await getMarketingSession(
-    formatPhone(phone)
-  );
-  if (!session) {
-    session = await createMarketingSession(
-      formatPhone(phone)
-    );
-  }
-  session.state = 'TRIAL_ACTIVE';
-  await saveMarketingSession(session);
-
-  // Notify super admin
-  const superPhone =
-    Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
-  if (superPhone) {
-    try {
-      const notifyWa = new WhatsApp({
-        phone_number_id:
-          Deno.env.get('WHATSAPP_PHONE_NUMBER_ID') ?? '',
-        access_token:
-          Deno.env.get('WHATSAPP_ACCESS_TOKEN') ?? '',
-        status: 'active',
-      });
-      await notifyWa.text(
-        superPhone,
-        `🎁 *Trial Code Used!*\n\n` +
-        `Code: *${code}*\n` +
-        `School: ${data.school_name ?? 'Unknown'}\n` +
-        `Phone: ${formatPhone(phone)}\n` +
-        `⏰ ${new Date().toLocaleString('en-NG')}`
-      );
-    } catch {
-      // Non-critical
-    }
-  }
-
   await wa.text(
     phone,
-    `🎉 *Free Trial Activated!*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `✅ Your trial code is valid!\n\n` +
-    `*What you get FREE:*\n` +
-    `🆓 Setup fee — *WAIVED*\n` +
-    `✅ WhatsApp bot for parents\n` +
-    `✅ Attendance management\n` +
-    `✅ Fee collection system\n` +
-    `✅ Student pickup security\n` +
-    `✅ School reports & analytics\n` +
-    `✅ Lifetime access\n\n` +
-    `⏰ *Valid for 24 hours only!*\n\n` +
+    `👋 *Welcome to SchoolBot!*\n\n` +
+    `I'm *Sabi* — your SchoolBot assistant! 🤖✨\n\n` +
+    `SchoolBot turns WhatsApp into a complete school management platform for Nigerian schools:\n\n` +
+    `✅ *Attendance:* Teachers mark class in 2 mins, parents get instant WhatsApp alerts\n` +
+    `💰 *Fee Collection:* Parents pay online via Paystack; school receives 100%\n` +
+    `🎓 *Single-Page Result Sheets:* Generate & send beautiful A4 report cards directly to WhatsApp\n` +
+    `🚗 *Pickup Security:* Verified pickup logs & safety alerts\n\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `Ready to register your school? 🚀`
+    `*Try our live interactive sandbox below — no signup needed!* 👇`
   );
 
-  await delay(1000);
+  await delay(1200);
+  await showSandboxMainMenu(phone, session, wa);
+}
 
-  await wa.buttons(
+// ============================================================
+// MAIN SANDBOX HUB MENU
+// ============================================================
+
+async function showSandboxMainMenu(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  session.state = 'SANDBOX_HUB';
+  await saveMarketingSession(session);
+
+  await wa.list(
     phone,
-    `Register now and get started for FREE!`,
+    `🏫 SchoolBot Live Sandbox`,
+    `Explore real features using our demo school:\n*${DEMO_SCHOOL.name}*\n\nChoose an action to try:`,
+    `Powered by SchoolBot · XtopEdu`,
+    `🎯 Choose Feature`,
     [
-      { id: 'register_now',      title: '🚀 Register Now FREE' },
-      { id: 'demo_attendance',   title: '👀 See Demo First' },
+      {
+        title: '👨‍💼 Test as School Admin',
+        rows: [
+          {
+            id:          'sandbox_mark_att',
+            title:       '📝 Mark Attendance',
+            description: 'Mark student & get simulated parent alert',
+          },
+          {
+            id:          'sandbox_result_pdf',
+            title:       '🎓 Download Result PDF',
+            description: 'Get a sample single-page A4 report card',
+          },
+          {
+            id:          'sandbox_receipt_pdf',
+            title:       '🧾 Download Receipt PDF',
+            description: 'Get a sample official payment receipt',
+          },
+          {
+            id:          'sandbox_fee_calc',
+            title:       '💰 Fee Split Simulator',
+            description: 'See how school receives 100% of fees',
+          },
+        ],
+      },
+      {
+        title: '👨‍👩‍👧 Test as Parent',
+        rows: [
+          {
+            id:          'sandbox_parent_att',
+            title:       '📅 Child Attendance',
+            description: 'Check attendance & term summary',
+          },
+          {
+            id:          'sandbox_parent_fees',
+            title:       '💳 Pay School Fees',
+            description: 'View outstanding balance & payment link',
+          },
+          {
+            id:          'sandbox_parent_pickup',
+            title:       '🚗 Pickup Security',
+            description: 'See authorized contacts & pickup logs',
+          },
+        ],
+      },
+      {
+        title: '🚀 Get Started',
+        rows: [
+          {
+            id:          'see_pricing',
+            title:       '💵 View Pricing',
+            description: 'One-time setup fee tiers',
+          },
+          {
+            id:          'register_now',
+            title:       '🚀 Register My School',
+            description: 'Set up your school in 5 minutes',
+          },
+          {
+            id:          'talk_to_us',
+            title:       '📞 Talk to Our Team',
+            description: 'Speak with our team on WhatsApp',
+          },
+        ],
+      },
     ]
   );
 }
 
 // ============================================================
-// MENU SELECTION HANDLER
+// SANDBOX INTERACTIVE ACTIONS
 // ============================================================
 
-async function handleMenuSelection(
+async function handleSandboxSelection(
   phone:   string,
   session: DemoSession,
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
   switch (input) {
-    case 'demo_attendance':
-      await showAttendanceDemo(phone, session, wa);
+
+    // ── Admin: Live Attendance Marking ────────────────────
+    case 'sandbox_mark_att':
+      await startLiveAttendanceDemo(phone, session, wa);
       break;
-    case 'demo_fees':
-      await showFeesDemo(phone, session, wa);
+
+    // ── Admin: Download Real Result PDF ───────────────────
+    case 'sandbox_result_pdf':
+      await generateAndSendDemoResultPdf(phone, session, wa);
       break;
-    case 'demo_pickup':
-      await showPickupDemo(phone, session, wa);
+
+    // ── Admin: Download Real Receipt PDF ──────────────────
+    case 'sandbox_receipt_pdf':
+      await generateAndSendDemoReceiptPdf(phone, session, wa);
       break;
-    case 'demo_reports':
-      await showReportsDemo(phone, session, wa);
+
+    // ── Admin: Fee Split Simulator ────────────────────────
+    case 'sandbox_fee_calc':
+      await promptFeeSimulator(phone, session, wa);
       break;
-    case 'att_parent_view':
-      await showParentAttView(phone, session, wa);
+
+    // ── Parent: Live Parent Views ─────────────────────────
+    case 'sandbox_parent_att':
+      await showParentAttendanceView(phone, session, wa);
       break;
-    case 'att_admin_view':
-      await showAdminAttView(phone, session, wa);
-      break;
-    case 'fees_parent_view':
+
+    case 'sandbox_parent_fees':
       await showParentFeesView(phone, session, wa);
       break;
-    case 'fees_payment_demo':
-      await showPaymentDemo(phone, session, wa);
+
+    case 'sandbox_parent_pickup':
+      await showParentPickupView(phone, session, wa);
       break;
+
+    // ── Pricing & Registration ────────────────────────────
     case 'see_pricing':
       await showPricing(phone, session, wa);
       break;
+
     case 'register_now':
     case 'start_onboarding':
     case 'start_trial':
       await startRegistration(phone, session, wa);
       break;
+
     case 'talk_to_us':
       await showContactOptions(phone, session, wa);
       break;
+
     case 'main_menu':
     case 'back_to_menu':
-      await showDemoMainMenu(phone, session, wa);
+      await showSandboxMainMenu(phone, session, wa);
       break;
+
     default:
-      if (input.startsWith('tier_')) {
+      if (input.startsWith('mark_demo_')) {
+        await handleLiveMarkingAction(phone, session, input, wa);
+      } else if (input.startsWith('calc_preset_')) {
+        const amt = parseFloat(input.replace('calc_preset_', ''));
+        await calculateAndShowFeeSplit(phone, session, amt, wa);
+      } else if (input.startsWith('tier_')) {
         await startRegistration(phone, session, wa);
       } else {
         await handleAI(phone, session, input, wa);
@@ -437,7 +349,537 @@ async function handleMenuSelection(
 }
 
 // ============================================================
-// TEXT INPUT HANDLER
+// 1. LIVE ATTENDANCE DEMO (Interactive)
+// ============================================================
+
+async function startLiveAttendanceDemo(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  session.state = 'SANDBOX_ATTENDANCE';
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'live_attendance_demo');
+
+  const student = DEMO_STUDENTS[0]; // Chidi Okonkwo
+
+  await wa.buttons(
+    phone,
+    `📝 *Live Attendance Marking Demo*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `🏫 School: *${DEMO_SCHOOL.name}*\n` +
+    `📚 Class: *JSS 3A*\n` +
+    `👤 Student: *${student.name}*\n` +
+    `📋 Adm No: *${student.admNo}*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `Tap a button to mark this student and see the *instant WhatsApp alert* the parent gets:`,
+    [
+      { id: `MARK_DEMO_PRESENT_${student.id}`, title: '✅ Present' },
+      { id: `MARK_DEMO_ABSENT_${student.id}`,  title: '❌ Absent'  },
+      { id: `MARK_DEMO_LATE_${student.id}`,    title: '⏰ Late'    },
+    ]
+  );
+}
+
+async function handleLiveMarkingAction(
+  phone:   string,
+  session: DemoSession,
+  input:   string,
+  wa:      WhatsApp
+): Promise<void> {
+  const parts  = input.split('_');
+  const status = parts[2]?.toLowerCase() ?? 'present';
+  const student = DEMO_STUDENTS[0];
+
+  await wa.text(
+    phone,
+    `✅ *Student Marked!* (${status.toUpperCase()})\n\n` +
+    `⚡ Within 2 seconds, SchoolBot sends this alert to the parent's phone 👇`
+  );
+
+  await delay(1200);
+
+  const statusEmojis: Record<string, string> = {
+    present: '✅ *Present*',
+    absent:  '❌ *Absent*',
+    late:    '⏰ *Late (Arrived: 08:12 AM)*',
+  };
+
+  const statusDetails: Record<string, string> = {
+    present: 'Arrival Time: 07:45 AM',
+    absent:  '⚠️ If this is unexpected, please contact the school office immediately.',
+    late:    'Arrival Time: 08:12 AM (Assembly Missed)',
+  };
+
+  await wa.text(
+    phone,
+    `─────────────────────────\n` +
+    `📱 *Simulated Message Sent to Parent:*\n\n` +
+    `🔔 *Attendance Notification*\n\n` +
+    `Dear Parent,\n` +
+    `*${student.name}* has been marked ${statusEmojis[status] ?? status} today.\n\n` +
+    `🏫 School: ${DEMO_SCHOOL.name}\n` +
+    `📚 Class: ${student.class}${student.arm}\n` +
+    `📅 Date: ${new Date().toLocaleDateString('en-NG', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}\n` +
+    `${statusDetails[status]}\n\n` +
+    `_Powered by SchoolBot_\n` +
+    `─────────────────────────`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Parents love this transparency! Ready to test another feature?`,
+    [
+      { id: 'sandbox_result_pdf', title: '🎓 See Result PDF'  },
+      { id: 'sandbox_fee_calc',   title: '💰 Fee Simulator'   },
+      { id: 'register_now',       title: '🚀 Register School' },
+    ]
+  );
+}
+
+// ============================================================
+// 2. LIVE RESULT CARD PDF GENERATOR
+// ============================================================
+
+async function generateAndSendDemoResultPdf(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'demo_result_pdf');
+
+  await wa.text(
+    phone,
+    `⏳ *Building sample single-page A4 Result Card...*\n\n` +
+    `Applying school branding, academic performance table, affective traits rating, grading keys, and principal signature...`
+  );
+
+  try {
+    const pdfUrl = await pdfSvc.buildResultPdf(DEMO_RESULT_DATA);
+
+    await wa.document(
+      phone,
+      pdfUrl,
+      `Greenfield-Academy-Result-${DEMO_STUDENTS[0].admNo.replace(/\//g, '-')}.pdf`,
+      `🎓 Here is the live-generated A4 Result Sheet for ${DEMO_STUDENTS[0].name}!`
+    );
+
+    await delay(1500);
+
+    await wa.buttons(
+      phone,
+      `Fits on a single A4 sheet! What would you like to see next?`,
+      [
+        { id: 'sandbox_receipt_pdf', title: '🧾 See Receipt PDF' },
+        { id: 'sandbox_fee_calc',    title: '💰 Fee Split Calc'  },
+        { id: 'register_now',        title: '🚀 Register School' },
+      ]
+    );
+  } catch (err) {
+    console.error('[Marketing] Result PDF build error:', err);
+    await wa.text(phone, `❌ Could not generate sample PDF. Please try again.`);
+  }
+}
+
+// ============================================================
+// 3. LIVE PAYMENT RECEIPT PDF GENERATOR
+// ============================================================
+
+async function generateAndSendDemoReceiptPdf(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'demo_receipt_pdf');
+
+  await wa.text(
+    phone,
+    `⏳ *Generating sample branded Fee Receipt...*\n\n` +
+    `Applying payment details, transaction reference, amount in words, and official school stamp...`
+  );
+
+  try {
+    const pdfUrl = await pdfSvc.buildReceiptPdf({
+      receiptNumber:   'GA-RCP-2025-0842',
+      schoolName:      DEMO_SCHOOL.name,
+      schoolAddress:   DEMO_SCHOOL.address,
+      schoolPhone:     DEMO_SCHOOL.phone,
+      studentName:     DEMO_STUDENTS[0].name,
+      admissionNumber: DEMO_STUDENTS[0].admNo,
+      className:       'JSS 3A',
+      feeTitle:        'Second Term School Fees 2024/2025',
+      term:            'Second Term',
+      academicYear:    '2024/2025',
+      amount:          75000,
+      paymentMethod:   'Paystack Online (Card)',
+      reference:       'PAYSTACK-GA-94827103',
+      paymentDate:     new Date().toISOString(),
+      issuedTo:        'Mr. & Mrs. Okonkwo',
+      schoolId:        DEMO_SCHOOL.id,
+    });
+
+    await wa.document(
+      phone,
+      pdfUrl,
+      `Receipt-GA-2025-0842.pdf`,
+      `🧾 Here is the official fee receipt for ${DEMO_STUDENTS[0].name}!`
+    );
+
+    await delay(1500);
+
+    await wa.buttons(
+      phone,
+      `Sent automatically whenever a parent pays! What's next?`,
+      [
+        { id: 'sandbox_fee_calc', title: '💰 Fee Split Calc'  },
+        { id: 'sandbox_mark_att', title: '📝 Mark Attendance' },
+        { id: 'register_now',     title: '🚀 Register School' },
+      ]
+    );
+  } catch (err) {
+    console.error('[Marketing] Receipt PDF build error:', err);
+    await wa.text(phone, `❌ Could not generate sample receipt.`);
+  }
+}
+
+// ============================================================
+// 4. INTERACTIVE FEE SPLIT SIMULATOR
+// ============================================================
+
+async function promptFeeSimulator(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  session.state = 'SANDBOX_FEE_CALC';
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'fee_calc_simulator');
+
+  await wa.buttons(
+    phone,
+    `💰 *SchoolBot Fee Split Simulator*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `*The Rule:* Your school receives *100%* of your fee!\n\n` +
+    `We add a small 1.5% platform fee on top of the parent's payment.\n\n` +
+    `Choose a sample school fee to calculate:`,
+    [
+      { id: 'CALC_PRESET_30000',  title: '₦30,000 Fee'  },
+      { id: 'CALC_PRESET_75000',  title: '₦75,000 Fee'  },
+      { id: 'CALC_PRESET_150000', title: '₦150,000 Fee' },
+    ]
+  );
+
+  await delay(600);
+  await wa.text(
+    phone,
+    `_Or type any custom amount to calculate:_\n` +
+    `_Example: type 45000 for ₦45,000_`
+  );
+}
+
+async function calculateAndShowFeeSplit(
+  phone:   string,
+  session: DemoSession,
+  schoolFee: number,
+  wa:      WhatsApp
+): Promise<void> {
+  const platformCommission = parseFloat((schoolFee * 0.015).toFixed(2));
+  const subtotal = schoolFee + platformCommission;
+  
+  // Paystack standard rate in Nigeria: 1.5% + ₦100 (capped at ₦2000), waived if under ₦2500
+  let paystackCharge = subtotal < 2500 ? subtotal * 0.015 : subtotal * 0.015 + 100;
+  paystackCharge = Math.min(paystackCharge, 2000);
+  paystackCharge = parseFloat(paystackCharge.toFixed(2));
+
+  const totalParentPays = schoolFee + platformCommission + paystackCharge;
+
+  await wa.text(
+    phone,
+    `💳 *Payment Breakdown Simulation*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `🏫 *School Fee (Your Price):* *${fmt(schoolFee)}*\n` +
+    `🏷️ Platform Fee (1.5%): *${fmt(platformCommission)}*\n` +
+    `🏦 Payment Gateway Fee: *${fmt(paystackCharge)}*\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `💳 *Total Parent Pays:* *${fmt(totalParentPays)}*\n\n` +
+    `✅ *Your School Receives:* *${fmt(schoolFee)} (100%)*\n\n` +
+    `Deposited directly into your registered school bank account! 🏦`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Zero deductions from your school's revenue! 🎯`,
+    [
+      { id: 'sandbox_mark_att', title: '📝 Try Attendance' },
+      { id: 'see_pricing',      title: '💵 See Setup Fees' },
+      { id: 'register_now',     title: '🚀 Register School' },
+    ]
+  );
+}
+
+// ============================================================
+// 5. PARENT EXPERIENCE VIEWS
+// ============================================================
+
+async function showParentAttendanceView(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'parent_att_view');
+
+  await wa.text(
+    phone,
+    `👨‍👩‍👧 *What Parents See (Attendance)*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `Parent sends "attendance" to the bot:\n\n` +
+    `📅 *Attendance Summary*\n` +
+    `👤 Student: *Chidi Okonkwo*\n` +
+    `🏫 Class: *JSS 3A*\n` +
+    `📊 Term Attendance Rate: *94%*\n\n` +
+    `✅ Present: *47 days*\n` +
+    `❌ Absent:  *2 days*\n` +
+    `⏰ Late:    *1 day*\n` +
+    `📅 Total Days: *50 days*\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `Parents can check this 24/7 without calling the school office! 📱`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `What would you like to see next?`,
+    [
+      { id: 'sandbox_parent_fees',   title: '💳 Parent Fees View' },
+      { id: 'sandbox_parent_pickup', title: '🚗 Pickup Security'  },
+      { id: 'main_menu',             title: '↩️ Back to Menu'     },
+    ]
+  );
+}
+
+async function showParentFeesView(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'parent_fees_view');
+
+  const inv1 = DEMO_FEES.invoices[0];
+  const inv2 = DEMO_FEES.invoices[1];
+
+  await wa.text(
+    phone,
+    `👨‍👩‍👧 *What Parents See (Fees & Payments)*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `Parent sends "fees" to the bot:\n\n` +
+    `💰 *Outstanding Fees for Chidi Okonkwo*\n\n` +
+    `1. *${inv1.title}*\n` +
+    `   💵 Balance: *${fmt(inv1.balance)}*\n` +
+    `   📅 Due: 15 Apr 2025\n\n` +
+    `2. *${inv2.title}*\n` +
+    `   💵 Balance: *${fmt(inv2.balance)}*\n` +
+    `   📅 Due: 30 Mar 2025\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `💵 *Total Outstanding: ${fmt(DEMO_FEES.totalOutstanding)}*\n\n` +
+    `Parent taps *Pay Now* $\rightarrow$ Secure Paystack link $\rightarrow$ Pays via Card, Transfer or USSD!`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Reduces uncollected fees by up to 90%! 🚀`,
+    [
+      { id: 'sandbox_fee_calc', title: '💰 Fee Split Calc'  },
+      { id: 'register_now',     title: '🚀 Register School' },
+      { id: 'main_menu',        title: '↩️ Back to Menu'     },
+    ]
+  );
+}
+
+async function showParentPickupView(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  await logDemoInteraction(formatPhone(phone), 'parent_pickup_view');
+
+  const contacts = DEMO_PICKUP.contacts.map((c, i) =>
+    `${i + 1}. *${c.name}*\n   👥 Relationship: ${c.relationship}\n   📱 Phone: ${c.phone}`
+  ).join('\n\n');
+
+  await wa.text(
+    phone,
+    `🚗 *Student Pickup Management*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `Parents register approved guardians. When a child is dismissed:\n\n` +
+    `*Authorized Guardians for ${DEMO_PICKUP.student}:*\n\n` +
+    `${contacts}\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `📱 *Parent instantly gets an alert:*\n` +
+    `_"${DEMO_PICKUP.student} has been picked up by ${DEMO_PICKUP.recentPickup.pickedBy} at ${DEMO_PICKUP.recentPickup.time}."_\n\n` +
+    `🔐 Gives parents total peace of mind regarding child security!`
+  );
+
+  await delay(1500);
+
+  await wa.buttons(
+    phone,
+    `Ready to set this up for your school?`,
+    [
+      { id: 'see_pricing',  title: '💵 See Pricing'     },
+      { id: 'register_now', title: '🚀 Register School' },
+      { id: 'main_menu',    title: '↩️ Back to Menu'     },
+    ]
+  );
+}
+
+// ============================================================
+// PRICING & REGISTRATION
+// ============================================================
+
+async function showPricing(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  session.state = 'DEMO_PRICING';
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'pricing');
+
+  await wa.text(
+    phone,
+    `💵 *SchoolBot Pricing*\n\n` +
+    `*Transparent & Affordable:*\n\n` +
+    `1️⃣ *One-Time Setup Fee*\n` +
+    `   Based on your student count.\n` +
+    `   Pay once — use forever! No subscriptions.\n\n` +
+    `2️⃣ *1.5% Per Fee Payment*\n` +
+    `   Added on top of the parent bill.\n` +
+    `   Your school gets *100% of all tuition*!\n\n` +
+    `✅ *No monthly maintenance fees!*\n` +
+    `✅ *Includes WhatsApp bot for parents & teachers!*\n` +
+    `✅ *Free onboarding support!*`
+  );
+
+  await delay(1000);
+
+  await wa.list(
+    phone,
+    `💵 Setup Fee Tiers`,
+    `One-time setup fee based on student population:`,
+    `Commission: 1.5% per payment (paid by parent)`,
+    `📋 View Plans`,
+    [
+      {
+        title: 'One-Time Setup Tiers',
+        rows: SETUP_FEE_TIERS.map((t) => ({
+          id:          `tier_${t.name.toLowerCase()}`,
+          title:       `${t.name}: ${t.fee}`,
+          description: t.range,
+        })),
+      },
+    ]
+  );
+
+  await delay(1000);
+
+  await wa.buttons(
+    phone,
+    `Ready to register your school?`,
+    [
+      { id: 'register_now', title: '🚀 Register School' },
+      { id: 'talk_to_us',   title: '📞 Ask Questions'  },
+      { id: 'main_menu',    title: '🎯 Test More'       },
+    ]
+  );
+}
+
+async function startRegistration(
+  phone:   string,
+  session: DemoSession,
+  wa:      WhatsApp
+): Promise<void> {
+  const { data: existingSchools } = await db
+    .from('school_onboarding')
+    .select(`
+      school_id,
+      schools ( id, name, is_active, onboarding_status )
+    `)
+    .eq('admin_phone', formatPhone(phone));
+
+  if (existingSchools && existingSchools.length > 0) {
+    const schoolList = existingSchools
+      .map((s, i) => {
+        const school = s.schools as Record<string, unknown> | null;
+        const isActive = school?.is_active as boolean;
+        const status   = school?.onboarding_status as string;
+        return `${i + 1}. *${school?.name ?? 'Unknown'}*\n   ${isActive ? '🟢 Active' : `⏳ ${status}`}`;
+      })
+      .join('\n\n');
+
+    await wa.buttons(
+      phone,
+      `🏫 *You Already Have ${existingSchools.length} School(s)*\n\n` +
+      `${schoolList}\n\n` +
+      `━━━━━━━━━━━━━━━━\n` +
+      `What would you like to do?`,
+      [
+        { id: 'add_another_school', title: '➕ Add Another School' },
+        { id: 'manage_existing',    title: '🏫 Manage Existing'     },
+      ]
+    );
+    return;
+  }
+
+  session.state = 'REGISTERING';
+  await saveMarketingSession(session);
+  await logDemoInteraction(formatPhone(phone), 'registration_started');
+
+  const prefill = {
+    contactName:       session.contactName  ?? undefined,
+    schoolName:        session.schoolName   ?? undefined,
+    location:          session.location     ?? undefined,
+    studentCountRange: session.studentCount ?? undefined,
+    schoolType:        session.schoolType   ?? undefined,
+  };
+
+  const obSession = await startOnboardingSession(phone, 'marketing', prefill);
+
+  if (session.contactName && session.schoolName) {
+    await wa.text(
+      phone,
+      `🚀 *Let's register your school!*\n\n` +
+      `👤 *Name:* ${session.contactName}\n` +
+      `🏫 *School:* ${session.schoolName}\n\n` +
+      `Calculating setup fee...`
+    );
+    await delay(1000);
+    await showSetupFeeInfo(phone, obSession, wa);
+  } else if (session.contactName) {
+    await wa.text(
+      phone,
+      `🚀 *Register Your School!*\n\n` +
+      `Hi *${session.contactName.split(' ')[0]}!* 👋\n\n` +
+      `What is the official name of your school?`
+    );
+  } else {
+    await wa.text(
+      phone,
+      `🚀 *Register Your School!*\n\n` +
+      `Let's get you set up! 😊\n\n` +
+      `First, what is your *full name*?`
+    );
+  }
+}
+
+// ============================================================
+// CONVERSATIONAL TEXT & AI HANDLER
 // ============================================================
 
 async function handleTextInput(
@@ -447,28 +889,25 @@ async function handleTextInput(
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
-  if (
-    session.state === 'REGISTERING'   ||
-    session.state === 'WELCOME'       ||
-    session.state === 'TRIAL_ACTIVE'
-  ) {
-    await showDemoMainMenu(phone, session, wa);
-    return;
+  // If user enters a number while in fee simulator state
+  if (session.state === 'SANDBOX_FEE_CALC' || !isNaN(parseFloat(rawText.replace(/,/g, '')))) {
+    const num = parseFloat(rawText.replace(/,/g, ''));
+    if (!isNaN(num) && num >= 500) {
+      await calculateAndShowFeeSplit(phone, session, num, wa);
+      return;
+    }
   }
 
   if (session.state === 'COLLECTING_NAME') {
     if (rawText.trim().length >= 2) {
       session.contactName = rawText.trim();
-      session.state       = 'DEMO_MENU';
+      session.state       = 'SANDBOX_HUB';
       await saveMarketingSession(session);
 
       const firstName = rawText.split(' ')[0];
-      await wa.text(
-        phone,
-        `Nice to meet you *${firstName}!* 😊`
-      );
+      await wa.text(phone, `Nice to meet you *${firstName}!* 😊`);
       await delay(800);
-      await showDemoMainMenu(phone, session, wa);
+      await showSandboxMainMenu(phone, session, wa);
     } else {
       await wa.text(phone, `Please enter your full name:`);
     }
@@ -478,25 +917,16 @@ async function handleTextInput(
   await handleAI(phone, session, rawText, wa);
 }
 
-// ============================================================
-// AI HANDLER
-// ============================================================
-
 async function handleAI(
   phone:   string,
   session: DemoSession,
   input:   string,
   wa:      WhatsApp
 ): Promise<void> {
-  const history = session.aiHistory as Array<{
-    role:    'user' | 'assistant';
-    content: string;
-  }>;
-
+  const history = session.aiHistory;
   history.push({ role: 'user', content: input });
 
-  const { intent, entities } =
-    await ai.detectIntent(input);
+  const { intent, entities } = await ai.detectIntent(input);
 
   if (entities?.school_name && !session.schoolName) {
     session.schoolName = entities.school_name;
@@ -517,27 +947,18 @@ async function handleAI(
   await saveMarketingSession(session);
 
   await wa.text(phone, aiResponse);
-  await delay(1500);
-  await handleIntentFollowUp(
-    phone, session, intent, wa
-  );
-}
+  await delay(1200);
 
-async function handleIntentFollowUp(
-  phone:   string,
-  session: DemoSession,
-  intent:  string,
-  wa:      WhatsApp
-): Promise<void> {
+  // Direct follow-up based on detected intent
   switch (intent) {
     case 'attendance_demo':
-      await showAttendanceDemo(phone, session, wa);
+      await startLiveAttendanceDemo(phone, session, wa);
       break;
     case 'fees_demo':
-      await showFeesDemo(phone, session, wa);
+      await promptFeeSimulator(phone, session, wa);
       break;
     case 'pickup_demo':
-      await showPickupDemo(phone, session, wa);
+      await showParentPickupView(phone, session, wa);
       break;
     case 'pricing':
       await showPricing(phone, session, wa);
@@ -546,718 +967,83 @@ async function handleIntentFollowUp(
       await startRegistration(phone, session, wa);
       break;
     case 'see_demo':
-      await showDemoMainMenu(phone, session, wa);
-      break;
-    case 'not_interested':
-      await handleNotInterested(phone, session, wa);
+      await showSandboxMainMenu(phone, session, wa);
       break;
     default:
-      if (intent !== 'question') {
-        await showQuickOptions(phone, wa);
-      }
+      await wa.buttons(
+        phone,
+        `What would you like to explore next?`,
+        [
+          { id: 'main_menu',    title: '🎯 Test Features'  },
+          { id: 'see_pricing',  title: '💵 See Pricing'   },
+          { id: 'register_now', title: '🚀 Register School' },
+        ]
+      );
   }
 }
 
-// ============================================================
-// WELCOME
-// ============================================================
-
-async function sendWelcome(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
+// ─── Trial Code Handler ─────────────────────────────────────
+async function handleTrialCode(
+  phone: string,
+  code:  string,
+  wa:    WhatsApp
 ): Promise<void> {
-  await wa.text(
-    phone,
-    `👋 *Welcome to SchoolBot!*\n\n` +
-    `I'm *Sabi* — your SchoolBot assistant! 🤖✨\n\n` +
-    `SchoolBot helps Nigerian schools manage:\n` +
-    `✅ Student attendance (WhatsApp alerts)\n` +
-    `💰 Fee collection & online payments\n` +
-    `🚗 Student pickup management\n` +
-    `📊 School reports & analytics\n\n` +
-    `*All through WhatsApp — no app needed!*\n\n` +
-    `Let me show you how it works! 🎯`
-  );
+  const { data, error } = await db
+    .from('trial_codes')
+    .select('*')
+    .eq('code', code)
+    .maybeSingle();
 
-  await delay(1500);
-  await showDemoMainMenu(phone, session, wa);
-}
-
-// ============================================================
-// MAIN DEMO MENU
-// ============================================================
-
-async function showDemoMainMenu(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_MENU';
-  await saveMarketingSession(session);
-
-  await wa.list(
-    phone,
-    `🏫 SchoolBot Demo`,
-    `What would you like to explore?`,
-    `Powered by SchoolBot · XtopEdu`,
-    `🎯 Explore Features`,
-    [
-      {
-        title: '🔥 Most Popular',
-        rows: [
-          {
-            id:          'demo_attendance',
-            title:       '✅ Attendance System',
-            description: 'Real-time alerts to parents',
-          },
-          {
-            id:          'demo_fees',
-            title:       '💰 Fee Collection',
-            description: 'Online payments & tracking',
-          },
-        ],
-      },
-      {
-        title: '📱 More Features',
-        rows: [
-          {
-            id:          'demo_pickup',
-            title:       '🚗 Pickup Management',
-            description: 'Authorized contacts & alerts',
-          },
-          {
-            id:          'demo_reports',
-            title:       '📊 School Reports',
-            description: 'Analytics & insights',
-          },
-        ],
-      },
-      {
-        title: '💼 Get Started',
-        rows: [
-          {
-            id:          'see_pricing',
-            title:       '💵 See Pricing',
-            description: 'One-time setup fee only',
-          },
-          {
-            id:          'register_now',
-            title:       '🚀 Register Now',
-            description: 'Get started today',
-          },
-          {
-            id:          'talk_to_us',
-            title:       '📞 Talk to Us',
-            description: 'Speak with our team',
-          },
-        ],
-      },
-    ]
-  );
-}
-
-// ============================================================
-// ATTENDANCE DEMO
-// ============================================================
-
-async function showAttendanceDemo(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_ATTENDANCE';
-  await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'attendance_demo'
-  );
-
-  await wa.text(
-    phone,
-    `✅ *Attendance Management Demo*\n\n` +
-    `📍 Demo School: *${DEMO_SCHOOL.name}*\n\n` +
-    `Here's what happened today:\n\n` +
-    `📅 *${DEMO_ATTENDANCE.today.date}*\n\n` +
-    `✅ Present: *${DEMO_ATTENDANCE.today.present}* students\n` +
-    `❌ Absent:  *${DEMO_ATTENDANCE.today.absent}* students\n` +
-    `⏰ Late:    *${DEMO_ATTENDANCE.today.late}* students\n` +
-    `📊 Rate:    *${DEMO_ATTENDANCE.today.rate}*\n\n` +
-    `When teacher marks a student, parent\n` +
-    `gets this WhatsApp message *instantly* 👇`
-  );
-
-  await delay(2000);
-
-  await wa.text(
-    phone,
-    `─────────────────────────\n` +
-    `📱 *Sample Parent Message:*\n\n` +
-    DEMO_ATTENDANCE.parentMessage +
-    `\n─────────────────────────\n\n` +
-    `🔥 *Results at ${DEMO_SCHOOL.name}:*\n` +
-    `• ${DEMO_SCHOOL.parents} parents notified < 2 mins\n` +
-    `• 98.4% message delivery rate\n` +
-    `• Absences reduced by 67%!`
-  );
-
-  await delay(1500);
-
-  await wa.buttons(
-    phone,
-    `Want to see more? 👀`,
-    [
-      { id: 'att_parent_view', title: '👨‍👩‍👧 Parent View' },
-      { id: 'att_admin_view',  title: '👨‍💼 Admin View' },
-      { id: 'demo_fees',       title: '💰 Fees Demo' },
-    ],
-    'Attendance Demo'
-  );
-}
-
-async function showParentAttView(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_ATTENDANCE_PARENT';
-  await saveMarketingSession(session);
-
-  const s = DEMO_ATTENDANCE.student;
-
-  await wa.text(
-    phone,
-    `👨‍👩‍👧 *What Parent Sees on WhatsApp:*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `📅 *Today's Attendance*\n` +
-    `👤 ${s.name}\n` +
-    `🏫 ${s.class}\n` +
-    `📌 Status: ✅ Present\n` +
-    `⏰ Arrival: ${s.arrivalTime}\n\n` +
-    `📊 *Term Summary:*\n` +
-    `Rate: *${s.termRate}*\n` +
-    `✅ Present: ${s.present} days\n` +
-    `❌ Absent:  ${s.absent} days\n` +
-    `⏰ Late:    ${s.late} days\n` +
-    `📅 Total:   ${s.total} days\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `Parent checks this anytime by\n` +
-    `just sending a message! 📱`
-  );
-
-  await delay(1500);
-
-  await wa.buttons(
-    phone,
-    `Impressive right? 😊`,
-    [
-      { id: 'demo_fees',    title: '💰 Fee Collection' },
-      { id: 'demo_pickup',  title: '🚗 Pickup' },
-      { id: 'see_pricing',  title: '💵 Pricing' },
-    ]
-  );
-}
-
-async function showAdminAttView(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_ATTENDANCE_ADMIN';
-  await saveMarketingSession(session);
-
-  await wa.text(
-    phone,
-    `👨‍💼 *How Teachers Mark Attendance:*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `1️⃣ Teacher selects their class\n` +
-    `2️⃣ Bot shows each student\n` +
-    `3️⃣ Teacher taps Present/Absent/Late\n` +
-    `4️⃣ Parent gets WhatsApp alert! 📱\n\n` +
-    `⚡ *Mark 40 students in 3 minutes!*\n\n` +
-    `📊 *Admin Dashboard shows:*\n` +
-    `• Real-time attendance by class\n` +
-    `• Students absent 3+ days in a row\n` +
-    `• Term attendance rates\n` +
-    `• Parent notification status`
-  );
-
-  await delay(1500);
-
-  await wa.buttons(
-    phone,
-    `This reduced absences by *67%*! 🎯`,
-    [
-      { id: 'demo_fees',    title: '💰 Fee Collection' },
-      { id: 'register_now', title: '🚀 Get Started' },
-      { id: 'see_pricing',  title: '💵 Pricing' },
-    ]
-  );
-}
-
-// ============================================================
-// FEES DEMO
-// ============================================================
-
-async function showFeesDemo(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_FEES';
-  await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'fees_demo'
-  );
-
-  await wa.text(
-    phone,
-    `💰 *Fee Collection Demo*\n\n` +
-    `📍 Demo: *${DEMO_SCHOOL.name}*\n\n` +
-    `*Before SchoolBot:*\n` +
-    `😫 Chasing parents for fees\n` +
-    `📝 Manual payment records\n` +
-    `❓ Not knowing who has paid\n` +
-    `🏃 Parents coming to school\n\n` +
-    `*After SchoolBot:*\n` +
-    `✅ Parents pay online via WhatsApp\n` +
-    `✅ Automatic payment reminders\n` +
-    `✅ Real-time collection dashboard\n` +
-    `✅ School gets *100%* of their fee!\n\n` +
-    `📊 *${DEMO_SCHOOL.name} Results:*\n` +
-    `• Collection: 58% → *91%* in 3 months!\n` +
-    `• Outstanding reduced by *₦12.7 million*`
-  );
-
-  await delay(2000);
-
-  await wa.buttons(
-    phone,
-    `Want to see parent & admin views? 👀`,
-    [
-      { id: 'fees_parent_view',  title: '👨‍👩‍👧 Parent View' },
-      { id: 'fees_payment_demo', title: '💳 Payment Flow' },
-      { id: 'demo_pickup',       title: '🚗 Pickup Demo' },
-    ],
-    'Fee Collection Demo'
-  );
-}
-
-async function showParentFeesView(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_FEES_PARENT';
-  await saveMarketingSession(session);
-
-  const inv1 = DEMO_FEES.invoices[0];
-  const inv2 = DEMO_FEES.invoices[1];
-
-  await wa.text(
-    phone,
-    `👨‍👩‍👧 *Parent Fee View (WhatsApp)*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `Parent sends "fees" on WhatsApp:\n\n` +
-    `💰 *Outstanding Fees*\n` +
-    `👤 ${DEMO_FEES.student} • ${DEMO_FEES.class}\n\n` +
-    `1. *${inv1.title}*\n` +
-    `   💵 ${fmt(inv1.balance)} remaining\n` +
-    `   📅 Due: 31 Dec 2024\n\n` +
-    `2. *${inv2.title}*\n` +
-    `   💵 ${fmt(inv2.balance)}\n` +
-    `   📅 Due: 30 Nov 2024\n\n` +
-    `━━━━━━━━━━━━━━━━\n` +
-    `💵 *Total: ${fmt(DEMO_FEES.totalOutstanding)}*\n\n` +
-    `Parent taps *Pay Now* → Paystack\n` +
-    `link → Pays online! ✅`
-  );
-
-  await delay(1500);
-
-  await wa.buttons(
-    phone,
-    `Simple for parents, powerful for schools! 💪`,
-    [
-      { id: 'fees_payment_demo', title: '💳 See Payment' },
-      { id: 'demo_pickup',       title: '🚗 Pickup Demo' },
-      { id: 'register_now',      title: '🚀 Get Started' },
-    ]
-  );
-}
-
-async function showPaymentDemo(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_FEES_PAYMENT';
-  await saveMarketingSession(session);
-
-  await wa.text(
-    phone,
-    `💳 *Payment Flow Demo*\n\n` +
-    `When parent taps *Pay Now*:\n\n` +
-    `📋 *Payment Summary*\n` +
-    `━━━━━━━━━━━━━━━━\n` +
-    `👤 Chidi Okonkwo\n` +
-    `📋 First Term Fees 2024/2025\n\n` +
-    `💵 School Fee:     *${fmt(75000)}*\n` +
-    `🏷️ Platform Fee:   *${fmt(1125)}* (1.5%)\n` +
-    `🏦 Processing Fee: *${fmt(1178)}*\n` +
-    `━━━━━━━━━━━━━━━━\n` +
-    `💳 *Total: ${fmt(77303)}*\n\n` +
-    `🏫 School receives *${fmt(75000)}* (100%)\n\n` +
-    `Pay via:\n` +
-    `💳 Card | 🏦 Transfer\n` +
-    `📱 USSD | 💵 Mobile Money\n\n` +
-    `*School gets 100% —\n` +
-    `we add our small fee on top!* 💪`
-  );
-
-  await delay(2000);
-
-  await wa.buttons(
-    phone,
-    `Ready to collect fees online? 🚀`,
-    [
-      { id: 'register_now', title: '🚀 Register Now' },
-      { id: 'see_pricing',  title: '💵 See Pricing' },
-      { id: 'demo_pickup',  title: '🚗 Pickup Demo' },
-    ]
-  );
-}
-
-// ============================================================
-// PICKUP DEMO
-// ============================================================
-
-async function showPickupDemo(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_PICKUP';
-  await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'pickup_demo'
-  );
-
-  await wa.text(
-    phone,
-    `🚗 *Student Pickup Management*\n\n` +
-    `Keep students safe with authorized\n` +
-    `pickup contacts!\n\n` +
-    `*${DEMO_PICKUP.student}'s Contacts:*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    DEMO_PICKUP.contacts.map((c, i) =>
-      `${i + 1}. *${c.name}*\n` +
-      `   👥 ${c.relationship}\n` +
-      `   📱 ${c.phone}`
-    ).join('\n\n') +
-    `\n━━━━━━━━━━━━━━━━\n\n` +
-    `When child is picked up:\n` +
-    `1️⃣ Guard verifies contact\n` +
-    `2️⃣ Logs pickup in SchoolBot\n` +
-    `3️⃣ Parent gets WhatsApp alert! 📱`
-  );
-
-  await delay(2000);
-
-  await wa.text(
-    phone,
-    `📱 *Parent receives instantly:*\n\n` +
-    `🚗 *Pickup Notification*\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `✅ *${DEMO_PICKUP.student}* has been\n` +
-    `picked up from school!\n\n` +
-    `👤 By: ${DEMO_PICKUP.recentPickup.pickedBy}\n` +
-    `⏰ Time: ${DEMO_PICKUP.recentPickup.time}\n\n` +
-    `⚠️ If you did not authorize this,\n` +
-    `contact school immediately!\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `🔐 *Every pickup logged & verified!*`
-  );
-
-  await delay(1500);
-
-  await wa.buttons(
-    phone,
-    `Parents love this for child safety! 🔐`,
-    [
-      { id: 'demo_reports', title: '📊 Reports Demo' },
-      { id: 'see_pricing',  title: '💵 Pricing' },
-      { id: 'register_now', title: '🚀 Register Now' },
-    ]
-  );
-}
-
-// ============================================================
-// REPORTS DEMO
-// ============================================================
-
-async function showReportsDemo(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_REPORTS';
-  await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'reports_demo'
-  );
-
-  const r = DEMO_REPORTS;
-
-  await wa.text(
-    phone,
-    `📊 *School Reports & Analytics*\n\n` +
-    `*${DEMO_SCHOOL.name}* Dashboard:\n` +
-    `━━━━━━━━━━━━━━━━\n\n` +
-    `✅ *Attendance:*\n` +
-    `This Week:  *${r.attendance.thisWeek}*\n` +
-    `This Month: *${r.attendance.thisMonth}*\n` +
-    `This Term:  *${r.attendance.thisTerm}*\n` +
-    `Best Class: *${r.attendance.bestClass}*\n\n` +
-    `💰 *Fee Collection:*\n` +
-    `Collected:   *${fmt(r.feeCollection.totalCollected)}*\n` +
-    `Outstanding: *${fmt(r.feeCollection.outstanding)}*\n` +
-    `Rate:        *${r.feeCollection.collectionRate}*\n\n` +
-    `📱 *WhatsApp Activity:*\n` +
-    `Messages:  *${r.whatsappStats.messagesSent.toLocaleString()}*\n` +
-    `Delivery:  *${r.whatsappStats.deliveryRate}*\n` +
-    `Parents:   *${r.whatsappStats.parentsEngaged}*\n` +
-    `━━━━━━━━━━━━━━━━`
-  );
-
-  await delay(1500);
-
-  await wa.buttons(
-    phone,
-    `Make better decisions with real data! 📈`,
-    [
-      { id: 'register_now', title: '🚀 Register Now' },
-      { id: 'see_pricing',  title: '💵 See Plans' },
-      { id: 'talk_to_us',   title: '📞 Talk to Us' },
-    ]
-  );
-}
-
-// ============================================================
-// PRICING
-// ============================================================
-
-async function showPricing(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'DEMO_PRICING';
-  await saveMarketingSession(session);
-  await logDemoInteraction(formatPhone(phone), 'pricing');
-
-  await wa.text(
-    phone,
-    `💵 *SchoolBot Pricing*\n\n` +
-    `*How it works:*\n\n` +
-    `1️⃣ *One-Time Setup Fee*\n` +
-    `   Based on your student count\n` +
-    `   Pay once — use forever!\n\n` +
-    `2️⃣ *1.5% Commission Per Payment*\n` +
-    `   Only when parents pay fees\n` +
-    `   Added on TOP of school fee\n` +
-    `   Your school gets *100%*! 💪\n\n` +
-    `✅ *No monthly subscription!*\n` +
-    `✅ *No hidden charges!*\n` +
-    `✅ *Lifetime access!* 🎉`
-  );
-
-  await delay(1000);
-
-  await wa.list(
-    phone,
-    `💵 Setup Fee Tiers`,
-    `One-time setup fee based on\nyour student count:`,
-    `Commission: 1.5% per payment (to parent)`,
-    `📋 View Tiers`,
-    [
-      {
-        title: 'Setup Fee Tiers',
-        rows: SETUP_FEE_TIERS.map((t) => ({
-          id:          `tier_${t.name.toLowerCase()}`,
-          title:       `${t.name}: ${t.fee}`,
-          description: t.range,
-        })),
-      },
-    ]
-  );
-
-  await delay(1000);
-
-  await wa.buttons(
-    phone,
-    `Ready to get started? 🚀`,
-    [
-      { id: 'register_now', title: '🚀 Register Now' },
-      { id: 'talk_to_us',   title: '📞 Ask Questions' },
-      { id: 'main_menu',    title: '↩️ See More' },
-    ]
-  );
-}
-
-// ============================================================
-// ✅ REGISTRATION — Checks existing schools first
-// ============================================================
-
-async function startRegistration(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  // ✅ Check if phone already owns schools
-  const { data: existingSchools } = await db
-    .from('school_onboarding')
-    .select(`
-      school_id,
-      schools ( id, name, is_active, onboarding_status )
-    `)
-    .eq('admin_phone', formatPhone(phone));
-
-  if (
-    existingSchools &&
-    existingSchools.length > 0
-  ) {
-    // They already have schools
-    const schoolList = existingSchools
-      .map((s, i) => {
-        const school = s.schools as
-          Record<string, unknown> | null;
-        const isActive = school?.is_active as boolean;
-        const status   = school?.onboarding_status as string;
-        return (
-          `${i + 1}. *${school?.name ?? 'Unknown'}*\n` +
-          `   ${isActive ? '🟢 Active' : `⏳ ${status}`}`
-        );
-      })
-      .join('\n\n');
-
-    await wa.buttons(
-      phone,
-      `🏫 *You Already Have ` +
-      `${existingSchools.length} School(s)*\n\n` +
-      `${schoolList}\n\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `What would you like to do?`,
-      [
-        {
-          id:    'add_another_school',
-          title: '➕ Add Another School',
-        },
-        {
-          id:    'manage_existing',
-          title: '🏫 Manage Existing',
-        },
-      ]
-    );
+  if (error || !data) {
+    await wa.text(phone, `❌ The code *${code}* is invalid. Type *hi* to try our demo.`);
     return;
   }
 
-  // No existing schools — proceed normally
-  session.state = 'REGISTERING';
-  await saveMarketingSession(session);
-  await logDemoInteraction(
-    formatPhone(phone), 'registration_started'
-  );
-
-  const prefill = {
-    contactName:       session.contactName  ?? undefined,
-    schoolName:        session.schoolName   ?? undefined,
-    location:          session.location     ?? undefined,
-    studentCountRange: session.studentCount ?? undefined,
-    schoolType:        session.schoolType   ?? undefined,
-  };
-
-  // ✅ await so session is saved before user replies
-  const obSession = await startOnboardingSession(
-    phone, 'marketing', prefill
-  );
-
-  console.log(
-    `[Marketing] ✅ Onboarding started | ` +
-    `step: ${obSession.step}`
-  );
-
-  if (session.contactName && session.schoolName) {
-    await wa.text(
-      phone,
-      `🚀 *Let's register your school!*\n\n` +
-      `I already have some details:\n\n` +
-      `👤 *Name:* ${session.contactName}\n` +
-      `🏫 *School:* ${session.schoolName}\n\n` +
-      `Let me calculate your setup fee...`
-    );
-    await delay(1000);
-    await showSetupFeeInfo(phone, obSession, wa);
-  } else if (session.contactName) {
-    await wa.text(
-      phone,
-      `🚀 *Register Your School!*\n\n` +
-      `Hi *${
-        session.contactName.split(' ')[0]
-      }!* 👋\n\n` +
-      `What is the name of your school?`
-    );
-  } else {
-    await wa.text(
-      phone,
-      `🚀 *Register Your School!*\n\n` +
-      `Let's get you set up! 😊\n\n` +
-      `First, what is your *full name*?`
-    );
+  if (data.used || new Date(data.expires_at) < new Date()) {
+    await wa.text(phone, `❌ This trial code has expired or was already used.`);
+    return;
   }
-}
 
-// ============================================================
-// NOT INTERESTED
-// ============================================================
+  await db
+    .from('trial_codes')
+    .update({ used: true, used_at: new Date().toISOString(), used_by_phone: formatPhone(phone) })
+    .eq('id', data.id);
 
-async function handleNotInterested(
-  phone:   string,
-  session: DemoSession,
-  wa:      WhatsApp
-): Promise<void> {
-  session.state = 'NOT_INTERESTED';
+  await db
+    .from('trial_sessions')
+    .upsert({
+      phone: formatPhone(phone),
+      code,
+      active: true,
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'phone' });
+
+  let session = await getMarketingSession(formatPhone(phone));
+  if (!session) session = await createMarketingSession(formatPhone(phone));
+  session.state = 'TRIAL_ACTIVE';
   await saveMarketingSession(session);
 
-  const response = await ai.chat(
-    [{
-      role:    'user',
-      content: `I'm not sure I'm interested right now`,
-    }],
-    {
-      contactName: session.contactName ?? null,
-      schoolName:  session.schoolName  ?? null,
-      intent:      'not_interested',
-    }
+  await wa.text(
+    phone,
+    `🎉 *Free Trial Activated!*\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `Your setup fee is *100% WAIVED*! 🚀\n\n` +
+    `Ready to register your school?`
   );
 
-  await wa.text(phone, response);
-  await delay(1500);
-
+  await delay(1000);
   await wa.buttons(
     phone,
-    `No problem! We're here whenever\nyou're ready 😊`,
+    `Get started for FREE!`,
     [
-      { id: 'see_pricing', title: '💵 See Pricing' },
-      { id: 'main_menu',   title: '🎯 See Features' },
-      { id: 'talk_to_us',  title: '📞 Contact Us' },
+      { id: 'register_now',      title: '🚀 Register Now' },
+      { id: 'main_menu',         title: '👀 Test Sandbox' },
     ]
   );
 }
 
-// ============================================================
-// CONTACT OPTIONS
-// ============================================================
-
+// ─── Contact Options ────────────────────────────────────────
 async function showContactOptions(
   phone:   string,
   session: DemoSession,
@@ -1266,38 +1052,17 @@ async function showContactOptions(
   session.state = 'DEMO_CONTACT';
   await saveMarketingSession(session);
 
-  const adminPhone =
-    Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
+  const adminPhone = Deno.env.get('SUPER_ADMIN_PHONE') ?? '';
 
   await wa.buttons(
     phone,
     `📞 *Talk to Our Team*\n\n` +
-    `We'd love to answer your questions!\n\n` +
+    `We would love to answer your questions and help set up your school!\n\n` +
     `📱 WhatsApp: *${adminPhone}*\n` +
-    `⏰ Available: Mon-Fri, 8AM-6PM`,
+    `⏰ Available: Mon - Fri, 8:00 AM - 6:00 PM`,
     [
-      { id: 'register_now', title: '🚀 Register Instead' },
-      { id: 'main_menu',    title: '🎯 See More Features' },
-    ],
-    'Contact Us'
-  );
-}
-
-// ============================================================
-// QUICK OPTIONS
-// ============================================================
-
-async function showQuickOptions(
-  phone: string,
-  wa:    WhatsApp
-): Promise<void> {
-  await wa.buttons(
-    phone,
-    `What would you like to do next?`,
-    [
-      { id: 'register_now', title: '🚀 Register Now' },
-      { id: 'main_menu',    title: '🎯 See Features' },
-      { id: 'see_pricing',  title: '💵 Pricing' },
+      { id: 'register_now', title: '🚀 Register School' },
+      { id: 'main_menu',    title: '🎯 Test Sandbox'    },
     ]
   );
 }
