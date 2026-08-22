@@ -1,11 +1,10 @@
 // ============================================================
 // SCHOOLBOT - PDF SERVICE
 // supabase/functions/_shared/pdf.service.ts
-// ✅ Fixed: Added Cache-Busting timestamps to all PDF filenames to force instant WhatsApp updates
-// ✅ Fixed: Horizontal side-by-side header layout (logo on left, text on right, no overlap)
-// ✅ Fixed: WinAnsi encoding error on Naira (₦) symbol -> NGN
-// ✅ Fixed: Auto-sanitizes text (em-dashes, bullets, smart quotes)
-// ✅ Fixed: Stamps, signatures, logos embedded with fallback protection
+// ✅ Fixed: Dynamically renders the REAL School Name, Address, Contact & Motto
+// ✅ Fixed: Cache-Busting timestamps to bypass WhatsApp cache
+// ✅ Fixed: WinAnsi encoding safe (Naira -> NGN, no crash)
+// ✅ Fixed: Single-page A4 precision layout
 // ============================================================
 
 import {
@@ -18,7 +17,7 @@ import { getSupabase } from './supabase.ts';
 const db = getSupabase();
 const BUCKET = 'documents';
 
-// ✅ ASCII-safe currency format for PDF WinAnsi compatibility
+// ASCII-safe currency format for PDF WinAnsi compatibility
 const fmt = (n: number) =>
   `NGN ${new Intl.NumberFormat('en-NG', {
     minimumFractionDigits: 0,
@@ -34,7 +33,7 @@ function sanitizeText(str: string): string {
     .replace(/[•·]/g, '-')
     .replace(/[""]/g, '"')
     .replace(/['']/g, "'")
-    .replace(/[^\x00-\x7F]/g, ''); // Strip any remaining non-ASCII glyphs
+    .replace(/[^\x00-\x7F]/g, ''); // Strip non-ASCII glyphs
 }
 
 // ─── Hex Color Parser ──────────────────────────────────────
@@ -298,17 +297,17 @@ export class PdfService {
 
     const { data: school } = await db
       .from('schools')
-      .select('logo_url, stamp_url, principal_signature_url, motto, primary_color, secondary_color, receipt_footer')
+      .select('name, address, phone, logo_url, stamp_url, principal_signature_url, motto, primary_color, secondary_color, receipt_footer')
       .eq('id', params.schoolId)
       .maybeSingle();
 
     const brandColor = school?.primary_color ? hexToRgb(school.primary_color) : [0.0, 0.356, 0.376];
 
     await drawSchoolHeader(w, {
-      name:          params.schoolName,
+      name:          school?.name ?? params.schoolName,
       motto:         school?.motto,
-      address:       params.schoolAddress,
-      phone:         params.schoolPhone,
+      address:       school?.address ?? params.schoolAddress,
+      phone:         school?.phone ?? params.schoolPhone,
       logo_url:      school?.logo_url,
       primary_color: school?.primary_color,
     });
@@ -352,7 +351,6 @@ export class PdfService {
     );
     w.divider();
 
-    // Embed Official Stamp & Signature if exists
     if (school?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, school.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
@@ -372,7 +370,7 @@ export class PdfService {
 
     const bytes = await w.bytes();
     const safe  = params.receiptNumber.replace(/[^A-Za-z0-9-]/g, '');
-    const stamp = Date.now(); // ✅ Cache-Buster
+    const stamp = Date.now();
     return uploadPdf(bytes, `receipts/${safe}-${stamp}.pdf`);
   }
 
@@ -390,17 +388,17 @@ export class PdfService {
 
     const { data: dbSchool } = await db
       .from('schools')
-      .select('logo_url, stamp_url, motto, primary_color, secondary_color, result_footer')
+      .select('name, address, phone, logo_url, stamp_url, motto, primary_color, secondary_color, result_footer')
       .eq('id', school.id)
       .maybeSingle();
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376];
 
     await drawSchoolHeader(w, {
-      name:          school.name ?? 'School',
+      name:          dbSchool?.name ?? school.name ?? 'School',
       motto:         dbSchool?.motto,
-      address:       school.address,
-      phone:         school.phone,
+      address:       dbSchool?.address ?? school.address,
+      phone:         dbSchool?.phone ?? school.phone,
       logo_url:      dbSchool?.logo_url,
       primary_color: dbSchool?.primary_color,
     });
@@ -475,11 +473,11 @@ export class PdfService {
     });
 
     const bytes     = await w.bytes();
-    const safeSchool = (school.name ?? 'school')
+    const safeSchool = (dbSchool?.name ?? school.name ?? 'school')
       .toString()
       .replace(/[^A-Za-z0-9]/g, '')
       .slice(0, 20);
-    const stamp = Date.now(); // ✅ Cache-Buster
+    const stamp = Date.now();
 
     return uploadPdf(
       bytes,
@@ -498,15 +496,17 @@ export class PdfService {
 
     const { data: dbSchool } = await db
       .from('schools')
-      .select('logo_url, stamp_url, motto, primary_color, secondary_color, result_footer')
+      .select('name, address, phone, logo_url, stamp_url, motto, primary_color, secondary_color, result_footer')
       .eq('id', schoolId)
       .maybeSingle();
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376];
 
     await drawSchoolHeader(w, {
-      name:          (data.school_name as string) ?? 'School',
+      name:          dbSchool?.name ?? (data.school_name as string) ?? 'School',
       motto:         dbSchool?.motto,
+      address:       dbSchool?.address,
+      phone:         dbSchool?.phone,
       logo_url:      dbSchool?.logo_url,
       primary_color: dbSchool?.primary_color,
     });
@@ -550,7 +550,7 @@ export class PdfService {
 
     const bytes = await w.bytes();
     const adm   = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
-    const stamp = Date.now(); // ✅ Cache-Buster
+    const stamp = Date.now();
 
     return uploadPdf(bytes, `reports/student-${adm}-${stamp}.pdf`);
   }
@@ -563,11 +563,12 @@ export class PdfService {
     const subjects = data.subjects as Array<Record<string, unknown>> ?? [];
     const w = await PdfWriter.create();
 
-    const schoolId = student.school_id;
+    const schoolId = student.school_id || (data.school_id as string);
 
+    // ✅ FIXED: Explicitly query all school identity columns
     const { data: dbSchool } = await db
       .from('schools')
-      .select('logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, result_footer, address, phone')
+      .select('name, address, phone, email, logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, result_footer')
       .eq('id', schoolId)
       .maybeSingle();
 
@@ -583,6 +584,7 @@ export class PdfService {
     const headerY = w.y;
     const headerHeight = 70;
 
+    // Left Column: School Logo
     w.page.drawCircle({
       x: w.margin + 25,
       y: headerY - 30,
@@ -594,41 +596,55 @@ export class PdfService {
       await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin + 4, headerY - 51, 42, 42);
     }
 
+    // Center Column: REAL School Identity
     const centerX = w.width / 2;
-    const schoolName = sanitizeText(dbSchool?.name ?? "SPOTLIGHT COMPREHENSIVE COLLEGE");
-    const addressLine = sanitizeText(dbSchool?.address ?? "28, OVIAWEH STREET OFF AYEPE ROAD, SAGAMU, OGUN STATE");
-    const contactLine = sanitizeText("spotlightinternationalschool@gmail.com, 07063639808, 07037819024");
-    const mottoLine = sanitizeText(`MOTTO: ${dbSchool?.motto ?? "LIGHT THE WAY TO SUCCESS"}`);
+    const realSchoolName = sanitizeText(
+      (data.school_name as string) ?? dbSchool?.name ?? "YOUR SCHOOL NAME"
+    ).toUpperCase();
 
-    w.page.drawText(schoolName, {
-      x: centerX - (w.bold.widthOfTextAtSize(schoolName, 13) / 2),
+    const realAddress = sanitizeText(
+      dbSchool?.address ?? "School Campus Address, State, Nigeria"
+    );
+
+    const contactParts: string[] = [];
+    if (dbSchool?.email) contactParts.push(dbSchool.email);
+    if (dbSchool?.phone) contactParts.push(dbSchool.phone);
+    const realContact = sanitizeText(contactParts.join(', ') || "contact@schoolbot.ng");
+
+    const realMotto = sanitizeText(
+      `MOTTO: ${dbSchool?.motto ?? "EXCELLENCE, KNOWLEDGE AND DISCIPLINE"}`
+    ).toUpperCase();
+
+    w.page.drawText(realSchoolName, {
+      x: centerX - (w.bold.widthOfTextAtSize(realSchoolName, 13) / 2),
       y: headerY - 5,
       size: 13,
       font: w.bold,
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
-    w.page.drawText(addressLine, {
-      x: centerX - (w.font.widthOfTextAtSize(addressLine, 7.5) / 2),
+    w.page.drawText(realAddress, {
+      x: centerX - (w.font.widthOfTextAtSize(realAddress, 7.5) / 2),
       y: headerY - 17,
       size: 7.5,
       font: w.font,
       color: rgb(0.3, 0.3, 0.3),
     });
-    w.page.drawText(contactLine, {
-      x: centerX - (w.font.widthOfTextAtSize(contactLine, 7) / 2),
+    w.page.drawText(realContact, {
+      x: centerX - (w.font.widthOfTextAtSize(realContact, 7) / 2),
       y: headerY - 27,
       size: 7,
       font: w.font,
       color: rgb(0.4, 0.4, 0.4),
     });
-    w.page.drawText(mottoLine, {
-      x: centerX - (w.bold.widthOfTextAtSize(mottoLine, 8) / 2),
+    w.page.drawText(realMotto, {
+      x: centerX - (w.bold.widthOfTextAtSize(realMotto, 8) / 2),
       y: headerY - 40,
       size: 8,
       font: w.bold,
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
+    // Right Column: Student Passport Box
     const photoX = w.width - w.margin - 55;
     const photoWidth = 55;
     const photoHeight = 65;
@@ -675,8 +691,9 @@ export class PdfService {
       borderWidth: 1,
     });
 
-    w.page.drawText("SECOND TERM REPORT SHEET", {
-      x: centerX - (w.bold.widthOfTextAtSize("SECOND TERM REPORT SHEET", 9.5) / 2),
+    const termTitle = sanitizeText(`${(data.term as string) ?? 'FIRST TERM'} REPORT SHEET`).toUpperCase();
+    w.page.drawText(termTitle, {
+      x: centerX - (w.bold.widthOfTextAtSize(termTitle, 9.5) / 2),
       y: infoBoxY - 14,
       size: 9.5,
       font: w.bold,
@@ -708,7 +725,7 @@ export class PdfService {
     drawGridField("TIMES SCHOOL OPENED:", "116", w.margin + 385, gridY - rowH, 100);
 
     drawGridField("CLOSING DATE:", "18/12/2026", w.margin + 10, gridY - (rowH * 2), 230);
-    drawGridField("TERM:", "SECOND TERM", w.margin + 245, gridY - (rowH * 2), 130);
+    drawGridField("TERM:", `${(data.term as string) ?? 'FIRST TERM'}`, w.margin + 245, gridY - (rowH * 2), 130);
     drawGridField("TIMES PRESENT:", "114", w.margin + 385, gridY - (rowH * 2), 100);
 
     drawGridField("RESUMPTION DATE:", "11/01/2027", w.margin + 10, gridY - (rowH * 3), 230);
@@ -757,7 +774,7 @@ export class PdfService {
       color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
-    const tblHeaderText = "STUDENT'S ACADEMIC PERFORMANCE (JUNIOR SECONDARY CATEGORY)";
+    const tblHeaderText = "STUDENT'S ACADEMIC PERFORMANCE";
     w.page.drawText(tblHeaderText, {
       x: centerX - (w.bold.widthOfTextAtSize(tblHeaderText, 7.5) / 2),
       y: w.y - 11,
@@ -945,7 +962,6 @@ export class PdfService {
     // ── 5. FOOTER SECTION ──────────────────────────────────────
     w.y = threeColY - 110 - 20;
     const footerY = w.y;
-    const footerHeight = 65;
 
     w.page.drawRectangle({
       x: w.margin,
@@ -1001,7 +1017,7 @@ export class PdfService {
 
     const bytes = await w.bytes();
     const adm   = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
-    const stamp = Date.now(); // ✅ Unique timestamp bypasses all WhatsApp/CDN caches!
+    const stamp = Date.now();
 
     return uploadPdf(bytes, `results/result-${adm}-${stamp}.pdf`);
   }
