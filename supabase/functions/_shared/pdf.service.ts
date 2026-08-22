@@ -1,9 +1,9 @@
 // ============================================================
 // SCHOOLBOT - PDF SERVICE
 // supabase/functions/_shared/pdf.service.ts
+// ✅ Fixed: Horizontal header layout (logo on left, text on right, no overlap)
 // ✅ Fixed: WinAnsi encoding error on Naira (₦) symbol -> NGN
 // ✅ Fixed: Auto-sanitizes text (em-dashes, bullets, smart quotes)
-// ✅ Fixed: Safe hex color parsing for dynamic custom layouts
 // ✅ Fixed: Stamps, signatures, logos embedded with fallback protection
 // ============================================================
 
@@ -17,7 +17,7 @@ import { getSupabase } from './supabase.ts';
 const db = getSupabase();
 const BUCKET = 'documents';
 
-// ✅ Formatter uses ASCII-safe "NGN" for PDF WinAnsi compatibility
+// ✅ ASCII-safe currency format for PDF WinAnsi compatibility
 const fmt = (n: number) =>
   `NGN ${new Intl.NumberFormat('en-NG', {
     minimumFractionDigits: 0,
@@ -25,7 +25,6 @@ const fmt = (n: number) =>
   }).format(n)}`;
 
 // ─── WinAnsi Text Sanitizer ─────────────────────────────────
-// Replaces characters that standard PDF fonts cannot encode
 function sanitizeText(str: string): string {
   if (!str) return '';
   return str
@@ -50,7 +49,7 @@ function hexToRgb(hex: string): [number, number, number] {
       isNaN(b) ? 0.68 : b,
     ];
   } catch {
-    return [0.12, 0.25, 0.68]; // default primary dark blue
+    return [0.12, 0.25, 0.68];
   }
 }
 
@@ -74,7 +73,6 @@ async function drawImageFromUrl(
     }
     const bytes = new Uint8Array(await res.arrayBuffer());
     
-    // Auto-detect image format based on file extension/URL
     const lowerUrl = url.toLowerCase();
     const image = lowerUrl.includes('.png') || lowerUrl.includes('image=png')
       ? await doc.embedPng(bytes)
@@ -110,6 +108,7 @@ class PdfWriter {
   line(
     text: string,
     opts: {
+      x?:     number;
       size?:  number;
       bold?:  boolean;
       color?: [number, number, number];
@@ -121,11 +120,10 @@ class PdfWriter {
       ? rgb(opts.color[0], opts.color[1], opts.color[2])
       : rgb(0.1, 0.1, 0.1);
 
-    // ✅ Clean string to prevent WinAnsi crash
     const safeText = sanitizeText(text);
 
     this.page.drawText(safeText, {
-      x:    this.margin,
+      x:    opts.x ?? this.margin,
       y:    this.y,
       size,
       font:  opts.bold ? this.bold : this.font,
@@ -152,6 +150,99 @@ class PdfWriter {
   async bytes(): Promise<Uint8Array> {
     return await this.doc.save();
   }
+}
+
+// ─── Reusable Branded Header (Logo Left, Text Right) ────────
+async function drawSchoolHeader(
+  w: PdfWriter,
+  school: {
+    name:           string;
+    motto?:         string | null;
+    address?:       string | null;
+    phone?:         string | null;
+    logo_url?:      string | null;
+    primary_color?: string | null;
+  }
+): Promise<void> {
+  const brandColor = school.primary_color ? hexToRgb(school.primary_color) : [0.12, 0.25, 0.68];
+  const hasLogo = !!school.logo_url;
+  const logoSize = 52;
+  const logoGap = 14;
+
+  const headerStartY = w.y;
+
+  // 1. Draw Logo on Left (if exists)
+  if (hasLogo) {
+    await drawImageFromUrl(
+      w.doc,
+      w.page,
+      school.logo_url,
+      w.margin,
+      headerStartY - logoSize + 10,
+      logoSize,
+      logoSize
+    );
+  }
+
+  // 2. Calculate text X offset so text sits neatly to the right of logo
+  const textX = hasLogo ? w.margin + logoSize + logoGap : w.margin;
+
+  // School Name
+  const nameSize = 16;
+  w.page.drawText(sanitizeText(school.name), {
+    x: textX,
+    y: w.y,
+    size: nameSize,
+    font: w.bold,
+    color: rgb(brandColor[0], brandColor[1], brandColor[2]),
+  });
+  w.y -= nameSize + 4;
+
+  // Motto
+  if (school.motto) {
+    const mottoSize = 9;
+    w.page.drawText(sanitizeText(`"${school.motto}"`), {
+      x: textX,
+      y: w.y,
+      size: mottoSize,
+      font: w.font,
+      color: rgb(0.4, 0.4, 0.4),
+    });
+    w.y -= mottoSize + 4;
+  }
+
+  // Address
+  if (school.address) {
+    const addrSize = 9;
+    w.page.drawText(sanitizeText(school.address), {
+      x: textX,
+      y: w.y,
+      size: addrSize,
+      font: w.font,
+      color: rgb(0.4, 0.4, 0.4),
+    });
+    w.y -= addrSize + 3;
+  }
+
+  // Phone
+  if (school.phone) {
+    const phoneSize = 9;
+    w.page.drawText(sanitizeText(school.phone), {
+      x: textX,
+      y: w.y,
+      size: phoneSize,
+      font: w.font,
+      color: rgb(0.4, 0.4, 0.4),
+    });
+    w.y -= phoneSize + 3;
+  }
+
+  // Ensure w.y completely clears both logo and text height
+  const textBottom = w.y;
+  const logoBottom = hasLogo ? headerStartY - logoSize - 4 : headerStartY;
+  w.y = Math.min(textBottom, logoBottom) - 6;
+
+  w.divider();
 }
 
 // ─── Upload PDF to Storage Bucket ───────────────────────────
@@ -204,7 +295,6 @@ export class PdfService {
   }): Promise<string> {
     const w = await PdfWriter.create();
 
-    // Fetch school branding info
     const { data: school } = await db
       .from('schools')
       .select('logo_url, stamp_url, principal_signature_url, motto, primary_color, secondary_color, receipt_footer')
@@ -213,34 +303,15 @@ export class PdfService {
 
     const brandColor = school?.primary_color ? hexToRgb(school.primary_color) : [0.12, 0.25, 0.68];
 
-    // Embed School Logo if exists
-    if (school?.logo_url) {
-      await drawImageFromUrl(w.doc, w.page, school.logo_url, w.margin, w.y - 50, 50, 50);
-      w.space(20);
-    }
-
-    w.line(params.schoolName, {
-      size: 18, bold: true, gap: 4, color: brandColor,
+    // ✅ Clean Header side-by-side
+    await drawSchoolHeader(w, {
+      name:          params.schoolName,
+      motto:         school?.motto,
+      address:       params.schoolAddress,
+      phone:         params.schoolPhone,
+      logo_url:      school?.logo_url,
+      primary_color: school?.primary_color,
     });
-
-    if (school?.motto) {
-      w.line(`"${school.motto}"`, {
-        size: 9, color: [0.4, 0.4, 0.4], gap: 6,
-      });
-    }
-
-    if (params.schoolAddress) {
-      w.line(params.schoolAddress, {
-        size: 9, color: [0.4, 0.4, 0.4],
-      });
-    }
-    if (params.schoolPhone) {
-      w.line(params.schoolPhone, {
-        size: 9, color: [0.4, 0.4, 0.4],
-      });
-    }
-    w.space(6);
-    w.divider();
 
     w.line('PAYMENT RECEIPT', {
       size: 14, bold: true, gap: 14, color: brandColor,
@@ -291,7 +362,6 @@ export class PdfService {
 
     w.space(14);
     
-    // Apply custom footer or default
     const footerText = school?.receipt_footer ?? 'This is an official payment receipt. Please keep this for your records.';
     w.line(footerText, {
       size: 8, color: [0.4, 0.4, 0.4],
@@ -317,7 +387,6 @@ export class PdfService {
 
     const w = await PdfWriter.create();
 
-    // Fetch school branding info
     const { data: dbSchool } = await db
       .from('schools')
       .select('logo_url, stamp_url, motto, primary_color, secondary_color, result_footer')
@@ -326,27 +395,15 @@ export class PdfService {
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
 
-    // Embed School Logo if exists
-    if (dbSchool?.logo_url) {
-      await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin, w.y - 50, 50, 50);
-      w.space(20);
-    }
-
-    w.line(school.name ?? 'School', {
-      size: 18, bold: true, gap: 4, color: brandColor,
+    // ✅ Clean Header side-by-side
+    await drawSchoolHeader(w, {
+      name:          school.name ?? 'School',
+      motto:         dbSchool?.motto,
+      address:       school.address,
+      phone:         school.phone,
+      logo_url:      dbSchool?.logo_url,
+      primary_color: dbSchool?.primary_color,
     });
-    if (dbSchool?.motto) {
-      w.line(`"${dbSchool.motto}"`, {
-        size: 9, color: [0.4, 0.4, 0.4], gap: 6,
-      });
-    }
-    if (school.address) {
-      w.line(school.address, {
-        size: 9, color: [0.4, 0.4, 0.4],
-      });
-    }
-    w.space(6);
-    w.divider();
 
     w.line(
       `${typeLabel.toUpperCase()} REPORT`,
@@ -439,7 +496,6 @@ export class PdfService {
 
     const schoolId = student.school_id;
 
-    // Fetch school branding info
     const { data: dbSchool } = await db
       .from('schools')
       .select('logo_url, stamp_url, motto, primary_color, secondary_color, result_footer')
@@ -448,21 +504,13 @@ export class PdfService {
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
 
-    if (dbSchool?.logo_url) {
-      await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin, w.y - 50, 50, 50);
-      w.space(20);
-    }
-
-    w.line((data.school_name as string) ?? 'School', {
-      size: 18, bold: true, gap: 4, color: brandColor,
+    // ✅ Clean Header side-by-side
+    await drawSchoolHeader(w, {
+      name:          (data.school_name as string) ?? 'School',
+      motto:         dbSchool?.motto,
+      logo_url:      dbSchool?.logo_url,
+      primary_color: dbSchool?.primary_color,
     });
-    if (dbSchool?.motto) {
-      w.line(`"${dbSchool.motto}"`, {
-        size: 9, color: [0.4, 0.4, 0.4], gap: 6,
-      });
-    }
-    w.space(6);
-    w.divider();
 
     if (student.passport_url) {
       await drawImageFromUrl(w.doc, w.page, student.passport_url, w.width - w.margin - 65, w.y - 75, 65, 75);
@@ -517,7 +565,6 @@ export class PdfService {
 
     const schoolId = student.school_id;
 
-    // Fetch school branding info
     const { data: dbSchool } = await db
       .from('schools')
       .select('logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, result_footer')
@@ -526,21 +573,13 @@ export class PdfService {
 
     const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
 
-    if (dbSchool?.logo_url) {
-      await drawImageFromUrl(w.doc, w.page, dbSchool.logo_url, w.margin, w.y - 50, 50, 50);
-      w.space(20);
-    }
-
-    w.line((data.school_name as string) ?? 'School', {
-      size: 18, bold: true, gap: 4, color: brandColor,
+    // ✅ Clean Header side-by-side
+    await drawSchoolHeader(w, {
+      name:          (data.school_name as string) ?? 'School',
+      motto:         dbSchool?.motto,
+      logo_url:      dbSchool?.logo_url,
+      primary_color: dbSchool?.primary_color,
     });
-    if (dbSchool?.motto) {
-      w.line(`"${dbSchool.motto}"`, {
-        size: 9, color: [0.4, 0.4, 0.4], gap: 6,
-      });
-    }
-    w.space(6);
-    w.divider();
 
     if (student.passport_url) {
       await drawImageFromUrl(w.doc, w.page, student.passport_url, w.width - w.margin - 65, w.y - 75, 65, 75);
