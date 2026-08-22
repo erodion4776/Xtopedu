@@ -1,46 +1,96 @@
 // ============================================================
-// SCHOOLBOT - MARKETING DEMO DATA
-// supabase/functions/_shared/bot/marketing/marketing.data.ts
+// SCHOOLBOT - MARKETING SANDBOX DEMO DATA
+// _shared/bot/marketing/marketing.data.ts
+// ✅ Live sandbox data for prospective school owners
+// ✅ Structured for PDF generation & live interaction
 // ============================================================
 
 export const DEMO_SCHOOL = {
+  id:       'demo-greenfield-academy',
   name:     'Greenfield Academy',
-  location: 'Lagos, Nigeria',
+  address:  '12, Greenfield Estate Way, Victoria Island, Lagos',
+  phone:    '+234 802 345 6789',
+  email:    'info@greenfieldacademy.ng',
+  motto:    'Knowledge, Discipline & Excellence',
+  principal: 'Dr. (Mrs.) Folashade Adeleke',
   students: 347,
+  classes:  12,
   staff:    28,
   parents:  412,
 };
 
-export const DEMO_ATTENDANCE = {
-  today: {
-    date: new Date().toLocaleDateString('en-NG', {
-      weekday: 'long',
-      day:     'numeric',
-      month:   'long',
-      year:    'numeric',
-    }),
-    present: 312,
-    absent:  23,
-    late:    12,
-    rate:    '90%',
+export const DEMO_STUDENTS = [
+  {
+    id:        'demo-std-1',
+    name:      'Chidi Okonkwo',
+    admNo:     'GA/2024/001',
+    class:     'JSS 3',
+    arm:       'A',
+    gender:    'Male',
+    parent:    'Mr. & Mrs. Okonkwo',
+    phone:     '+234 803 111 2233',
   },
+  {
+    id:        'demo-std-2',
+    name:      'Amara Adeleke',
+    admNo:     'GA/2024/002',
+    class:     'JSS 3',
+    arm:       'A',
+    gender:    'Female',
+    parent:    'Alhaji & Mrs. Adeleke',
+    phone:     '+234 805 222 3344',
+  },
+  {
+    id:        'demo-std-3',
+    name:      'Tunde Bello',
+    admNo:     'GA/2024/003',
+    class:     'JSS 3',
+    arm:       'A',
+    gender:    'Male',
+    parent:    'Chief & Mrs. Bello',
+    phone:     '+234 807 333 4455',
+  },
+  {
+    id:        'demo-std-4',
+    name:      'Fatima Musa',
+    admNo:     'GA/2024/004',
+    class:     'JSS 3',
+    arm:       'A',
+    gender:    'Female',
+    parent:    'Mallam & Mrs. Musa',
+    phone:     '+234 809 444 5566',
+  },
+];
+
+export const DEMO_RESULT_DATA = {
+  school_id:   'demo-greenfield-academy',
+  school_name: DEMO_SCHOOL.name,
+  term:        'Second Term',
+  academic_year: '2024/2025',
+  average:     81.4,
+  position:    '3rd out of 38 students',
+  total_score: 814,
+  class_count: 38,
   student: {
-    name:        'Chidi Okonkwo',
-    class:       'JSS 3A',
-    status:      'present',
-    arrivalTime: '07:45 AM',
-    termRate:    '94%',
-    present:     47,
-    absent:      2,
-    late:        1,
-    total:       50,
+    full_name:        'Chidi Okonkwo (Demo Student)',
+    admission_number: 'GA/2024/001',
+    class_name:       'JSS 3A',
+    gender:           'Male',
+    school_id:        'demo-greenfield-academy',
+    passport_url:     null,
   },
-  parentMessage:
-    `✅ *Attendance Update*\n\n` +
-    `👤 *Chidi Okonkwo* has been marked *Present* today.\n` +
-    `🏫 Class: JSS 3A\n` +
-    `⏰ Arrival: 07:45 AM\n\n` +
-    `_This is an automated message from Greenfield Academy_`,
+  subjects: [
+    { name: 'Mathematics',           ca_score: 9, ca2_score: 18, exam_score: 58, total: 85, grade: 'A', remark: 'EXCELLENT' },
+    { name: 'English Language',      ca_score: 8, ca2_score: 17, exam_score: 54, total: 79, grade: 'A', remark: 'EXCELLENT' },
+    { name: 'Basic Science',         ca_score: 8, ca2_score: 16, exam_score: 50, total: 74, grade: 'B', remark: 'VERY GOOD' },
+    { name: 'Social Studies',        ca_score: 7, ca2_score: 15, exam_score: 48, total: 70, grade: 'B', remark: 'VERY GOOD' },
+    { name: 'Business Studies',      ca_score: 8, ca2_score: 17, exam_score: 56, total: 81, grade: 'A', remark: 'EXCELLENT' },
+    { name: 'Computer Science',      ca_score: 10, ca2_score: 19, exam_score: 62, total: 91, grade: 'A', remark: 'EXCELLENT' },
+    { name: 'Agricultural Science',  ca_score: 7, ca2_score: 14, exam_score: 44, total: 65, grade: 'B', remark: 'VERY GOOD' },
+    { name: 'Civic Education',       ca_score: 8, ca2_score: 16, exam_score: 52, total: 76, grade: 'A', remark: 'EXCELLENT' },
+    { name: 'Cultural & Creative Art',ca_score: 9, ca2_score: 17, exam_score: 53, total: 79, grade: 'A', remark: 'EXCELLENT' },
+    { name: 'Literature in English', ca_score: 7, ca2_score: 15, exam_score: 47, total: 69, grade: 'B', remark: 'VERY GOOD' },
+  ],
 };
 
 export const DEMO_FEES = {
@@ -49,80 +99,60 @@ export const DEMO_FEES = {
   invoices: [
     {
       id:          'inv-001',
-      title:       'First Term School Fees 2024/2025',
-      amount:      150000,
-      amountPaid:  75000,
+      title:       'Second Term Tuition 2024/2025',
+      amount:      75000,
+      amountPaid:  0,
       balance:     75000,
-      status:      'Partial',
-      dueDate:     '2024-12-31',
+      status:      'Pending',
+      dueDate:     '2025-04-15',
     },
     {
       id:          'inv-002',
-      title:       'PTA Levy 2024/2025',
-      amount:      15000,
+      title:       'School Uniform & Sports Kit',
+      amount:      18000,
       amountPaid:  0,
-      balance:     15000,
+      balance:     18000,
       status:      'Pending',
-      dueDate:     '2024-11-30',
+      dueDate:     '2025-03-30',
+    },
+    {
+      id:          'inv-003',
+      title:       'PTA & Development Levy',
+      amount:      7000,
+      amountPaid:  7000,
+      balance:     0,
+      status:      'Paid',
+      dueDate:     '2025-01-31',
     },
   ],
-  totalOutstanding: 90000,
-  lastPayment: {
-    amount:    75000,
-    date:      '15 Oct 2024',
-    method:    'Bank Transfer',
-    reference: 'SCH-A1B2C3-D4E5',
-  },
+  totalOutstanding: 93000,
 };
 
 export const DEMO_PICKUP = {
-  student: 'Amara Adeleke',
+  student: 'Chidi Okonkwo',
+  class:   'JSS 3A',
   contacts: [
     {
-      name:         'Mr. Bayo Adeleke',
+      name:         'Mr. Emeka Okonkwo',
       relationship: 'Father',
-      phone:        '+234 802 345 6789',
+      phone:        '+234 803 111 2233',
     },
     {
-      name:         'Mrs. Funmi Adeleke',
+      name:         'Mrs. Ifeoma Okonkwo',
       relationship: 'Mother',
-      phone:        '+234 807 654 3210',
+      phone:        '+234 807 444 5566',
     },
     {
-      name:         'Uncle Seun Adeleke',
-      relationship: 'Uncle',
-      phone:        '+234 805 111 2222',
+      name:         'Uncle Somto Okonkwo',
+      relationship: 'Uncle (Authorized Driver)',
+      phone:        '+234 802 999 8877',
     },
   ],
   recentPickup: {
-    pickedBy: 'Mrs. Funmi Adeleke',
-    time:     '2:30 PM',
+    pickedBy: 'Mrs. Ifeoma Okonkwo (Mother)',
+    time:     '02:45 PM',
     date:     'Yesterday',
-  },
-};
-
-export const DEMO_REPORTS = {
-  feeCollection: {
-    totalBilled:      52350000,
-    totalCollected:   38640000,
-    outstanding:      13710000,
-    collectionRate:   '73.8%',
-    paidStudents:     281,
-    pendingStudents:  66,
-  },
-  attendance: {
-    thisWeek:   '88%',
-    thisMonth:  '91%',
-    thisTerm:   '89%',
-    bestClass:  'SS 2A (97%)',
-    worstClass: 'JSS 1B (79%)',
-  },
-  whatsappStats: {
-    messagesSent:    2847,
-    delivered:       2801,
-    read:            2654,
-    deliveryRate:    '98.4%',
-    parentsEngaged:  389,
+    loggedBy: 'Security Officer Musa',
   },
 };
 
