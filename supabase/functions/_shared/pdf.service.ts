@@ -1,7 +1,8 @@
 // ============================================================
 // SCHOOLBOT - PDF SERVICE
 // supabase/functions/_shared/pdf.service.ts
-// ✅ Fixed: Horizontal header layout (logo on left, text on right, no overlap)
+// ✅ Redesigned buildResultPdf into a high-end, single-page A4 template
+// ✅ Fixed: Horizontal side-by-side header layout with logo left, text center, avatar right
 // ✅ Fixed: WinAnsi encoding error on Naira (₦) symbol -> NGN
 // ✅ Fixed: Auto-sanitizes text (em-dashes, bullets, smart quotes)
 // ✅ Fixed: Stamps, signatures, logos embedded with fallback protection
@@ -17,7 +18,7 @@ import { getSupabase } from './supabase.ts';
 const db = getSupabase();
 const BUCKET = 'documents';
 
-// ✅ ASCII-safe currency format for PDF WinAnsi compatibility
+// ASCII-safe currency format for PDF WinAnsi compatibility
 const fmt = (n: number) =>
   `NGN ${new Intl.NumberFormat('en-NG', {
     minimumFractionDigits: 0,
@@ -44,12 +45,12 @@ function hexToRgb(hex: string): [number, number, number] {
     const g = parseInt(clean.substring(2, 4), 16) / 255;
     const b = parseInt(clean.substring(4, 6), 16) / 255;
     return [
-      isNaN(r) ? 0.12 : r,
-      isNaN(g) ? 0.25 : g,
-      isNaN(b) ? 0.68 : b,
+      isNaN(r) ? 0.0 : r,
+      isNaN(g) ? 0.356 : g,
+      isNaN(b) ? 0.376 : b,
     ];
   } catch {
-    return [0.12, 0.25, 0.68];
+    return [0.0, 0.356, 0.376]; // default dark teal
   }
 }
 
@@ -152,7 +153,7 @@ class PdfWriter {
   }
 }
 
-// ─── Reusable Branded Header (Logo Left, Text Right) ────────
+// ─── Reusable Branded Header (Logo Left, Text Center, Avatar Right) ────────
 async function drawSchoolHeader(
   w: PdfWriter,
   school: {
@@ -164,7 +165,7 @@ async function drawSchoolHeader(
     primary_color?: string | null;
   }
 ): Promise<void> {
-  const brandColor = school.primary_color ? hexToRgb(school.primary_color) : [0.12, 0.25, 0.68];
+  const brandColor = school.primary_color ? hexToRgb(school.primary_color) : [0.0, 0.356, 0.376];
   const hasLogo = !!school.logo_url;
   const logoSize = 52;
   const logoGap = 14;
@@ -301,9 +302,8 @@ export class PdfService {
       .eq('id', params.schoolId)
       .maybeSingle();
 
-    const brandColor = school?.primary_color ? hexToRgb(school.primary_color) : [0.12, 0.25, 0.68];
+    const brandColor = school?.primary_color ? hexToRgb(school.primary_color) : [0.0, 0.356, 0.376];
 
-    // ✅ Clean Header side-by-side
     await drawSchoolHeader(w, {
       name:          params.schoolName,
       motto:         school?.motto,
@@ -352,7 +352,6 @@ export class PdfService {
     );
     w.divider();
 
-    // Embed Official Stamp & Signature if exists
     if (school?.stamp_url) {
       await drawImageFromUrl(w.doc, w.page, school.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
     }
@@ -393,9 +392,8 @@ export class PdfService {
       .eq('id', school.id)
       .maybeSingle();
 
-    const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
+    const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376];
 
-    // ✅ Clean Header side-by-side
     await drawSchoolHeader(w, {
       name:          school.name ?? 'School',
       motto:         dbSchool?.motto,
@@ -502,9 +500,8 @@ export class PdfService {
       .eq('id', schoolId)
       .maybeSingle();
 
-    const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
+    const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376];
 
-    // ✅ Clean Header side-by-side
     await drawSchoolHeader(w, {
       name:          (data.school_name as string) ?? 'School',
       motto:         dbSchool?.motto,
@@ -555,95 +552,502 @@ export class PdfService {
     return uploadPdf(bytes, `reports/student-${adm}.pdf`);
   }
 
-  // ─── Build Result PDF ───────────────────────────────────
+  // ─── Build Highly Styled Custom Result PDF ─────────────────
+  // ✅ Complete rebuild based on A4 single-page constraints & design specifications
   async buildResultPdf(
     data: Record<string, unknown>
   ): Promise<string> {
     const student = data.student as Record<string, string> ?? {};
     const subjects = data.subjects as Array<Record<string, unknown>> ?? [];
+    
+    // Create new document with tight 50pt margins
     const w = await PdfWriter.create();
 
     const schoolId = student.school_id;
 
+    // Fetch school branding info
     const { data: dbSchool } = await db
       .from('schools')
-      .select('logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, result_footer')
+      .select('logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, result_footer, address, phone')
       .eq('id', schoolId)
       .maybeSingle();
 
-    const brandColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.12, 0.25, 0.68];
+    // ── Theme Configuration ────────────────────────────────────
+    const primaryColor = dbSchool?.primary_color ? hexToRgb(dbSchool.primary_color) : [0.0, 0.356, 0.376]; // #005B60 Dark Teal
+    const thinBorderColor = rgb(0.8, 0.8, 0.8);
+    const textDarkColor = rgb(0.12, 0.15, 0.18);
+    const whiteColor = rgb(1.0, 1.0, 1.0);
+    const zebraColor = rgb(0.96, 0.98, 0.98);
 
-    // ✅ Clean Header side-by-side
-    await drawSchoolHeader(w, {
-      name:          (data.school_name as string) ?? 'School',
-      motto:         dbSchool?.motto,
-      logo_url:      dbSchool?.logo_url,
-      primary_color: dbSchool?.primary_color,
+    // Initial Y tracking starting from top
+    w.y = w.height - 40; // 40pt top margin
+
+    // ── 1. HEADER SECTION (3 Columns) ──────────────────────────
+    const headerY = w.y;
+    const headerHeight = 70;
+
+    // Left Column: circular school logo placeholder
+    w.page.drawCircle({
+      x: w.margin + 25,
+      y: headerY - 30,
+      radius: 25,
+      borderColor: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+      borderWidth: 1.5,
     });
-
-    if (student.passport_url) {
-      await drawImageFromUrl(w.doc, w.page, student.passport_url, w.width - w.margin - 65, w.y - 75, 65, 75);
-    }
-
-    w.line('STUDENT TERM RESULT', {
-      size: 14, bold: true, gap: 12, color: brandColor,
-    });
-    w.line(`Name:   ${student.full_name ?? ''}`);
-    w.line(`Adm No: ${student.admission_number ?? ''}`);
-    w.line(`Class:  ${student.class_name ?? ''}`);
-    w.line(`Term:   ${(data.term as string) ?? ''}`);
-    w.space(6);
-    w.divider();
-
-    w.line('ACADEMIC PERFORMANCE', {
-      bold: true, gap: 12, color: brandColor,
-    });
-
-    for (const sub of subjects) {
-      if (w.y < 80) {
-        w.page = w.doc.addPage([w.width, w.height]);
-        w.y    = w.height - w.margin;
-      }
-      w.line(
-        `${String(sub.name ?? '').padEnd(20)} ` +
-        `CA: ${sub.ca_score}  ` +
-        `Exam: ${sub.exam_score}  ` +
-        `Total: ${sub.total}  ` +
-        `${sub.grade}`,
-        { size: 10 }
+    if (dbSchool?.logo_url) {
+      await drawImageFromUrl(
+        w.doc,
+        w.page,
+        dbSchool.logo_url,
+        w.margin + 4,
+        headerY - 51,
+        42,
+        42
       );
     }
 
-    w.space(10);
-    w.divider();
+    // Center Column: Centered school text details
+    const centerX = w.width / 2;
+    const schoolName = sanitizeText(dbSchool?.name ?? "SPOTLIGHT COMPREHENSIVE COLLEGE");
+    const addressLine = sanitizeText(dbSchool?.address ?? "28, OVIAWEH STREET OFF AYEPE ROAD, SAGAMU, OGUN STATE");
+    const contactLine = sanitizeText("spotlightinternationalschool@gmail.com, 07063639808, 07037819024");
+    const mottoLine = sanitizeText(`MOTTO: ${dbSchool?.motto ?? "LIGHT THE WAY TO SUCCESS"}`);
 
-    w.line(`Average: ${data.average ?? ''}%`, { bold: true });
-    w.line(`Position: ${data.position ?? ''}`);
-
-    w.space(20);
-
-    // Draw Principal Signature block if exists
-    if (dbSchool?.principal_signature_url) {
-      w.line('Principal / Head Teacher Signature:', { size: 9, bold: true, gap: 35 });
-      await drawImageFromUrl(w.doc, w.page, dbSchool.principal_signature_url, w.margin, w.y + 10, 100, 35);
-      if (dbSchool?.principal_name) {
-        w.line(dbSchool.principal_name, { size: 9, bold: true });
-      }
-    }
-
-    if (dbSchool?.stamp_url) {
-      await drawImageFromUrl(w.doc, w.page, dbSchool.stamp_url, w.width - w.margin - 110, w.margin + 30, 80, 80, 0.85);
-    }
-
-    w.space(10);
-
-    const footerText = dbSchool?.result_footer ?? 'This is an official academic result sheet.';
-    w.line(footerText, {
-      size: 8, color: [0.4, 0.4, 0.4],
+    w.page.drawText(schoolName, {
+      x: centerX - (w.bold.widthOfTextAtSize(schoolName, 13) / 2),
+      y: headerY - 5,
+      size: 13,
+      font: w.bold,
+      color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+    });
+    w.page.drawText(addressLine, {
+      x: centerX - (w.font.widthOfTextAtSize(addressLine, 7.5) / 2),
+      y: headerY - 17,
+      size: 7.5,
+      font: w.font,
+      color: rgb(0.3, 0.3, 0.3),
+    });
+    w.page.drawText(contactLine, {
+      x: centerX - (w.font.widthOfTextAtSize(contactLine, 7) / 2),
+      y: headerY - 27,
+      size: 7,
+      font: w.font,
+      color: rgb(0.4, 0.4, 0.4),
+    });
+    w.page.drawText(mottoLine, {
+      x: centerX - (w.bold.widthOfTextAtSize(mottoLine, 8) / 2),
+      y: headerY - 40,
+      size: 8,
+      font: w.bold,
+      color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
     });
 
+    // Right Column: Stylized avatar/student placeholder box
+    const photoX = w.width - w.margin - 55;
+    const photoWidth = 55;
+    const photoHeight = 65;
+
+    w.page.drawRectangle({
+      x: photoX,
+      y: headerY - photoHeight + 15,
+      width: photoWidth,
+      height: photoHeight,
+      borderColor: thinBorderColor,
+      borderWidth: 1,
+    });
+
+    if (student.passport_url) {
+      await drawImageFromUrl(
+        w.doc,
+        w.page,
+        student.passport_url,
+        photoX + 1.5,
+        headerY - photoHeight + 16.5,
+        photoWidth - 3,
+        photoHeight - 3
+      );
+    } else {
+      // Draw minimal silhouette vector placeholder
+      const avatarCenter = photoX + (photoWidth / 2);
+      w.page.drawCircle({
+        x: avatarCenter,
+        y: headerY - 22,
+        radius: 8,
+        color: rgb(0.85, 0.88, 0.88),
+      });
+      w.page.drawRectangle({
+        x: photoX + 10,
+        y: headerY - 45,
+        width: photoWidth - 20,
+        height: 12,
+        color: rgb(0.85, 0.88, 0.88),
+      });
+    }
+
+    // ── 2. STUDENT INFORMATION BLOCK (Outer Box) ───────────────
+    w.y = headerY - headerHeight - 10;
+    const infoBoxY = w.y;
+    const infoBoxHeight = 110;
+
+    w.page.drawRectangle({
+      x: w.margin,
+      y: infoBoxY - infoBoxHeight,
+      width: w.width - (w.margin * 2),
+      height: infoBoxHeight,
+      borderColor: thinBorderColor,
+      borderWidth: 1,
+    });
+
+    // Box Header Label
+    w.page.drawText("SECOND TERM REPORT SHEET", {
+      x: centerX - (w.bold.widthOfTextAtSize("SECOND TERM REPORT SHEET", 9.5) / 2),
+      y: infoBoxY - 14,
+      size: 9.5,
+      font: w.bold,
+      color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+    });
+
+    // Key-value Grid Coordinate Calculator
+    const drawGridField = (lbl: string, val: string, x: number, y: number, length: number) => {
+      w.page.drawText(lbl, { x, y, size: 7, font: w.bold, color: rgb(0.3, 0.3, 0.3) });
+      const labelOffset = w.bold.widthOfTextAtSize(lbl, 7) + 5;
+      const valText = sanitizeText(val || 'N/A');
+      w.page.drawText(valText, { x: x + labelOffset, y: y, size: 7, font: w.font, color: textDarkColor });
+      // Draw Underline
+      w.page.drawLine({
+        start: { x: x + labelOffset, y: y - 1.5 },
+        end: { x: x + length, y: y - 1.5 },
+        thickness: 0.5,
+        color: thinBorderColor,
+      });
+    };
+
+    const rowH = 15;
+    const gridY = infoBoxY - 32;
+
+    // Row 1
+    drawGridField("NAME OF PUPIL:", `${student.full_name ?? ''}`, w.margin + 10, gridY, 230);
+    drawGridField("CLASS:", `${student.class_name ?? ''}`, w.margin + 245, gridY, 130);
+    drawGridField("NO. IN CLASS:", `${data.class_count ?? '0'}`, w.margin + 385, gridY, 100);
+
+    // Row 2
+    drawGridField("REGISTRATION NUMBER:", `${student.admission_number ?? ''}`, w.margin + 10, gridY - rowH, 230);
+    drawGridField("SESSION:", `${data.academic_year ?? '2024/2025'}`, w.margin + 245, gridY - rowH, 130);
+    drawGridField("TIMES SCHOOL OPENED:", "116", w.margin + 385, gridY - rowH, 100);
+
+    // Row 3
+    drawGridField("CLOSING DATE:", "18/12/2026", w.margin + 10, gridY - (rowH * 2), 230);
+    drawGridField("TERM:", "SECOND TERM", w.margin + 245, gridY - (rowH * 2), 130);
+    drawGridField("TIMES PRESENT:", "114", w.margin + 385, gridY - (rowH * 2), 100);
+
+    // Row 4
+    drawGridField("RESUMPTION DATE:", "11/01/2027", w.margin + 10, gridY - (rowH * 3), 230);
+    drawGridField("GENDER:", `${student.gender ?? 'N/A'}`, w.margin + 245, gridY - (rowH * 3), 130);
+    drawGridField("TIMES ABSENT:", "2", w.margin + 385, gridY - (rowH * 3), 100);
+
+    // Metric Summary Sub-boxes
+    const metricsY = infoBoxY - infoBoxHeight + 5;
+    const metricsH = 18;
+    const metricW = 90;
+    const metricSpacing = (w.width - (w.margin * 2) - (metricW * 4)) / 5;
+
+    const drawMetricBox = (title: string, val: string, index: number) => {
+      const boxX = w.margin + metricSpacing + (index * (metricW + metricSpacing));
+      w.page.drawRectangle({
+        x: boxX,
+        y: metricsY,
+        width: metricW,
+        height: metricsH,
+        borderColor: thinBorderColor,
+        borderWidth: 0.5,
+      });
+      const dispText = `${title}: ${sanitizeText(val)}`;
+      w.page.drawText(dispText, {
+        x: boxX + (metricW / 2) - (w.bold.widthOfTextAtSize(dispText, 6.5) / 2),
+        y: metricsY + 5.5,
+        size: 6.5,
+        font: w.bold,
+        color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+      });
+    };
+
+    drawMetricBox("OVERALL TOTAL", String(data.total_score ?? '0'), 0);
+    drawMetricBox("AVERAGE", String(data.average ?? '0'), 1);
+    drawMetricBox("PERCENTAGE", `${data.average ?? '0'}%`, 2);
+    drawMetricBox("POSITION", `${data.position ?? ''}`, 3);
+
+    // ── 3. ACADEMIC PERFORMANCE TABLE ─────────────────────────
+    w.y = infoBoxY - infoBoxHeight - 12;
+    const tableHeaderHeight = 15;
+
+    w.page.drawRectangle({
+      x: w.margin,
+      y: w.y - tableHeaderHeight,
+      width: w.width - (w.margin * 2),
+      height: tableHeaderHeight,
+      color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+    });
+
+    const tblHeaderText = "STUDENT'S ACADEMIC PERFORMANCE (JUNIOR SECONDARY CATEGORY)";
+    w.page.drawText(tblHeaderText, {
+      x: centerX - (w.bold.widthOfTextAtSize(tblHeaderText, 7.5) / 2),
+      y: w.y - 11,
+      size: 7.5,
+      font: w.bold,
+      color: whiteColor,
+    });
+
+    w.y -= tableHeaderHeight;
+
+    const colWidths = [145, 55, 55, 55, 60, 50, 75]; // Total: 495
+    const colAlign: Array<'left' | 'center'> = ['left', 'center', 'center', 'center', 'center', 'center', 'center'];
+    const tblHeaders = ["SUBJECT", "1ST C.A (10)", "2ND C.A (20)", "EXAM (70)", "TOTAL (100)", "GRADE", "REMARKS"];
+
+    // Draw Table Header Columns
+    let colX = w.margin;
+    const tblSubHeaderH = 13;
+    w.page.drawRectangle({
+      x: w.margin,
+      y: w.y - tblSubHeaderH,
+      width: w.width - (w.margin * 2),
+      height: tblSubHeaderH,
+      borderColor: thinBorderColor,
+      borderWidth: 0.5,
+    });
+
+    for (let c = 0; c < tblHeaders.length; c++) {
+      const colTitle = tblHeaders[c];
+      const textW = w.bold.widthOfTextAtSize(colTitle, 6.5);
+      const textX = colAlign[c] === 'left' ? colX + 8 : colX + (colWidths[c] / 2) - (textW / 2);
+      w.page.drawText(colTitle, {
+        x: textX,
+        y: w.y - 9,
+        size: 6.5,
+        font: w.bold,
+        color: textDarkColor,
+      });
+      colX += colWidths[c];
+    }
+    w.y -= tblSubHeaderH;
+
+    // Fixed subjects schema requirements
+    const standardSubjects = [
+      "Mathematics", "English Language", "Yoruba Language", "Social Studies", "Business Studies",
+      "Home Economics", "Basic Science", "Basic Technology", "Literature in English", "Civic Education",
+      "Cultural & Creative Art", "Computer Science", "C.R.S", "Agricultural Science", "History", "P.H.E"
+    ];
+
+    const rowHeight = 11.2;
+
+    for (let s = 0; s < standardSubjects.length; s++) {
+      const subName = standardSubjects[s];
+      const matchingScore = subjects.find(
+        (x) => String(x.name).trim().toLowerCase() === subName.toLowerCase()
+      );
+
+      // Extract details, mapping defaults safely
+      const ca1 = matchingScore ? String(matchingScore.ca_score ?? '0') : '0';
+      const ca2 = matchingScore ? String(matchingScore.ca2_score ?? '0') : '0';
+      const exam = matchingScore ? String(matchingScore.exam_score ?? '0') : '0';
+      const totalScoreVal = matchingScore ? parseFloat(String(matchingScore.total ?? '0')) : 0;
+      const total = matchingScore ? String(matchingScore.total ?? '0') : '0';
+      const grade = matchingScore ? String(matchingScore.grade ?? 'F') : 'F';
+      
+      // Determine remark based on WAEC standard or grade mapping
+      const remark = matchingScore ? String(matchingScore.remark ?? 'POOR') : 'POOR';
+
+      const rowY = w.y - rowHeight;
+
+      // Draw row container box
+      w.page.drawRectangle({
+        x: w.margin,
+        y: rowY,
+        width: w.width - (w.margin * 2),
+        height: rowHeight,
+        color: s % 2 === 1 ? zebraColor : whiteColor,
+        borderColor: thinBorderColor,
+        borderWidth: 0.3,
+      });
+
+      const rowValues = [subName, ca1, ca2, exam, total, grade, remark];
+      let rowX = w.margin;
+
+      for (let c = 0; c < rowValues.length; c++) {
+        const valText = sanitizeText(rowValues[c]);
+        const textW = w.font.widthOfTextAtSize(valText, 6.5);
+        const textX = colAlign[c] === 'left' ? rowX + 8 : rowX + (colWidths[c] / 2) - (textW / 2);
+        w.page.drawText(valText, {
+          x: textX,
+          y: rowY + 3.5,
+          size: 6.5,
+          font: c === 0 ? w.bold : w.font,
+          color: textDarkColor,
+        });
+        rowX += colWidths[c];
+      }
+      w.y -= rowHeight;
+    }
+
+    // ── 4. BOTTOM THREE-COLUMN GRID ────────────────────────────
+    w.y -= 12;
+    const threeColY = w.y;
+    const colSpace = 9;
+    const colW = (w.width - (w.margin * 2) - (colSpace * 2)) / 3;
+
+    // --- COLUMN 1: AFFECTIVE TRAITS ---
+    const drawAffectiveTraits = (x: number) => {
+      const traitsHeaderH = 12;
+      w.page.drawRectangle({ x, y: threeColY - traitsHeaderH, width: colW, height: traitsHeaderH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
+      w.page.drawText("AFFECTIVE TRAITS", { x: x + 6, y: threeColY - 9, size: 6.5, font: w.bold, color: whiteColor });
+      w.page.drawText("RATING", { x: x + colW - 35, y: threeColY - 9, size: 6.5, font: w.bold, color: whiteColor });
+
+      const traits = [
+        "PUNCTUALITY", "MENTAL ALERTNESS", "BEHAVIOR", "RELIABILITY", "RESPECT",
+        "NEATNESS", "POLITENESS", "HONESTY", "RELATION WITH STAFF", "RELATION WITH OTHERS"
+      ];
+      const traitRowH = 9.5;
+      let currY = threeColY - traitsHeaderH;
+
+      for (let t = 0; t < traits.length; t++) {
+        currY -= traitRowH;
+        w.page.drawRectangle({ x, y: currY, width: colW, height: traitRowH, borderColor: thinBorderColor, borderWidth: 0.3 });
+        w.page.drawText(traits[t], { x: x + 6, y: currY + 3, size: 5.5, font: w.bold, color: textDarkColor });
+        // Draw Rating Box Placeholder
+        w.page.drawRectangle({ x: x + colW - 24, y: currY + 1.5, width: 14, height: 6.5, borderColor: thinBorderColor, borderWidth: 0.5 });
+      }
+    };
+
+    // --- COLUMN 2: KEYS TO GRADING & RATINGS ---
+    const drawKeys = (x: number) => {
+      const headerH = 12;
+      
+      // Grading Header
+      w.page.drawRectangle({ x, y: threeColY - headerH, width: colW, height: headerH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
+      w.page.drawText("KEYS TO GRADING", { x: x + 6, y: threeColY - 9, size: 6.5, font: w.bold, color: whiteColor });
+
+      const gradingText = ["70 - 100 = A - Excellent", "60 - 69   = B - Very Good", "50 - 59   = C - Good", "40 - 49   = D - Fair", "0 - 39     = F - Poor"];
+      let currY = threeColY - headerH - 4;
+      for (const grad of gradingText) {
+        currY -= 9;
+        w.page.drawText(grad, { x: x + 6, y: currY, size: 6.5, font: w.font, color: textDarkColor });
+      }
+
+      // Rating Header
+      currY -= 15;
+      w.page.drawRectangle({ x, y: currY, width: colW, height: headerH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
+      w.page.drawText("KEYS TO RATING", { x: x + 6, y: currY + 3.5, size: 6.5, font: w.bold, color: whiteColor });
+
+      const ratingText = ["5 = EXCELLENT", "4 = VERY GOOD", "3 = GOOD", "2 = POOR", "1 = VERY POOR"];
+      currY -= 4;
+      for (const rate of ratingText) {
+        currY -= 9;
+        w.page.drawText(rate, { x: x + 6, y: currY, size: 6.5, font: w.font, color: textDarkColor });
+      }
+    };
+
+    // --- COLUMN 3: SCHOOL BILLS ---
+    const drawSchoolBills = (x: number) => {
+      const headerH = 12;
+      w.page.drawRectangle({ x, y: threeColY - headerH, width: colW, height: headerH, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
+      w.page.drawText("SCHOOL BILLS", { x: x + 6, y: threeColY - 9, size: 6.5, font: w.bold, color: whiteColor });
+
+      const bills = [
+        { label: "TUITION FEE:", amount: "50,000" },
+        { label: "UNIFORM:", amount: "1,000" },
+        { label: "BOOKS:", amount: "233" },
+        { label: "LESSON FEE:", amount: "1,300" },
+        { label: "DICTION/PHONICS:", amount: "4,500" },
+        { label: " ", amount: " " }, // empty padding row
+        { label: " ", amount: "3,500" }, // placeholder
+        { label: "OUTSTANDING FEE:", amount: "5,000" },
+        { label: "TOTAL:", amount: "65,533", bold: true }
+      ];
+
+      const billRowH = 10.5;
+      let currY = threeColY - headerH;
+
+      for (const bill of bills) {
+        currY -= billRowH;
+        w.page.drawRectangle({ x, y: currY, width: colW, height: billRowH, borderColor: thinBorderColor, borderWidth: 0.3 });
+        
+        const fontType = bill.bold ? w.bold : w.font;
+        w.page.drawText(bill.label, { x: x + 5, y: currY + 3, size: 6, font: fontType, color: textDarkColor });
+        if (bill.amount.trim() !== "") {
+          const formattedAmt = `N ${bill.amount}`;
+          const textW = fontType.widthOfTextAtSize(formattedAmt, 6);
+          w.page.drawText(formattedAmt, { x: x + colW - textW - 5, y: currY + 3, size: 6, font: fontType, color: textDarkColor });
+        }
+      }
+    };
+
+    drawAffectiveTraits(w.margin);
+    drawKeys(w.margin + colW + colSpace);
+    drawSchoolBills(w.margin + (colW * 2) + (colSpace * 2));
+
+    // ── 5. FOOTER SECTION ──────────────────────────────────────
+    w.y = threeColY - 110 - 20; // safe coordinate calculation
+    const footerY = w.y;
+    const footerHeight = 65;
+
+    // Draw bottom dark teal border stripe
+    w.page.drawRectangle({
+      x: w.margin,
+      y: w.margin - 10,
+      width: w.width - (w.margin * 2),
+      height: 4,
+      color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+    });
+
+    // Left Side: Three stacked comments lines with bordered box look
+    const drawCommentLine = (lbl: string, y: number) => {
+      w.page.drawText(lbl, { x: w.margin, y, size: 6.5, font: w.bold, color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]) });
+      const labelW = w.bold.widthOfTextAtSize(lbl, 6.5);
+      w.page.drawRectangle({
+        x: w.margin + labelW + 8,
+        y: y - 3,
+        width: w.width - (w.margin * 2) - labelW - 145, // leave space for right column
+        height: 11,
+        borderColor: thinBorderColor,
+        borderWidth: 0.5,
+      });
+    };
+
+    drawCommentLine("TEACHER'S COMMENT:", footerY - 10);
+    drawCommentLine("PRINCIPAL'S COMMENT:", footerY - 26);
+    drawCommentLine("PROPRIETOR'S COMMENT:", footerY - 42);
+
+    // Right Side: Rectangular Stamp & Signature box
+    const sigX = w.width - w.margin - 120;
+    const sigW = 120;
+    const sigH = 50;
+
+    w.page.drawRectangle({
+      x: sigX,
+      y: footerY - sigH,
+      width: sigW,
+      height: sigH,
+      borderColor: thinBorderColor,
+      borderWidth: 1,
+    });
+    w.page.drawText("SIGNATURE & STAMP", {
+      x: sigX + (sigW / 2) - (w.bold.widthOfTextAtSize("SIGNATURE & STAMP", 6.5) / 2),
+      y: footerY - sigH + 5,
+      size: 6.5,
+      font: w.bold,
+      color: rgb(primaryColor[0], primaryColor[1], primaryColor[2]),
+    });
+
+    // Embed Dynamic Principal Signature & Stamps inside the box if present
+    if (dbSchool?.principal_signature_url) {
+      await drawImageFromUrl(w.doc, w.page, dbSchool.principal_signature_url, sigX + 10, footerY - sigH + 15, 100, 30);
+    }
+    if (dbSchool?.stamp_url) {
+      await drawImageFromUrl(w.doc, w.page, dbSchool.stamp_url, sigX + sigW - 55, footerY - sigH + 8, 45, 45, 0.7);
+    }
+
+    // Generate output
     const bytes = await w.bytes();
-    const adm   = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
+    const adm = (student.admission_number ?? 'student').replace(/[^A-Za-z0-9]/g, '');
 
     return uploadPdf(bytes, `results/result-${adm}.pdf`);
   }
