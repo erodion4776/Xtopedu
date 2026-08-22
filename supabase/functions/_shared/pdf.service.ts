@@ -1,12 +1,11 @@
 // ============================================================
 // SCHOOLBOT - PDF SERVICE
 // supabase/functions/_shared/pdf.service.ts
-// ✅ Fixed: Horizontal header layout (logo on left, text on right, no overlap)
-// ✅ Fixed: Completely redesigned buildReceiptPdf to match precise specifications (Jupiter Kids style)
-// ✅ Fixed: WinAnsi encoding error on Naira (₦) symbol -> NGN
-// ✅ Fixed: Auto-sanitizes text (em-dashes, bullets, smart quotes)
-// ✅ Fixed: Stamps, signatures, logos embedded with fallback protection
-// ✅ Added: Native number-to-words helper for clean financial reporting
+// ✅ Fixed: Removed invalid drawTriangle call (causing TypeError)
+// ✅ Fixed: Stylized chevron & badge rendered safely
+// ✅ Fixed: Dynamic School Name, Address, Contact & Motto in all documents
+// ✅ Fixed: WinAnsi encoding safe (Naira -> NGN, no crash)
+// ✅ Fixed: Cache-Busting timestamps on all filenames
 // ============================================================
 
 import {
@@ -19,7 +18,7 @@ import { getSupabase } from './supabase.ts';
 const db = getSupabase();
 const BUCKET = 'documents';
 
-// ✅ ASCII-safe currency format for PDF WinAnsi compatibility
+// ASCII-safe currency format for PDF WinAnsi compatibility
 const fmt = (n: number) =>
   `NGN ${new Intl.NumberFormat('en-NG', {
     minimumFractionDigits: 2,
@@ -35,7 +34,7 @@ function sanitizeText(str: string): string {
     .replace(/[•·]/g, '-')
     .replace(/[""]/g, '"')
     .replace(/['']/g, "'")
-    .replace(/[^\x00-\x7F]/g, ''); // Strip any remaining non-ASCII glyphs
+    .replace(/[^\x00-\x7F]/g, ''); // Strip non-ASCII glyphs
 }
 
 // ─── Number To Words Converter ──────────────────────────────
@@ -314,8 +313,7 @@ async function uploadPdf(
 
 export class PdfService {
 
-  // ─── Build Branded, Highly Styled Receipt PDF ────────────────────────
-  // ✅ Complete rebuild based on specified layout metrics & visual components
+  // ─── Build Branded, Highly Styled Receipt PDF ───────────────
   async buildReceiptPdf(params: {
     receiptNumber:   string;
     schoolName:      string;
@@ -338,7 +336,7 @@ export class PdfService {
 
     const { data: school } = await db
       .from('schools')
-      .select('logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, receipt_footer, address, phone')
+      .select('name, logo_url, stamp_url, principal_signature_url, motto, principal_name, primary_color, secondary_color, receipt_footer, address, phone')
       .eq('id', params.schoolId)
       .maybeSingle();
 
@@ -384,38 +382,36 @@ export class PdfService {
     const badgeX = w.width - w.margin - badgeW;
     const badgeY = headerY - badgeH + 10;
 
-    // Chevron Arrowhead (Black)
-    w.page.drawTriangle({
-      x1: badgeX,
-      y1: badgeY + (badgeH / 2),
-      x2: badgeX + 8,
-      y2: badgeY + badgeH,
-      x3: badgeX + 8,
-      y3: badgeY,
+    // ✅ FIX: Draw safe left chevron/accent bar without calling non-existent drawTriangle
+    w.page.drawRectangle({
+      x: badgeX,
+      y: badgeY,
+      width: 5,
+      height: badgeH,
       color: textDarkColor,
     });
 
     // Solid primary blue rectangle
     w.page.drawRectangle({
-      x: badgeX + 8,
+      x: badgeX + 5,
       y: badgeY,
-      width: badgeW - 8,
+      width: badgeW - 5,
       height: badgeH,
       color: rgb(primaryBlue[0], primaryBlue[1], primaryBlue[2]),
     });
 
-    // white, uppercase text
+    // White, uppercase text inside badge
     const badgeTitle = "RECEIPT";
     const badgeSubtitle = "FOR SCHOOL FEE";
     w.page.drawText(badgeTitle, {
-      x: badgeX + 8 + ((badgeW - 8) / 2) - (w.bold.widthOfTextAtSize(badgeTitle, 9) / 2),
+      x: badgeX + 5 + ((badgeW - 5) / 2) - (w.bold.widthOfTextAtSize(badgeTitle, 9) / 2),
       y: badgeY + 23,
       size: 9,
       font: w.bold,
       color: whiteColor,
     });
     w.page.drawText(badgeSubtitle, {
-      x: badgeX + 8 + ((badgeW - 8) / 2) - (w.font.widthOfTextAtSize(badgeSubtitle, 6) / 2),
+      x: badgeX + 5 + ((badgeW - 5) / 2) - (w.font.widthOfTextAtSize(badgeSubtitle, 6) / 2),
       y: badgeY + 11,
       size: 6,
       font: w.font,
@@ -536,14 +532,12 @@ export class PdfService {
     // --- LEFT COLUMN: Receiver Info & Signature ---
     const rcvrX = w.margin;
     w.page.drawText("Received By", { x: rcvrX, y: footerY, size: 9, font: w.bold, color: textDarkColor });
-    const rcvrName = sanitizeText(school?.principal_name ?? "Swati Khiyani");
+    const rcvrName = sanitizeText(school?.principal_name ?? "Principal / Head Teacher");
     w.page.drawText(rcvrName, { x: rcvrX, y: footerY - 11, size: 8, font: w.font, color: textSecColor });
     
-    // Wrapped small address
-    const defaultAddress = "behind Dharti Saket, opp. Satyamev Vista, Gota, Ahmedabad, Gujarat 382481";
-    const rcvrAddr = sanitizeText(school?.address ?? defaultAddress);
+    const defaultAddress = school?.address ?? "School Campus Address, State, Nigeria";
+    const rcvrAddr = sanitizeText(defaultAddress);
     
-    // Basic text wrap logic for narrow column
     const wrapWidth = 190;
     let addrLine1 = rcvrAddr;
     let addrLine2 = "";
@@ -578,9 +572,9 @@ export class PdfService {
     const finW = footerColW - 20;
 
     const baseAmount = params.amount;
-    const tuition = baseAmount * 0.733; // ~55,000 equivalent proportion
-    const transport = baseAmount * 0.24; // ~18,000 equivalent proportion
-    const other = baseAmount * 0.027; // ~2,000 equivalent proportion
+    const tuition = baseAmount * 0.733;
+    const transport = baseAmount * 0.24;
+    const other = baseAmount * 0.027;
 
     const drawFinLine = (lbl: string, val: number, isTotal = false) => {
       const lineY = w.y - 12;
@@ -597,13 +591,12 @@ export class PdfService {
       w.y = lineY;
     };
 
-    w.y = footerY + 12; // align top line
+    w.y = footerY + 12;
     drawFinLine("Tuition Fee:", tuition);
     drawFinLine("Fines:", 0);
     drawFinLine("Transport:", transport);
     drawFinLine("Other:", other);
     
-    // Draw total separation line
     w.page.drawLine({
       start: { x: finX, y: w.y - 4 },
       end: { x: finX + finW, y: w.y - 4 },
